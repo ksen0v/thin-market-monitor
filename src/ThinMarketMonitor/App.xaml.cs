@@ -21,7 +21,7 @@ public partial class App : Application
         {
             using var test = new MainWindow();
             test.Show();
-            test.UpdateLayout();
+            test.SmokeTestLayout();
             File.WriteAllText(marker, $"Thin Market Monitor {Updater.Current}");
             test.Close();
             Shutdown();

@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -9,14 +10,12 @@ namespace ThinMarketMonitor;
 internal sealed class ChartCell : Border
 {
     private readonly ExchangeApi api;
-    private readonly Func<Market?> choose;
-    private readonly Action save;
     private readonly Func<long> nextOrder;
     private readonly CandlePlot plot = new();
     private readonly TextBlock label = new() { TextTrimming = TextTrimming.CharacterEllipsis, FontWeight = FontWeights.SemiBold };
     private readonly TextBlock detail = new() { TextTrimming = TextTrimming.CharacterEllipsis, FontSize = 11 };
-    private readonly Button pin = new() { Padding = new Thickness(6, 2, 6, 2) };
-    private readonly Button clear = new() { Content = "×", Padding = new Thickness(6, 2, 6, 2), ToolTip = "Очистить ячейку" };
+    private readonly Button pin = Terminal.IconButton("pin-off", "Закрепить график");
+    private readonly Button clear = Terminal.IconButton("close", "Очистить ячейку");
     private CancellationTokenSource? refresh;
     private Market? market;
     private bool active;
@@ -28,42 +27,55 @@ internal sealed class ChartCell : Border
         set { choice = value; UpdateHeader(); }
     }
     public long Order => Choice?.Order ?? 0;
+    public double PlotHeight { set => plot.Height = value; }
 
-    public ChartCell(ExchangeApi api, Func<Market?> choose, Action save, Func<long> nextOrder)
+    public ChartCell(ExchangeApi api, int number, Action choose, Action save, Func<long> nextOrder)
     {
         this.api = api;
-        this.choose = choose;
-        this.save = save;
         this.nextOrder = nextOrder;
-        Margin = new Thickness(3);
-        Padding = new Thickness(8, 6, 8, 5);
-        Background = (Brush)Application.Current.FindResource("Surface");
-        BorderBrush = (Brush)Application.Current.FindResource("Outline");
-        BorderThickness = new Thickness(1);
-        detail.Foreground = (Brush)Application.Current.FindResource("Muted");
-        var layout = new DockPanel();
+        Margin = new Thickness(0, 0, 1, 1);
+        Padding = new Thickness(0, 0, 0, 4);
+        Background = Terminal.Brush("Surface");
+        detail.Foreground = Terminal.Brush("Muted");
+        detail.MinHeight = 15;
+        detail.Margin = new Thickness(7, 4, 7, 0);
+        var layout = new StackPanel();
         Child = layout;
-        var header = new DockPanel { Margin = new Thickness(0, 0, 0, 4) };
+        var headerFrame = Terminal.Rule(new Thickness(0, 0, 0, 1));
+        var header = new DockPanel { Margin = new Thickness(7, 2, 7, 2), MinHeight = 24 };
+        headerFrame.Child = header;
         var actions = new StackPanel { Orientation = Orientation.Horizontal };
-        var select = new Button { Content = "Выбрать", Padding = new Thickness(6, 2, 6, 2) };
-        var home = new Button { Content = "↦", Padding = new Thickness(6, 2, 6, 2), ToolTip = "К последним свечам" };
-        select.Click += (_, _) => { if (this.choose() is { } picked) { Assign(picked, true); this.save(); } };
+        var select = new Button
+        {
+            Content = "Выбрать", Style = Terminal.Style("IconButton"), Padding = new Thickness(6, 1, 6, 1),
+            Background = Terminal.Brush("Control"), BorderBrush = Terminal.Brush("Outline"), FontSize = 11
+        };
+        AutomationProperties.SetName(select, $"Выбрать инструмент · ячейка {number}");
+        var home = Terminal.IconButton("latest", "К последним свечам");
+        select.Click += (_, _) => choose();
         home.Click += (_, _) => plot.Reset();
-        pin.Click += (_, _) => { SetPinned(Choice?.Pinned != true); this.save(); };
-        clear.Click += (_, _) => { Choice = null; market = null; ResetFeed(); this.save(); };
+        pin.Click += (_, _) => { SetPinned(Choice?.Pinned != true); save(); };
+        clear.Click += (_, _) =>
+        {
+            Choice = null;
+            market = null;
+            ResetFeed();
+            save();
+            select.Focus();
+        };
         actions.Children.Add(select);
+        pin.Margin = home.Margin = clear.Margin = new Thickness(2, 0, 0, 0);
         actions.Children.Add(pin);
         actions.Children.Add(home);
         actions.Children.Add(clear);
         DockPanel.SetDock(actions, Dock.Right);
         header.Children.Add(actions);
         label.VerticalAlignment = VerticalAlignment.Center;
+        label.Margin = new Thickness(0, 0, 7, 0);
         header.Children.Add(label);
-        DockPanel.SetDock(header, Dock.Top);
-        layout.Children.Add(header);
-        DockPanel.SetDock(detail, Dock.Bottom);
-        layout.Children.Add(detail);
+        layout.Children.Add(headerFrame);
         layout.Children.Add(plot);
+        layout.Children.Add(detail);
         UpdateHeader();
     }
 
@@ -88,20 +100,48 @@ internal sealed class ChartCell : Border
         ResetFeed();
     }
 
-    public void SetPinned(bool pinned)
+    private void SetPinned(bool pinned)
     {
         if (Choice == null) return;
         Choice = Choice with { Pinned = pinned };
     }
 
+    private void UpdatePin()
+    {
+        clear.IsEnabled = pin.IsEnabled = Choice != null;
+        bool pinned = Choice?.Pinned == true;
+        pin.Content = Terminal.Icon(pinned ? "pin" : "pin-off");
+        pin.Foreground = Terminal.Brush(pinned ? "Accent" : "Text");
+        pin.Background = pinned ? Terminal.Brush("AccentSurface") : Brushes.Transparent;
+        string caption = pinned ? "Снять закрепление" : "Закрепить график";
+        pin.ToolTip = caption;
+        AutomationProperties.SetName(pin, caption);
+        AutomationProperties.SetItemStatus(pin, pinned ? "Закреплён" : "Не закреплён");
+    }
+
     private void UpdateHeader()
     {
-        label.Text = market?.Label ?? Choice?.Key ?? "Свободная ячейка";
-        label.ToolTip = label.Text;
-        clear.IsEnabled = pin.IsEnabled = Choice != null;
-        pin.Content = Choice?.Pinned == true ? "Снять" : "Закрепить";
-        pin.ToolTip = Choice?.Pinned == true ? "Снять закрепление" : "Закрепить график";
+        label.Inlines.Clear();
+        label.Foreground = Terminal.Brush(market == null ? "Muted" : "Accent");
+        label.FontWeight = market == null ? FontWeights.Normal : FontWeights.SemiBold;
+        if (market == null)
+        {
+            label.Text = Choice?.Key ?? "Свободная ячейка";
+        }
+        else
+        {
+            label.Inlines.Add($"{market.Base}/{market.Quote}");
+            label.Inlines.Add(new System.Windows.Documents.Run(" " + market.Venue.Label() +
+                (market.Venue == Venue.Alpha ? $" · {market.Symbol}" : ""))
+            {
+                Foreground = Terminal.Brush("Muted"), FontWeight = FontWeights.Normal, FontSize = 11
+            });
+        }
+        label.ToolTip = market?.Label ?? Choice?.Key;
+        UpdatePin();
         detail.Text = market == null && Choice != null ? "Инструмент вне доступного списка" : "";
+        detail.ToolTip = null;
+        AutomationProperties.SetName(plot, market == null ? "" : $"Минутные свечи {market.Label}");
     }
 
     private void ResetFeed()
@@ -149,13 +189,16 @@ internal sealed class ChartCell : Border
 
 internal sealed class CandlePlot : FrameworkElement
 {
-    private static readonly Brush Up = Brush("#52CEAF");
-    private static readonly Brush Down = Brush("#F1848B");
-    private static readonly Brush Axis = Brush("#A3B3C8");
-    private static readonly Pen GridLine = Pen("#29364B");
-    private static readonly Pen UpLine = Pen("#52CEAF");
-    private static readonly Pen DownLine = Pen("#F1848B");
-    private readonly Typeface typeface = new("Segoe UI");
+    private readonly Brush background = Terminal.Brush("Plot");
+    private readonly Brush up = Terminal.Brush("Rising");
+    private readonly Brush down = Terminal.Brush("Falling");
+    private readonly Brush axis = Terminal.Brush("Muted");
+    private readonly Pen gridLine = new(Terminal.Brush("GridLine"), 1);
+    private readonly Pen upLine = new(Terminal.Brush("Rising"), 1);
+    private readonly Pen downLine = new(Terminal.Brush("Falling"), 1);
+    private readonly Typeface typeface = new(new FontFamily("Cascadia Mono, Consolas"),
+        FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
+    private static readonly CultureInfo Russian = CultureInfo.GetCultureInfo("ru-RU");
     private Candle[] candles = [];
     private int visible = 55;
     private int offset;
@@ -164,8 +207,8 @@ internal sealed class CandlePlot : FrameworkElement
 
     public void Set(Candle[] value, bool reset = false)
     {
-        if (!reset && offset > 0 && candles.Length > 0 && value.Length > 0)
-            offset += (int)Math.Max(0, (value[^1].Time - candles[^1].Time) / 60_000);
+        if (!reset && offset > 0 && candles.Length > 0)
+            offset += value.Count(c => c.Time > candles[^1].Time);
         candles = value;
         if (reset) Reset();
         else
@@ -185,54 +228,69 @@ internal sealed class CandlePlot : FrameworkElement
     protected override void OnRender(DrawingContext dc)
     {
         double width = ActualWidth, height = ActualHeight;
-        dc.DrawRectangle(Brushes.Transparent, null, new Rect(0, 0, width, height));
+        dc.DrawRectangle(background, null, new Rect(0, 0, width, height));
         if (width < 100 || height < 48 || candles.Length == 0) return;
 
         int end = candles.Length - offset;
         int begin = Math.Max(0, end - visible);
-        int count = end - begin;
         double low = double.MaxValue, high = double.MinValue;
         for (int i = begin; i < end; i++)
         {
             low = Math.Min(low, candles[i].Low);
             high = Math.Max(high, candles[i].High);
         }
-        double margin = Math.Max((high - low) * 0.09, high * 0.00015);
+        double margin = Math.Max((high - low) * 0.08, high * 0.00015);
         low = Math.Max(0, low - margin);
         high += margin;
-        double plotWidth = width - 76;
-        double plotHeight = height - 18;
-        long startTime = candles[begin].Time;
-        long span = Math.Max(60_000, candles[end - 1].Time - startTime + 60_000);
-        double step = plotWidth * 60_000 / span;
-        double body = Math.Max(1, step * 0.68);
-        double Y(double p) => (high - p) / (high - low) * plotHeight;
+        const double left = 7, top = 7;
+        double plotWidth = ChartWidth(width), plotHeight = height - top - 17;
+        double right = left + plotWidth;
+        long start = candles[begin].Time, finish = candles[end - 1].Time;
+        double step = plotWidth * 60_000 / Math.Max(60_000, finish - start + 60_000);
+        double body = Math.Max(1, step * 0.67);
+        double Y(double p) => top + (high - p) / (high - low) * plotHeight;
 
-        for (int i = 0; i <= 4; i++)
+        int rows = height < 105 ? 3 : 5;
+        int columns = width > 325 ? 4 : width > 190 ? 3 : 2;
+        int precision = high >= 100 ? 0 : high >= 0.01 ? 4 : 5;
+        double tickSpacing = (high - low) / (rows - 1);
+        precision = Math.Max(precision, Math.Clamp((int)Math.Ceiling(-Math.Log10(tickSpacing)), 0, 8));
+        for (int i = 0; i < rows; i++)
         {
-            double y = 1 + (plotHeight - 2) * i / 4;
-            dc.DrawLine(GridLine, new Point(0, y), new Point(plotWidth, y));
-            DrawText(dc, Price(high - (high - low) * i / 4), plotWidth + 5, Math.Clamp(y - 6, 0, plotHeight - 12));
+            double fraction = (double)i / (rows - 1);
+            double y = top + plotHeight * fraction;
+            dc.DrawLine(gridLine, new Point(left, y), new Point(right, y));
+            double price = high - (high - low) * fraction;
+            string tick = price is > 0 and < 0.00001 ? price.ToString("0.##e-0", Russian) : price.ToString($"F{precision}", Russian);
+            DrawText(dc, tick, right + 5, y - 6);
         }
+        for (int i = 0; i < columns; i++)
+        {
+            double fraction = (double)i / (columns - 1);
+            double x = left + plotWidth * fraction;
+            dc.DrawLine(gridLine, new Point(x, top), new Point(x, top + plotHeight));
+            long time = start + (long)(fraction * (finish - start));
+            DrawText(dc, Time(time), x, height - 15, i == 0 ? 0 : i == columns - 1 ? 1 : 0.5);
+        }
+
         for (int i = begin; i < end; i++)
         {
             var c = candles[i];
-            double x = ((c.Time - startTime) / 60_000d + 0.5) * step;
-            bool up = c.Close >= c.Open;
-            dc.DrawLine(up ? UpLine : DownLine, new Point(x, Y(c.High)), new Point(x, Y(c.Low)));
-            dc.DrawRectangle(up ? Up : Down, null,
+            double x = left + ((c.Time - start) / 60_000d + 0.5) * step;
+            bool rising = c.Close >= c.Open;
+            dc.DrawLine(rising ? upLine : downLine, new Point(x, Y(c.High)), new Point(x, Y(c.Low)));
+            dc.DrawRectangle(rising ? up : down, null,
                 new Rect(x - body / 2, Math.Min(Y(c.Open), Y(c.Close)), body, Math.Max(1, Math.Abs(Y(c.Close) - Y(c.Open)))));
         }
-        DrawText(dc, Time(candles[begin].Time), 0, plotHeight + 3);
-        if (count > 1) DrawText(dc, Time(candles[end - 1].Time), Math.Max(32, plotWidth - 32), plotHeight + 3);
     }
 
     protected override void OnMouseWheel(MouseWheelEventArgs e)
     {
         if (candles.Length < 3) return;
-        double fraction = Math.Clamp(e.GetPosition(this).X / Math.Max(1, ActualWidth - 76), 0, 1);
+        double fraction = Math.Clamp((e.GetPosition(this).X - 7) / ChartWidth(ActualWidth), 0, 1);
         int oldCount = Math.Min(visible, candles.Length - offset);
-        int newCount = Math.Clamp((int)Math.Round(visible * (e.Delta > 0 ? 0.78 : 1.28)), 8, 240);
+        int newCount = Math.Clamp((int)Math.Round(oldCount * (e.Delta > 0 ? 0.78 : 1.28)),
+            Math.Min(8, candles.Length), candles.Length);
         if (offset > 0 || fraction < 0.87)
             offset = Math.Clamp(offset + (int)Math.Round((oldCount - Math.Min(newCount, candles.Length)) * (1 - fraction)),
                 0, Math.Max(0, candles.Length - newCount));
@@ -244,6 +302,7 @@ internal sealed class CandlePlot : FrameworkElement
     protected override void OnMouseLeftButtonDown(MouseButtonEventArgs e)
     {
         if (e.ClickCount == 2) { Reset(); return; }
+        if (candles.Length == 0) return;
         drag = e.GetPosition(this);
         dragOffset = offset;
         CaptureMouse();
@@ -252,7 +311,7 @@ internal sealed class CandlePlot : FrameworkElement
     protected override void OnMouseMove(MouseEventArgs e)
     {
         if (drag == null || e.LeftButton != MouseButtonState.Pressed) return;
-        double movement = (e.GetPosition(this).X - drag.Value.X) / Math.Max(1, ActualWidth - 76);
+        double movement = (e.GetPosition(this).X - drag.Value.X) / ChartWidth(ActualWidth);
         offset = Math.Clamp(dragOffset + (int)Math.Round(movement * visible), 0, Math.Max(0, candles.Length - visible));
         InvalidateVisual();
     }
@@ -263,25 +322,15 @@ internal sealed class CandlePlot : FrameworkElement
         ReleaseMouseCapture();
     }
 
-    private void DrawText(DrawingContext dc, string text, double x, double y)
+    protected override void OnLostMouseCapture(MouseEventArgs e) => drag = null;
+
+    private void DrawText(DrawingContext dc, string text, double x, double y, double anchor = 0)
     {
-        var formatted = new FormattedText(text, CultureInfo.CurrentCulture, FlowDirection.LeftToRight,
-            typeface, 10, Axis, VisualTreeHelper.GetDpi(this).PixelsPerDip);
-        dc.DrawText(formatted, new Point(x, y));
+        var formatted = new FormattedText(text, Russian, FlowDirection.LeftToRight,
+            typeface, 11, axis, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+        dc.DrawText(formatted, new Point(x - formatted.Width * anchor, y));
     }
 
+    private static double ChartWidth(double width) => Math.Max(1, width - 7 - (width < 160 ? 46 : 58));
     private static string Time(long value) => DateTimeOffset.FromUnixTimeMilliseconds(value).ToLocalTime().ToString("HH:mm");
-    private static string Price(double value) => value < 0.00001 ? value.ToString("0.####e-0") : value.ToString("0.########");
-    private static SolidColorBrush Brush(string value)
-    {
-        var brush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(value));
-        brush.Freeze();
-        return brush;
-    }
-    private static Pen Pen(string color)
-    {
-        var pen = new Pen(Brush(color), 1);
-        pen.Freeze();
-        return pen;
-    }
 }

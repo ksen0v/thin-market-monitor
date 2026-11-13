@@ -1,8 +1,10 @@
+using System.Globalization;
 using System.IO;
 using System.Net.Http;
+using System.Runtime.InteropServices;
 using System.Windows;
-using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Threading;
 
 namespace ThinMarketMonitor;
@@ -18,6 +20,9 @@ public partial class MainWindow : Window, IDisposable
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromSeconds(1) };
     private IReadOnlyList<Market> markets = [];
     private MarketStreams? streams;
+    private SettingsPanel? settingsPanel;
+    private MarketPicker? picker;
+    private IInputElement? previousFocus;
     private bool loading;
     private long order;
     private DateTimeOffset nextRefresh;
@@ -26,8 +31,15 @@ public partial class MainWindow : Window, IDisposable
     {
         InitializeComponent();
         api = new(http);
+        var mark = Terminal.Icon("candles");
+        System.Windows.Documents.TextElement.SetForeground(mark, Terminal.Brush("Accent"));
+        BrandMark.Child = mark;
+        SettingsButton.Content = Terminal.LabelWithIcon("settings", "Настройки", 5);
         for (int i = 0; i < cells.Length; i++)
-            cells[i] = new ChartCell(api, PickMarket, Save, () => ++order) { Choice = settings.Cells[i] };
+        {
+            int slot = i;
+            cells[i] = new ChartCell(api, i + 1, () => PickMarket(slot), Save, () => ++order) { Choice = settings.Cells[i] };
+        }
         order = cells.Max(cell => cell.Order);
 
         RebuildGrid();
@@ -37,37 +49,94 @@ public partial class MainWindow : Window, IDisposable
             timer.Start();
             await ReloadCatalogs();
         };
+        PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key != Key.Escape || Overlay.Visibility != Visibility.Visible) return;
+            if (settingsPanel != null) settingsPanel.Close();
+            else CloseDialog();
+            e.Handled = true;
+        };
+        Closing += (_, e) => { if (settingsPanel?.Installing == true) e.Cancel = true; };
         Closed += (_, _) => Dispose();
     }
 
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        var handle = new WindowInteropHelper(this).Handle;
+        if (SystemParameters.HighContrast) return;
+        SetWindowAttribute(handle, 20, 1, sizeof(int));        // DWMWA_USE_IMMERSIVE_DARK_MODE
+        SetWindowAttribute(handle, 35, 0x00182220, sizeof(int)); // DWMWA_CAPTION_COLOR
+        SetWindowAttribute(handle, 36, 0x00DDF0F5, sizeof(int)); // DWMWA_TEXT_COLOR
+    }
+
+    [DllImport("dwmapi.dll", EntryPoint = "DwmSetWindowAttribute")]
+    private static extern int SetWindowAttribute(nint hwnd, int attribute, in int value, int size);
+
     private void ChangeGrid(object sender, RoutedEventArgs e)
     {
-        settings.Grid = ReferenceEquals(sender, GridThree) ? 3 : 2;
-        RebuildGrid();
-        Save();
+        int size = ReferenceEquals(sender, GridThree) ? 3 : 2;
+        if (settings.Grid != size)
+        {
+            settings.Grid = size;
+            RebuildGrid();
+            Save();
+        }
+        GridTwo.IsChecked = size == 2;
+        GridThree.IsChecked = size == 3;
     }
 
     private void RebuildGrid()
     {
         Charts.Children.Clear();
         Charts.Rows = Charts.Columns = settings.Grid;
-        GridTwo.IsEnabled = settings.Grid != 2;
-        GridThree.IsEnabled = settings.Grid != 3;
+        GridTwo.IsChecked = settings.Grid == 2;
+        GridThree.IsChecked = settings.Grid == 3;
         int visible = settings.Grid * settings.Grid;
         for (int i = 0; i < cells.Length; i++)
         {
+            cells[i].PlotHeight = settings.Grid == 3 ? 140 : 235;
             cells[i].Activate(i < visible);
             if (i < visible) Charts.Children.Add(cells[i]);
         }
     }
 
-    private async void RefreshCatalogs(object sender, RoutedEventArgs e) => await ReloadCatalogs();
+    internal void SmokeTestLayout()
+    {
+        UpdateLayout();
+        int original = settings.Grid;
+        try
+        {
+            foreach (int size in new[] { 2, 3 })
+            {
+                settings.Grid = size;
+                RebuildGrid();
+                UpdateLayout();
+                if (Charts.Children.Count != size * size) throw new InvalidOperationException("Chart grid is incomplete.");
+            }
+            OpenSettings(this, new RoutedEventArgs());
+            UpdateLayout();
+            if (settingsPanel is not { ActualWidth: >= 660, ActualHeight: >= 380 and <= 470 })
+                throw new InvalidOperationException("Settings overlay does not fit its design dimensions.");
+            CloseDialog();
+            PickMarket(0);
+            UpdateLayout();
+            if (picker is not { ActualWidth: >= 405, ActualHeight: >= 240 and <= 340 })
+                throw new InvalidOperationException("Market picker does not fit its design dimensions.");
+            CloseDialog();
+        }
+        finally
+        {
+            settings.Grid = original;
+            RebuildGrid();
+        }
+    }
 
     private async Task ReloadCatalogs()
     {
         if (loading) return;
         loading = true;
-        CatalogStatus.Text = "Обновление каталогов…";
+        ShowCatalogStatus("Обновление каталогов…");
         try
         {
             var all = await Task.WhenAll(Enum.GetValues<Venue>().Select(async v => (v, await api.LoadCatalog(v, stop.Token))));
@@ -82,33 +151,55 @@ public partial class MainWindow : Window, IDisposable
         }
     }
 
-    private void ApplyFilter(bool force)
+    private void ApplyFilter(bool thresholdsChanged)
     {
         var result = ListingFilter.Apply(catalogs, settings.Rules);
         var errors = catalogs.Where(x => x.Value.Error != null).ToArray();
-        CatalogStatus.Text = result.Missing.Count > 0
+        var status = result.Missing.Count > 0
             ? $"Фильтр ожидает каталоги · {string.Join(", ", result.Missing.Select(v => v.Label()))}"
-            : $"{result.Markets.Count:N0} монет после фильтра" +
+            : $"{CountLabel(result.Markets.Count)} после фильтра" +
               (errors.Length > 0 ? $" · недоступны {string.Join(", ", errors.Select(x => x.Key.Label()))}" : "");
-        CatalogStatus.ToolTip = errors.Length == 0 ? null : string.Join("\n", errors.Select(x => $"{x.Key.Label()} — {x.Value.Error}"));
+        ShowCatalogStatus(status, errors.Length == 0 ? null : string.Join("\n",
+            errors.Select(x => $"{x.Key.Label()} — {x.Value.Error}")));
+
         bool same = markets.SequenceEqual(result.Markets);
-        markets = result.Markets;
-        if (!same || force)
+        if (!same) markets = result.Markets;
+        if (!same || thresholdsChanged)
         {
             var previous = streams;
             previous?.Dispose();
             streams = markets.Count > 0 && settings.Thresholds.Any(t => t.Enabled)
-                ? new MarketStreams(api, markets, settings.Thresholds, force ? null : previous) : null;
+                ? new MarketStreams(api, markets, settings.Thresholds.ToArray(), thresholdsChanged ? null : previous) : null;
         }
 
-        var lookup = markets.ToDictionary(x => x.Key);
-        foreach (var cell in cells)
+        if (!same)
         {
-            if (cell.Choice == null) continue;
-            lookup.TryGetValue(cell.Choice.Key, out var market);
-            cell.Resolve(market);
+            var lookup = markets.ToDictionary(x => x.Key);
+            foreach (var cell in cells)
+            {
+                if (cell.Choice == null) continue;
+                lookup.TryGetValue(cell.Choice.Key, out var market);
+                cell.Resolve(market);
+            }
+            picker?.UpdateMarkets(markets);
         }
         ShowCoverage();
+    }
+
+    private void ShowCatalogStatus(string status, string? tooltip = null)
+    {
+        CatalogStatus.Text = status;
+        CatalogStatus.ToolTip = tooltip;
+        settingsPanel?.UpdateFilter(status);
+    }
+
+    private static string CountLabel(int count)
+    {
+        string noun = count % 100 is >= 11 and <= 14 ? "монет" : (count % 10) switch
+        {
+            1 => "монета", >= 2 and <= 4 => "монеты", _ => "монет"
+        };
+        return $"{count.ToString("N0", CultureInfo.GetCultureInfo("ru-RU"))} {noun}";
     }
 
     private async void Tick(object? sender, EventArgs e)
@@ -116,18 +207,7 @@ public partial class MainWindow : Window, IDisposable
         if (!loading && DateTimeOffset.UtcNow >= nextRefresh) await ReloadCatalogs();
         if (stop.IsCancellationRequested) return;
         for (int i = 0; i < 150 && streams != null && streams.TryRead(out var signal); i++)
-        {
-            var entry = signal!;
-            var item = new ListBoxItem
-            {
-                Content = $"{DateTimeOffset.FromUnixTimeMilliseconds(entry.Time).ToLocalTime():HH:mm:ss}     " +
-                          $"{entry.Market.Label}     +{entry.Percent:F2}% за {WindowName(entry.Seconds)}",
-                Tag = entry.Market.Key, Padding = new Thickness(3, 1, 3, 1)
-            };
-            Journal.Items.Insert(0, item);
-            if (Journal.Items.Count > 200) Journal.Items.RemoveAt(Journal.Items.Count - 1);
-            Place(entry.Market, false);
-        }
+            Place(signal!.Market);
         ShowCoverage();
     }
 
@@ -137,6 +217,7 @@ public partial class MainWindow : Window, IDisposable
     {
         if (streams == null)
         {
+            StreamLed.Fill = Terminal.Brush("Muted");
             StreamStatus.Text = settings.Thresholds.Any(t => t.Enabled) ? "Сигналы ожидают рынки" : "Сигналы выключены";
             StreamStatus.ToolTip = null;
             return;
@@ -144,56 +225,67 @@ public partial class MainWindow : Window, IDisposable
         var status = streams.Status();
         int connected = status.Where(s => s.Connected).Sum(s => s.Count);
         int fresh = streams.FreshCount(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        StreamLed.Fill = Terminal.Brush(connected > 0 ? "Rising" : "Muted");
         StreamStatus.Text = $"Потоки подключены · {connected:N0} из {markets.Count:N0}   |   Сделки за последние 15 с · {fresh:N0}";
         StreamStatus.ToolTip = string.Join("\n", status.GroupBy(s => s.Venue).Select(g =>
             $"{g.Key.Label()} · {g.Where(s => s.Connected).Sum(s => s.Count)}/{g.Sum(s => s.Count)}" +
             string.Concat(g.Where(s => !s.Connected).Select(s => s.Detail).Distinct().Select(s => $" · {s}"))));
     }
 
-    private void OpenJournalMarket(object sender, MouseButtonEventArgs e)
-    {
-        if (Journal.SelectedItem is ListBoxItem { Tag: string key } && markets.FirstOrDefault(m => m.Key == key) is { } market)
-            Place(market, true);
-    }
-
-    private void Place(Market market, bool pinned)
+    private void Place(Market market)
     {
         var visible = cells.Take(settings.Grid * settings.Grid).ToArray();
-        if (pinned && visible.FirstOrDefault(c => c.Choice?.Key == market.Key) is { } existing)
-        {
-            existing.SetPinned(true);
-            Save();
-            return;
-        }
         int slot = ChartPlacement.Pick(market.Key, visible
             .Select(c => (c.Choice?.Key, c.Choice?.Pinned == true, c.Order)).ToArray());
         if (slot < 0) return;
-        visible[slot].Assign(market, pinned);
+        visible[slot].Assign(market, pinned: false);
         Save();
     }
 
-    private Market? PickMarket()
+    private void PickMarket(int index)
     {
-        var chooser = new MarketPicker(markets) { Owner = this };
-        return chooser.ShowDialog() == true ? chooser.Selected : null;
-    }
-
-    private async void OpenSettings(object sender, RoutedEventArgs e)
-    {
-        var dialog = new SettingsWindow(settings, catalogs, new Updater(http)) { Owner = this };
-        if (dialog.ShowDialog() != true) return;
-        if (dialog.Restarting)
+        picker = new MarketPicker(markets, CloseDialog, selected =>
         {
-            Close();
-            return;
-        }
-        bool thresholdsChanged = !settings.Thresholds.SequenceEqual(dialog.Thresholds);
-        settings.Rules = dialog.Rules;
-        settings.Thresholds = dialog.Thresholds;
-        Save();
+            if (!markets.Any(m => m.Key == selected.Key)) return;
+            cells[index].Assign(selected, pinned: true);
+            Save();
+            CloseDialog();
+        });
+        ShowDialog(picker);
+    }
+
+    private void OpenSettings(object sender, RoutedEventArgs e)
+    {
+        settingsPanel = new SettingsPanel(settings, catalogs, new Updater(http), SettingsChanged, CloseDialog, Close);
+        settingsPanel.UpdateFilter(CatalogStatus.Text);
+        ShowDialog(settingsPanel);
+    }
+
+    private async void SettingsChanged(bool thresholdsChanged)
+    {
         ApplyFilter(thresholdsChanged);
-        if (catalogs.Count == 0 || catalogs.Any(x => x.Value.Error != null && settings.Rules.GetValueOrDefault(x.Key) != ListingRule.Ignore))
-            await ReloadCatalogs();
+        Save();
+        if (!thresholdsChanged) await ReloadCatalogs();
+    }
+
+    private void ShowDialog(FrameworkElement content)
+    {
+        previousFocus = Keyboard.FocusedElement;
+        Workspace.IsEnabled = false;
+        Overlay.Visibility = Visibility.Visible;
+        DialogHost.Content = content;
+    }
+
+    private void CloseDialog()
+    {
+        settingsPanel?.Dispose();
+        settingsPanel = null;
+        picker = null;
+        DialogHost.Content = null;
+        Overlay.Visibility = Visibility.Collapsed;
+        Workspace.IsEnabled = true;
+        if (previousFocus != null) Keyboard.Focus(previousFocus);
+        previousFocus = null;
     }
 
     private void Save()
@@ -202,8 +294,7 @@ public partial class MainWindow : Window, IDisposable
         try { settings.Save(); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            CatalogStatus.Text = "Настройки не сохранены";
-            CatalogStatus.ToolTip = ex.Message;
+            ShowCatalogStatus("Настройки не сохранены", ex.Message);
         }
     }
 
@@ -212,6 +303,7 @@ public partial class MainWindow : Window, IDisposable
         if (stop.IsCancellationRequested) return;
         stop.Cancel();
         timer.Stop();
+        settingsPanel?.Dispose();
         streams?.Dispose();
         foreach (var cell in cells) cell.Activate(false);
         http.Dispose();

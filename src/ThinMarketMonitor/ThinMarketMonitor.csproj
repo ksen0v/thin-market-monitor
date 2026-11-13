@@ -5,4 +5,8 @@
     <UseWPF>true</UseWPF>
     <DebugType>embedded</DebugType>
   </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="Assets/*.png"/>
+    <EmbeddedResource Include="../../THIRD-PARTY-NOTICES.txt" Link="THIRD-PARTY-NOTICES.txt"/>
+  </ItemGroup>
 </Project>
