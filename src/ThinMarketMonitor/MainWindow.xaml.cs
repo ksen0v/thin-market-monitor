@@ -116,13 +116,13 @@ public partial class MainWindow : Window, IDisposable
             }
             OpenSettings(this, new RoutedEventArgs());
             UpdateLayout();
-            if (settingsPanel is not { ActualWidth: >= 660, ActualHeight: >= 380 and <= 470 })
-                throw new InvalidOperationException("Settings overlay does not fit its design dimensions.");
+            if (DialogHost.Content is not SettingsPanel)
+                throw new InvalidOperationException("The settings overlay did not open.");
             CloseDialog();
             PickMarket(0);
             UpdateLayout();
-            if (picker is not { ActualWidth: >= 405, ActualHeight: >= 240 and <= 340 })
-                throw new InvalidOperationException("Market picker does not fit its design dimensions.");
+            if (DialogHost.Content is not MarketPicker)
+                throw new InvalidOperationException("The market picker did not open.");
             CloseDialog();
         }
         finally

@@ -19,12 +19,20 @@ public partial class App : Application
         }
         if (e.Args is ["--smoke-test", var marker])
         {
-            using var test = new MainWindow();
-            test.Show();
-            test.SmokeTestLayout();
-            File.WriteAllText(marker, $"Thin Market Monitor {Updater.Current}");
-            test.Close();
-            Shutdown();
+            try
+            {
+                using var test = new MainWindow();
+                test.Show();
+                test.SmokeTestLayout();
+                File.WriteAllText(marker, $"Thin Market Monitor {Updater.Current}");
+                test.Close();
+                Shutdown();
+            }
+            catch (Exception ex)
+            {
+                File.WriteAllText(marker, ex.ToString());
+                Shutdown(1);
+            }
             return;
         }
 

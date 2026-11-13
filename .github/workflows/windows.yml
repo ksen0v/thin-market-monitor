@@ -43,8 +43,8 @@ jobs:
           $marker = Join-Path $env:RUNNER_TEMP 'thin-market-monitor-smoke.txt'
           $process = Start-Process ./artifacts/release/ThinMarketMonitor-win-x64.exe -ArgumentList "--smoke-test `"$marker`"" -PassThru
           if (!$process.WaitForExit(60000)) { $process.Kill(); throw 'Smoke test timed out.' }
-          if ($process.ExitCode -ne 0 -or !(Test-Path -LiteralPath $marker)) { throw 'Smoke test failed.' }
-          Get-Content -LiteralPath $marker
+          if (Test-Path -LiteralPath $marker) { Get-Content -LiteralPath $marker }
+          if ($process.ExitCode -ne 0 -or !(Test-Path -LiteralPath $marker)) { throw "Smoke test failed (exit $($process.ExitCode))." }
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ThinMarketMonitor-win-x64
