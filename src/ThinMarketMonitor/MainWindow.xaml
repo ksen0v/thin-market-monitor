@@ -1,7 +1,7 @@
 <Window x:Class="ThinMarketMonitor.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Thin Market Monitor" Width="1180" Height="720" MinWidth="690" MinHeight="470"
+        Title="Thin Market Monitor" Width="1180" Height="720" MinWidth="690" MinHeight="470" Icon="Assets/terminal.ico"
         WindowStartupLocation="CenterScreen" UseLayoutRounding="True" Style="{StaticResource {x:Type Window}}">
     <Grid>
         <DockPanel x:Name="Workspace">
@@ -40,6 +40,8 @@
                 </StackPanel>
             </ScrollViewer>
         </DockPanel>
+        <ContentControl x:Name="FullChart" Visibility="Collapsed" Focusable="False"
+                        HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
         <Grid x:Name="Overlay" Background="{StaticResource Shade}" Visibility="Collapsed" FocusManager.IsFocusScope="True"
               KeyboardNavigation.TabNavigation="Cycle" KeyboardNavigation.ControlTabNavigation="Cycle">
             <ContentControl x:Name="DialogHost" Margin="10" HorizontalAlignment="Center" VerticalAlignment="Center"

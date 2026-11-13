@@ -3,6 +3,7 @@ using System.IO;
 using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Threading;
@@ -19,10 +20,21 @@ public partial class MainWindow : Window, IDisposable
     private readonly ChartCell[] cells = new ChartCell[9];
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromSeconds(1) };
     private IReadOnlyList<Market> markets = [];
+    private IReadOnlyList<Market> candidates = [];
+    private Venue[] missing = [];
+    private VolumeRule[] filterRules = [];
+    private VolumeFilterMonitor? volumeFilter;
+    private HashSet<string> eligible = [];
     private MarketStreams? streams;
     private SettingsPanel? settingsPanel;
     private MarketPicker? picker;
     private IInputElement? previousFocus;
+    private ChartCell? fullscreenCell;
+    private ChartCell? activeCell;
+    private CandlePlot? keyboardRuler;
+    private WindowState previousWindowState;
+    private WindowStyle previousWindowStyle;
+    private ResizeMode previousResizeMode;
     private bool loading;
     private long order;
     private DateTimeOffset nextRefresh;
@@ -40,7 +52,11 @@ public partial class MainWindow : Window, IDisposable
         for (int i = 0; i < cells.Length; i++)
         {
             int slot = i;
-            cells[i] = new ChartCell(api, i + 1, () => PickMarket(slot), Save, () => ++order) { Choice = settings.Cells[i] };
+            var cell = new ChartCell(api, i + 1, () => PickMarket(slot), Save, () => ++order, () => settings.Ruler)
+                { Choice = settings.Cells[i] };
+            cells[i] = cell;
+            cell.PreviewMouseDown += (_, _) => activeCell = cell;
+            cell.GotKeyboardFocus += (_, _) => activeCell = cell;
         }
         order = cells.Max(cell => cell.Order);
 
@@ -51,15 +67,93 @@ public partial class MainWindow : Window, IDisposable
             timer.Start();
             await ReloadCatalogs();
         };
-        PreviewKeyDown += (_, e) =>
+        PreviewKeyDown += KeyPressed;
+        PreviewKeyUp += (_, e) =>
         {
-            if (e.Key != Key.Escape || Overlay.Visibility != Visibility.Visible) return;
+            if (keyboardRuler == null || e.Key != settings.Ruler.Key) return;
+            keyboardRuler.EndKeyboardRuler();
+            keyboardRuler = null;
+            e.Handled = true;
+        };
+        Deactivated += (_, _) => CancelChartGestures();
+        Closing += (_, e) => { if (settingsPanel?.Installing == true) e.Cancel = true; };
+        Closed += (_, _) => Dispose();
+    }
+
+    private void KeyPressed(object sender, KeyEventArgs e)
+    {
+        if (e.Handled) return;
+        if (Overlay.Visibility == Visibility.Visible)
+        {
+            if (e.Key != Key.Escape || settingsPanel?.CapturingShortcut == true) return;
             if (settingsPanel != null) settingsPanel.Close();
             else CloseDialog();
             e.Handled = true;
-        };
-        Closing += (_, e) => { if (settingsPanel?.Installing == true) e.Cancel = true; };
-        Closed += (_, _) => Dispose();
+            return;
+        }
+        if (e.Key == Key.Escape && fullscreenCell != null) { ExitFullscreen(); e.Handled = true; return; }
+        if (Keyboard.FocusedElement is TextBoxBase || Keyboard.Modifiers != ModifierKeys.None) return;
+        var underMouse = cells.FirstOrDefault(c => c.IsMouseOver && c.IsVisible);
+        if (e.Key == settings.Fullscreen)
+        {
+            if (!e.IsRepeat)
+            {
+                if (fullscreenCell != null) ExitFullscreen();
+                else
+                {
+                    var target = underMouse?.HasMarket == true ? underMouse : activeCell?.IsVisible == true ? activeCell : null;
+                    if (target?.HasMarket == true) EnterFullscreen(target);
+                }
+            }
+            e.Handled = true;
+        }
+        else if (settings.Ruler.Mouse == null && e.Key == settings.Ruler.Key)
+        {
+            if (!e.IsRepeat && underMouse?.Plot.BeginKeyboardRuler() == true) keyboardRuler = underMouse.Plot;
+            if (keyboardRuler != null) e.Handled = true;
+        }
+    }
+
+    private void CancelChartGestures()
+    {
+        foreach (var cell in cells) cell.Plot.CancelGesture();
+        keyboardRuler = null;
+    }
+
+    private void EnterFullscreen(ChartCell cell, bool changeWindow = true)
+    {
+        CancelChartGestures();
+        fullscreenCell = cell;
+        previousWindowState = WindowState;
+        previousWindowStyle = WindowStyle;
+        previousResizeMode = ResizeMode;
+        Charts.Children.Remove(cell);
+        cell.PlotHeight = double.NaN;
+        cell.Margin = new Thickness(0);
+        Workspace.Visibility = Visibility.Collapsed;
+        FullChart.Content = cell;
+        FullChart.Visibility = Visibility.Visible;
+        if (changeWindow)
+        {
+            WindowStyle = WindowStyle.None;
+            ResizeMode = ResizeMode.NoResize;
+            WindowState = WindowState.Maximized;
+        }
+    }
+
+    private void ExitFullscreen()
+    {
+        if (fullscreenCell == null) return;
+        CancelChartGestures();
+        fullscreenCell.Margin = new Thickness(0, 0, 1, 1);
+        fullscreenCell = null;
+        FullChart.Content = null;
+        FullChart.Visibility = Visibility.Collapsed;
+        Workspace.Visibility = Visibility.Visible;
+        WindowStyle = previousWindowStyle;
+        ResizeMode = previousResizeMode;
+        WindowState = previousWindowState;
+        RebuildGrid();
     }
 
     protected override void OnSourceInitialized(EventArgs e)
@@ -126,6 +220,10 @@ public partial class MainWindow : Window, IDisposable
             if (DialogHost.Content is not MarketPicker)
                 throw new InvalidOperationException("The market picker did not open.");
             CloseDialog();
+            EnterFullscreen(cells[0], changeWindow: false);
+            if (!ReferenceEquals(FullChart.Content, cells[0])) throw new InvalidOperationException("Fullscreen did not retain the chart.");
+            ExitFullscreen();
+            if (!Charts.Children.Contains(cells[0])) throw new InvalidOperationException("Fullscreen did not restore the chart.");
         }
         finally
         {
@@ -157,26 +255,47 @@ public partial class MainWindow : Window, IDisposable
     private void ApplyFilter(bool thresholdsChanged)
     {
         var result = ListingFilter.Apply(catalogs, settings.Rules);
-        var errors = catalogs.Where(x => x.Value.Error != null).ToArray();
-        var status = result.Missing.Count > 0
-            ? $"Фильтр ожидает каталоги · {string.Join(", ", result.Missing.Select(v => v.Label()))}"
-            : $"{CountLabel(result.Markets.Count)} после фильтра" +
-              (errors.Length > 0 ? $" · недоступны {string.Join(", ", errors.Select(x => x.Key.Label()))}" : "");
-        ShowCatalogStatus(status, errors.Length == 0 ? null : string.Join("\n",
-            errors.Select(x => $"{x.Key.Label()} — {x.Value.Error}")));
-
-        bool same = markets.SequenceEqual(result.Markets);
-        if (!same) markets = result.Markets;
-        if (!same || thresholdsChanged)
+        missing = result.Missing.ToArray();
+        bool candidatesChanged = !candidates.SequenceEqual(result.Markets);
+        if (candidatesChanged) candidates = result.Markets;
+        var nextRules = settings.VolumeFilters.Where(r => r.Enabled).ToArray();
+        if (candidatesChanged || !filterRules.SequenceEqual(nextRules))
+        {
+            filterRules = nextRules;
+            volumeFilter?.Dispose();
+            volumeFilter = nextRules.Length > 0 && candidates.Count > 0 ? new(api, candidates, nextRules) : null;
+        }
+        RefreshEligibility();
+        if (candidatesChanged || thresholdsChanged)
         {
             var previous = streams;
             previous?.Dispose();
-            streams = markets.Count > 0 && settings.Thresholds.Any(t => t.Enabled)
-                ? new MarketStreams(api, markets, settings.Thresholds.ToArray(), thresholdsChanged ? null : previous) : null;
+            var price = settings.PriceModule ? settings.Thresholds.Where(t => t.Enabled).ToArray() : [];
+            var volume = settings.VolumeModule ? settings.VolumeThresholds.Where(t => t.Enabled).ToArray() : [];
+            streams = candidates.Count > 0 && (price.Length > 0 || volume.Length > 0)
+                ? new MarketStreams(api, candidates, price, volume, markets, thresholdsChanged ? null : previous) : null;
         }
+        ShowCoverage();
+    }
 
-        if (!same)
+    private void RefreshEligibility()
+    {
+        var filtered = volumeFilter?.Evaluate(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        IReadOnlyList<Market> next = filtered?.Markets ?? candidates;
+        var errors = catalogs.Where(x => x.Value.Error != null).ToArray();
+        string status = missing.Length > 0
+            ? $"Фильтр ожидает каталоги · {string.Join(", ", missing.Select(v => v.Label()))}"
+            : $"{CountLabel(next.Count)} после фильтра" +
+              (filtered is { Pending: > 0 } pending ? $" · объём ожидается: {pending.Pending:N0}" : "") +
+              (filtered is { Unsupported: > 0 } unsupported ? $" · без котировки USD: {unsupported.Unsupported:N0}" : "") +
+              (errors.Length > 0 ? $" · недоступны {string.Join(", ", errors.Select(x => x.Key.Label()))}" : "");
+        string? tooltip = errors.Length == 0 ? null : string.Join("\n", errors.Select(x => $"{x.Key.Label()} — {x.Value.Error}"));
+        if (CatalogStatus.Text != status || !Equals(CatalogStatus.ToolTip, tooltip)) ShowCatalogStatus(status, tooltip);
+        if (!markets.SequenceEqual(next))
         {
+            markets = next;
+            eligible = markets.Select(m => m.Key).ToHashSet(StringComparer.Ordinal);
+            streams?.SetEligible(markets);
             var lookup = markets.ToDictionary(x => x.Key);
             foreach (var cell in cells)
             {
@@ -186,7 +305,6 @@ public partial class MainWindow : Window, IDisposable
             }
             picker?.UpdateMarkets(markets);
         }
-        ShowCoverage();
     }
 
     private void ShowCatalogStatus(string status, string? tooltip = null)
@@ -209,19 +327,23 @@ public partial class MainWindow : Window, IDisposable
     {
         if (!loading && DateTimeOffset.UtcNow >= nextRefresh) await ReloadCatalogs();
         if (stop.IsCancellationRequested) return;
+        if (!loading && volumeFilter != null) RefreshEligibility();
         for (int i = 0; i < 150 && streams != null && streams.TryRead(out var signal); i++)
-            Place(signal!.Market);
+            if (eligible.Contains(signal!.Market.Key)) Place(signal);
         ShowCoverage();
     }
 
-    internal static string WindowName(int seconds) => seconds switch { 15 => "15 с", 60 => "1 мин", _ => "15 мин" };
+    internal static string WindowName(int seconds) => seconds % 3600 == 0 ? $"{seconds / 3600} ч" :
+        seconds % 60 == 0 ? $"{seconds / 60} мин" : $"{seconds} с";
 
     private void ShowCoverage()
     {
         if (streams == null)
         {
             StreamLed.Fill = Terminal.Brush("Muted");
-            StreamStatus.Text = settings.Thresholds.Any(t => t.Enabled) ? "Сигналы ожидают рынки" : "Сигналы выключены";
+            bool enabled = settings.PriceModule && settings.Thresholds.Any(t => t.Enabled) ||
+                settings.VolumeModule && settings.VolumeThresholds.Any(t => t.Enabled);
+            StreamStatus.Text = enabled ? "Сигналы ожидают рынки" : "Сигналы выключены";
             StreamStatus.ToolTip = null;
             return;
         }
@@ -229,19 +351,30 @@ public partial class MainWindow : Window, IDisposable
         int connected = status.Where(s => s.Connected).Sum(s => s.Count);
         int fresh = streams.FreshCount(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         StreamLed.Fill = Terminal.Brush(connected > 0 ? "Rising" : "Muted");
-        StreamStatus.Text = $"Потоки подключены · {connected:N0} из {markets.Count:N0}   |   Сделки за последние 15 с · {fresh:N0}";
+        StreamStatus.Text = $"Потоки подключены · {connected:N0} из {candidates.Count:N0}   |   Сделки за последние 15 с · {fresh:N0}";
+        if (settings.VolumeModule && settings.VolumeThresholds.Any(t => t.Enabled))
+            StreamStatus.Text += $"   |   Объём USD · {streams.VolumeReadyCount(markets, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()):N0}" +
+                $"/{markets.Count(m => UsdQuotes.Supported(m.Quote)):N0} готово";
         StreamStatus.ToolTip = string.Join("\n", status.GroupBy(s => s.Venue).Select(g =>
             $"{g.Key.Label()} · {g.Where(s => s.Connected).Sum(s => s.Count)}/{g.Sum(s => s.Count)}" +
-            string.Concat(g.Where(s => !s.Connected).Select(s => s.Detail).Distinct().Select(s => $" · {s}"))));
+            string.Concat(g.Where(s => !s.Connected).Select(s => s.Detail).Distinct().Select(s => $" · {s}")))) +
+            (settings.VolumeModule ? $"\nБез поддерживаемой USD-котировки: {markets.Count(m => !UsdQuotes.Supported(m.Quote))}. " +
+                "Готовность по кратчайшему включённому окну. USD-стейблкоины ≈ $1." : "");
     }
 
-    private void Place(Market market)
+    private void Place(Signal signal)
     {
+        var market = signal.Market;
         var visible = cells.Take(settings.Grid * settings.Grid).ToArray();
+        if (visible.FirstOrDefault(c => c.Choice?.Key == market.Key) is { } existing)
+        {
+            existing.ShowSignal(signal);
+            return;
+        }
         int slot = ChartPlacement.Pick(market.Key, visible
-            .Select(c => (c.Choice?.Key, c.Choice?.Pinned == true, c.Order)).ToArray());
+            .Select(c => (c.Choice?.Key, c.Choice?.Pinned == true || c.IsInteracting || ReferenceEquals(c, fullscreenCell), c.Order)).ToArray());
         if (slot < 0) return;
-        visible[slot].Assign(market, pinned: false);
+        visible[slot].Assign(market, pinned: false, signal);
         Save();
     }
 
@@ -268,12 +401,14 @@ public partial class MainWindow : Window, IDisposable
     {
         ApplyFilter(thresholdsChanged);
         Save();
-        if (!thresholdsChanged) await ReloadCatalogs();
+        if (!thresholdsChanged && (catalogs.Count == 0 || catalogs.Any(c => c.Value.Error != null &&
+                settings.Rules.GetValueOrDefault(c.Key) != ListingRule.Ignore))) await ReloadCatalogs();
     }
 
     private void ShowDialog(FrameworkElement content)
     {
         previousFocus = Keyboard.FocusedElement;
+        CancelChartGestures();
         Workspace.IsEnabled = false;
         Overlay.Visibility = Visibility.Visible;
         DialogHost.Content = content;
@@ -308,6 +443,7 @@ public partial class MainWindow : Window, IDisposable
         timer.Stop();
         settingsPanel?.Dispose();
         streams?.Dispose();
+        volumeFilter?.Dispose();
         foreach (var cell in cells) cell.Activate(false);
         http.Dispose();
     }

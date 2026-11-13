@@ -9,17 +9,16 @@ using System.Windows.Media.Imaging;
 
 namespace ThinMarketMonitor;
 
-internal sealed class SettingsPanel : Border, IDisposable
+internal sealed partial class SettingsPanel : Border, IDisposable
 {
+    private const int ListingsPage = 0, FiltersPage = 1, ModulesPage = 2, PricePage = 3, VolumePage = 4, ChartsPage = 5, AboutPage = 6;
     private readonly CancellationTokenSource stop = new();
     private readonly Grid layout = new();
-    private readonly Button[] navigation = new Button[3];
-    private readonly Border[] indicators = new Border[3];
-    private readonly FrameworkElement[] pages = new FrameworkElement[3];
+    private readonly Button[] navigation = new Button[7];
+    private readonly Border[] indicators = new Border[7];
+    private readonly FrameworkElement[] pages = new FrameworkElement[7];
     private readonly Dictionary<Venue, (Button Button, TextBlock State)> venues = new();
-    private readonly List<TextBox> fields = [];
     private readonly TextBlock result = Terminal.Copy("");
-    private readonly TextBlock validation = Terminal.Copy("");
     private readonly TextBlock updateStatus = Terminal.Copy($"v{Updater.Current}");
     private readonly Button check = new() { Content = "Проверить версию" };
     private readonly Button install = new() { Content = "Обновить и перезапустить", Visibility = Visibility.Collapsed };
@@ -58,8 +57,8 @@ internal sealed class SettingsPanel : Border, IDisposable
         header.Child = Terminal.DialogHeader("Настройки", "Закрыть настройки", Close);
         layout.Children.Add(header);
 
-        var body = new Grid { MinHeight = 335 };
-        body.ColumnDefinitions.Add(new() { Width = new GridLength(166) });
+        var body = new Grid { MinHeight = 335, MaxHeight = 505 };
+        body.ColumnDefinitions.Add(new() { Width = new GridLength(176) });
         body.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
         Grid.SetRow(body, 1);
         layout.Children.Add(body);
@@ -69,17 +68,25 @@ internal sealed class SettingsPanel : Border, IDisposable
         var rail = Terminal.Rule(new Thickness(0, 0, 1, 0));
         rail.Child = nav;
         body.Children.Add(rail);
-        AddNavigation(nav, 0, "Листинги", "listings");
-        AddNavigation(nav, 1, "Сигнал цены", "activity");
-        AddNavigation(nav, 2, "О программе", "info");
+        AddNavigation(nav, ListingsPage, "Листинги", "listings");
+        AddNavigation(nav, FiltersPage, "Фильтры", "filter");
+        AddNavigation(nav, ModulesPage, "Модули", "listings");
+        AddNavigation(nav, PricePage, "Импульс цены", "activity");
+        AddNavigation(nav, VolumePage, "Импульс объёма", "volume");
+        AddNavigation(nav, ChartsPage, "Графики", "candles");
+        AddNavigation(nav, AboutPage, "О программе", "info");
         var surface = new Border { Background = Terminal.Brush("Surface"), Padding = new Thickness(18, 16, 18, 16) };
         Grid.SetColumn(surface, 1);
         body.Children.Add(surface);
         var pageHost = new Grid();
-        surface.Child = pageHost;
-        pages[0] = Listings();
-        pages[1] = Signals();
-        pages[2] = About();
+        surface.Child = new ScrollViewer { Content = pageHost, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        pages[ListingsPage] = Listings();
+        pages[FiltersPage] = Rules(RuleKind.Filter);
+        pages[ModulesPage] = Modules();
+        pages[PricePage] = Rules(RuleKind.Price);
+        pages[VolumePage] = Rules(RuleKind.Volume);
+        pages[ChartsPage] = Shortcuts();
+        pages[AboutPage] = About();
         foreach (var page in pages) pageHost.Children.Add(page);
 
         var footer = Terminal.Rule(new Thickness(0, 1, 0, 0));
@@ -95,7 +102,8 @@ internal sealed class SettingsPanel : Border, IDisposable
         footer.Child = footerContent;
         Grid.SetRow(footer, 2);
         layout.Children.Add(footer);
-        SelectPage(0);
+        UpdateModuleNavigation();
+        SelectPage(ListingsPage);
         Loaded += (_, _) => navigation[0].Focus();
     }
 
@@ -119,6 +127,7 @@ internal sealed class SettingsPanel : Border, IDisposable
 
     private void SelectPage(int index)
     {
+        EndCapture();
         for (int i = 0; i < pages.Length; i++)
         {
             bool selected = i == index;
@@ -128,7 +137,7 @@ internal sealed class SettingsPanel : Border, IDisposable
             indicators[i].Background = selected ? Terminal.Brush("Accent") : Brushes.Transparent;
             AutomationProperties.SetItemStatus(navigation[i], selected ? "Текущий раздел" : "");
         }
-        if (index == 2 && !checkedOnOpen)
+        if (index == AboutPage && !checkedOnOpen)
         {
             checkedOnOpen = true;
             _ = Check();
@@ -233,94 +242,11 @@ internal sealed class SettingsPanel : Border, IDisposable
             ? $"{label}\nКаталог недоступен · {catalog.Error}" : label;
     }
 
-    private StackPanel Signals()
-    {
-        var panel = new StackPanel();
-        panel.Children.Add(Terminal.Heading("Резкий рост цены"));
-        panel.Children.Add(Terminal.Copy("Включайте и настраивайте порог для каждого интервала."));
-        var thresholds = new StackPanel { Margin = new Thickness(0, 14, 0, 0) };
-        for (int i = 0; i < settings.Thresholds.Length; i++)
-        {
-            int index = i;
-            var threshold = settings.Thresholds[i];
-            string interval = MainWindow.WindowName(threshold.Seconds);
-            var enabled = new CheckBox { IsChecked = threshold.Enabled, Content = interval, VerticalAlignment = VerticalAlignment.Center };
-            var value = new TextBox
-            {
-                Text = FormatThreshold(threshold.Percent), Width = 51, TextAlignment = TextAlignment.Right,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            fields.Add(value);
-            AutomationProperties.SetName(value, $"Порог за {interval}, %");
-            var field = new StackPanel { Orientation = Orientation.Horizontal };
-            field.Children.Add(value);
-            field.Children.Add(new TextBlock { Text = "%", Margin = new Thickness(4, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center });
-            var row = new DockPanel { MinHeight = 41 };
-            DockPanel.SetDock(field, Dock.Right);
-            row.Children.Add(field);
-            row.Children.Add(enabled);
-            var frame = Terminal.Rule(new Thickness(0, 1, 0, i == settings.Thresholds.Length - 1 ? 1 : 0));
-            frame.Child = row;
-            thresholds.Children.Add(frame);
-            enabled.Checked += (_, _) => SetEnabled(index, true);
-            enabled.Unchecked += (_, _) => SetEnabled(index, false);
-            value.TextChanged += (_, _) => Validate();
-            value.LostKeyboardFocus += (_, _) => SaveValue(index);
-            value.PreviewKeyDown += (_, e) =>
-            {
-                if (e.Key != Key.Enter) return;
-                SaveValue(index);
-                e.Handled = true;
-            };
-        }
-        panel.Children.Add(thresholds);
-        validation.Foreground = Terminal.Brush("Excluded");
-        validation.Margin = new Thickness(0, 6, 0, 0);
-        validation.Visibility = Visibility.Collapsed;
-        panel.Children.Add(validation);
-        return panel;
-    }
-
-    private void SetEnabled(int index, bool enabled)
-    {
-        var previous = settings.Thresholds[index];
-        if (previous.Enabled == enabled) return;
-        settings.Thresholds[index] = previous with { Enabled = enabled };
-        changed(true);
-    }
-
-    private static string FormatThreshold(double value) => value.ToString(CultureInfo.GetCultureInfo("ru-RU"));
-
-    internal static bool TryThreshold(string input, out double value) =>
-        double.TryParse(input.Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out value) &&
-        value is > 0 and <= 10000;
-
-    private void Validate()
-    {
-        bool invalid = false;
-        foreach (var field in fields)
-        {
-            bool valid = TryThreshold(field.Text, out _);
-            field.BorderBrush = Terminal.Brush(valid ? "Outline" : "Excluded");
-            invalid |= !valid;
-        }
-        validation.Text = "Введите порог больше 0 и не выше 10 000%.";
-        validation.Visibility = invalid ? Visibility.Visible : Visibility.Collapsed;
-    }
-
-    private void SaveValue(int index)
-    {
-        var previous = settings.Thresholds[index];
-        if (!TryThreshold(fields[index].Text, out double percent) || previous.Percent == percent) return;
-        settings.Thresholds[index] = previous with { Percent = percent };
-        changed(true);
-    }
-
     private StackPanel About()
     {
         var panel = new StackPanel();
         panel.Children.Add(Terminal.Heading("Thin Market Monitor", accent: true));
-        panel.Children.Add(Terminal.Copy("Мониторинг спотовых рынков для Windows. Приложение фильтрует монеты по листингам и открывает минутный график при резком росте цены."));
+        panel.Children.Add(Terminal.Copy("Мониторинг спотовых рынков для Windows. Приложение фильтрует монеты и открывает минутный график при импульсе цены или объёма."));
         var section = Terminal.Rule(new Thickness(0, 1, 0, 0));
         section.Margin = new Thickness(0, 16, 0, 0);
         section.Padding = new Thickness(0, 13, 0, 0);
@@ -394,7 +320,6 @@ internal sealed class SettingsPanel : Border, IDisposable
     public void Close()
     {
         if (Installing) return;
-        for (int i = 0; i < fields.Count; i++) SaveValue(i);
         close();
     }
 

@@ -4,7 +4,7 @@ using System.Text.Json;
 
 namespace ThinMarketMonitor;
 
-internal sealed class ExchangeApi(HttpClient http)
+internal sealed partial class ExchangeApi(HttpClient http)
 {
     private const string Binance = "https://api.binance.com/api/v3/";
     private const string Bybit = "https://api.bybit.com/v5/market/";
@@ -47,7 +47,7 @@ internal sealed class ExchangeApi(HttpClient http)
 
         string url = venue switch
         {
-            Venue.Binance => Binance + "exchangeInfo?permissions=SPOT&showPermissionSets=false",
+            Venue.Binance => Binance + "exchangeInfo?permissions=SPOT&symbolStatus=TRADING&showPermissionSets=false",
             Venue.Bybit => Bybit + "instruments-info?category=spot",
             Venue.Okx => Okx + "public/instruments?instType=SPOT",
             Venue.Bitget => Bitget + "public/symbols",
@@ -56,7 +56,7 @@ internal sealed class ExchangeApi(HttpClient http)
             Venue.Gate => Gate + "currency_pairs",
             _ => throw new ArgumentOutOfRangeException(nameof(venue))
         };
-        var root = await Get(url, ct);
+        var root = venue == Venue.Binance ? await BinanceCatalog(url, ct) : await Get(url, ct);
         if (venue == Venue.Bybit)
         {
             var pairs = new List<Market>();
@@ -182,6 +182,17 @@ internal sealed class ExchangeApi(HttpClient http)
         return json.RootElement.Clone();
     }
 
+    private async Task<JsonElement> BinanceCatalog(string url, CancellationToken ct)
+    {
+        using var attempt = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        attempt.CancelAfter(TimeSpan.FromSeconds(12));
+        try { return await Get(url, attempt.Token); }
+        catch (Exception ex) when (!ct.IsCancellationRequested && ex is HttpRequestException or OperationCanceledException)
+        {
+            return await Get(url.Replace("api.binance.com", "api-gcp.binance.com", StringComparison.Ordinal), ct);
+        }
+    }
+
     private static JsonElement Envelope(JsonElement root, string successCode)
     {
         if (root.Str("code") != successCode) throw new JsonException($"API вернул код {root.Str("code")}");
@@ -203,4 +214,6 @@ internal static class JsonFields
     public static string Optional(this JsonElement value, string key) => value.TryGetProperty(key, out var x) ? x.Str() : "";
     public static long Int(this JsonElement value) => long.Parse(value.Str(), CultureInfo.InvariantCulture);
     public static double Num(this JsonElement value) => double.Parse(value.Str(), CultureInfo.InvariantCulture);
+    public static double Number(this JsonElement value, string field) =>
+        double.TryParse(value.Optional(field), NumberStyles.Float, CultureInfo.InvariantCulture, out double number) ? number : double.NaN;
 }
