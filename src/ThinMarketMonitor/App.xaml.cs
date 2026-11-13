@@ -19,14 +19,15 @@ public partial class App : Application
         }
         if (e.Args is ["--smoke-test", var marker])
         {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
             try
             {
-                using var test = new MainWindow();
+                using var test = new MainWindow(startMonitoring: false);
                 test.Show();
                 test.SmokeTestLayout();
-                File.WriteAllText(marker, $"Thin Market Monitor {Updater.Current}");
                 test.Close();
-                Shutdown();
+                File.WriteAllText(marker, $"Thin Market Monitor {Updater.Current}");
+                Shutdown(0);
             }
             catch (Exception ex)
             {

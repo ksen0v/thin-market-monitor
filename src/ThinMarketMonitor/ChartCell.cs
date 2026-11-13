@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net.Http;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -182,7 +183,7 @@ internal sealed class ChartCell : Border
                 await Task.Delay(12_000, ct);
             }
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception ex) when (ct.IsCancellationRequested && ex is OperationCanceledException or ObjectDisposedException or HttpRequestException) { }
         finally { source.Dispose(); }
     }
 }

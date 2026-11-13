@@ -27,7 +27,9 @@ public partial class MainWindow : Window, IDisposable
     private long order;
     private DateTimeOffset nextRefresh;
 
-    public MainWindow()
+    public MainWindow() : this(startMonitoring: true) { }
+
+    internal MainWindow(bool startMonitoring)
     {
         InitializeComponent();
         api = new(http);
@@ -43,7 +45,7 @@ public partial class MainWindow : Window, IDisposable
         order = cells.Max(cell => cell.Order);
 
         RebuildGrid();
-        Loaded += async (_, _) =>
+        if (startMonitoring) Loaded += async (_, _) =>
         {
             timer.Tick += Tick;
             timer.Start();
@@ -140,10 +142,11 @@ public partial class MainWindow : Window, IDisposable
         try
         {
             var all = await Task.WhenAll(Enum.GetValues<Venue>().Select(async v => (v, await api.LoadCatalog(v, stop.Token))));
+            if (stop.IsCancellationRequested) return;
             foreach (var (venue, catalog) in all) catalogs[venue] = catalog;
             ApplyFilter(false);
         }
-        catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+        catch (Exception ex) when (stop.IsCancellationRequested && ex is OperationCanceledException or ObjectDisposedException or HttpRequestException) { }
         finally
         {
             loading = false;
