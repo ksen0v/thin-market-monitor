@@ -53,7 +53,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         CanUserReorderColumns = false, CanUserResizeColumns = false, CanUserResizeRows = false,
         BorderThickness = new Thickness(0)
     };
-    private readonly TextBlock status = Terminal.Copy("");
+    private readonly TextBlock status = new() { TextTrimming = TextTrimming.CharacterEllipsis };
     private Row[] rows = [];
     private ListCollectionView view;
     private CancellationTokenSource? worker;
@@ -94,6 +94,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         Children.Add(source);
         status.Margin = new Thickness(8, 4, 8, 5);
         status.FontSize = 11;
+        status.Foreground = Terminal.Brush("Muted");
         SetDock(status, Dock.Bottom);
         Children.Add(status);
         view = new ListCollectionView(rows);
@@ -199,14 +200,13 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
             throw new NotSupportedException();
     }
 
-    public void SetSource(Catalog? catalog, bool visible)
+    public void SetSource(IReadOnlyList<Market> next, bool visible, string? pending = null, string? details = null)
     {
         shown = visible;
-        var next = catalog?.Markets.ToArray() ?? [];
         if (!loadedCatalog || !markets.SequenceEqual(next))
         {
             loadedCatalog = true;
-            markets = next;
+            markets = next.ToArray();
             loadingSelection = true;
             rows = next.OrderBy(m => m.Symbol, StringComparer.Ordinal).ThenBy(m => m.Contract?.Product)
                 .Select(market => new Row(market, columns)).ToArray();
@@ -218,7 +218,8 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         }
         else if (visible && worker == null && rows.Length > 0) Restart();
         else if (!visible) Cancel();
-        if (next.Length == 0) status.Text = catalog?.Error == null ? "Ожидание каталога" : "Каталог недоступен · " + catalog.Error;
+        if (next.Count == 0) status.Text = pending ?? "Нет инструментов по этим условиям";
+        status.ToolTip = details;
     }
 
     private void Sort()
@@ -237,6 +238,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
     {
         Cancel();
         if (!shown || rows.Length == 0) return;
+        status.Text = $"{rows.Length:N0} инструментов";
         var run = new CancellationTokenSource();
         worker = run;
         _ = Load(rows.ToArray(), columns.ToArray(), run);

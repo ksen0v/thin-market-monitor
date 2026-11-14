@@ -17,7 +17,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
     private readonly Button[] navigation = new Button[8];
     private readonly Border[] indicators = new Border[8];
     private readonly FrameworkElement[] pages = new FrameworkElement[8];
-    private readonly Dictionary<MarketSource, (Button Button, TextBlock State)> venues = new();
+    private readonly Dictionary<(MarketSource Source, bool Overview), (Button Button, TextBlock State)> venues = new();
     private readonly TextBlock result = Terminal.Copy("");
     private readonly TextBlock updateStatus = Terminal.Copy($"v{Updater.Current}");
     private readonly Button check = new() { Content = "Проверить версию" };
@@ -68,7 +68,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         var rail = Terminal.Rule(new Thickness(0, 0, 1, 0));
         rail.Child = nav;
         body.Children.Add(rail);
-        AddNavigation(nav, ListingsPage, "Листинги", "listings");
+        AddNavigation(nav, ListingsPage, "Листинги сигналов", "listings");
         AddNavigation(nav, FiltersPage, "Фильтры", "filter");
         AddNavigation(nav, ModulesPage, "Модули", "listings");
         AddNavigation(nav, PricePage, "Импульс цены", "activity");
@@ -149,10 +149,17 @@ internal sealed partial class SettingsPanel : Border, IDisposable
     private StackPanel Listings()
     {
         var panel = new StackPanel();
-        panel.Children.Add(Terminal.Heading("Листинги"));
-        panel.Children.Add(Terminal.Copy("Нажимайте на плитку сегмента, чтобы сменить условие."));
+        panel.Children.Add(Terminal.Heading("Листинги сигналов"));
+        panel.Children.Add(Terminal.Copy("Условия для списка инструментов и автоматических сигналов."));
+        panel.Children.Add(ListingRules(overview: false));
+        return panel;
+    }
+
+    private StackPanel ListingRules(bool overview)
+    {
+        var panel = new StackPanel();
         var logos = new UniformGrid { Columns = 4, Margin = new Thickness(0, 14, -7, 5) };
-        AutomationProperties.SetName(logos, "Фильтр по биржам");
+        AutomationProperties.SetName(logos, overview ? "Листинги обзора" : "Листинги сигналов");
         foreach (var source in MarketSource.All)
         {
             var venue = source.Venue;
@@ -189,11 +196,11 @@ internal sealed partial class SettingsPanel : Border, IDisposable
             content.Children.Add(state);
             button.Content = content;
             logos.Children.Add(button);
-            venues.Add(source, (button, state));
+            venues.Add((source, overview), (button, state));
             button.Click += (_, _) =>
             {
-                var rules = source.Segment == Segment.Spot ? settings.Rules : settings.FuturesRules;
-                var rule = settings.Rule(source);
+                var rules = settings.ListingRules(source.Segment, overview);
+                var rule = rules.GetValueOrDefault(venue);
                 var next = rule switch
                 {
                     ListingRule.Ignore => ListingRule.Require,
@@ -202,10 +209,10 @@ internal sealed partial class SettingsPanel : Border, IDisposable
                 };
                 if (next == ListingRule.Ignore) rules.Remove(venue);
                 else rules[venue] = next;
-                UpdateVenue(source);
+                UpdateVenue(source, overview);
                 changed(false);
             };
-            UpdateVenue(source);
+            UpdateVenue(source, overview);
         }
         panel.Children.Add(logos);
         var legend = new WrapPanel();
@@ -228,16 +235,20 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         }
     }
 
-    private void UpdateVenue(MarketSource venue)
+    private void UpdateVenue(MarketSource venue, bool overview)
     {
-        var (button, state) = venues[venue];
-        var rule = settings.Rule(venue);
+        var (button, state) = venues[(venue, overview)];
+        bool isSource = overview && venue == settings.OverviewSource;
+        var rule = overview ? settings.OverviewRule(venue) : settings.Rule(venue);
         var (mark, caption, border, background) = rule switch
         {
             ListingRule.Require => ("✓", "требуется листинг", "Required", "RequiredSurface"),
             ListingRule.Exclude => ("×", "требуется отсутствие листинга", "Excluded", "ExcludedSurface"),
             _ => ("", "игнорировать", "Outline", "Plot")
         };
+        if (isSource) (mark, caption, border, background) = ("•", "источник списка", "Accent", "AccentSurface");
+        button.IsEnabled = !isSource;
+        ToolTipService.SetShowOnDisabled(button, true);
         state.Text = mark;
         state.Foreground = button.BorderBrush = Terminal.Brush(border);
         button.Background = Terminal.Brush(background);
@@ -279,7 +290,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
     public void UpdateFilter(string status)
     {
         result.Text = status;
-        foreach (var venue in venues.Keys) UpdateVenue(venue);
+        foreach (var (venue, overview) in venues.Keys) UpdateVenue(venue, overview);
     }
 
     private async Task Check()

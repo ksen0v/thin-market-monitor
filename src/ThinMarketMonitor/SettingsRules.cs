@@ -345,6 +345,12 @@ internal sealed partial class SettingsPanel
     private StackPanel OverviewOptions()
     {
         var panel = new StackPanel();
+        panel.Children.Add(Terminal.Heading("Листинги обзора"));
+        panel.Children.Add(Terminal.Copy($"Источник списка · {settings.OverviewSource.Label}. Его можно сменить в таблице обзора. Условия ниже проверяют листинги на других площадках."));
+        panel.Children.Add(ListingRules(overview: true));
+        var separator = Terminal.Rule(new Thickness(0, 1, 0, 0));
+        separator.Margin = new Thickness(0, 10, 0, 14);
+        panel.Children.Add(separator);
         panel.Children.Add(Terminal.Heading("Колонки обзора"));
         panel.Children.Add(Terminal.Copy("Тикер всегда виден. ATR% — средний истинный диапазон за период, делённый на последнюю цену закрытия."));
         var list = new StackPanel { Margin = new Thickness(0, 10, 0, 8) };

@@ -401,6 +401,8 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
     private readonly Pen upLine = new(Terminal.Brush("Rising"), 1);
     private readonly Pen downLine = new(Terminal.Brush("Falling"), 1);
     private readonly Pen rulerLine = new(Terminal.Brush("Accent"), 1);
+    private readonly Pen lastPriceLine = new(Terminal.Brush("Accent"), 1) { DashStyle = DashStyles.Dash };
+    private readonly Brush onAccent = Terminal.Brush("OnAccent");
     private readonly Typeface typeface = new(new FontFamily("Cascadia Mono, Consolas"),
         FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
     private static readonly CultureInfo Russian = CultureInfo.GetCultureInfo("ru-RU");
@@ -476,12 +478,19 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
         double body = Math.Max(1, step * 0.67);
         int rows = ActualHeight < 105 ? 3 : 5;
         int columns = ActualWidth > 325 ? 4 : ActualWidth > 190 ? 3 : 2;
+        double lastPrice = candles[^1].Close;
+        double priceY = view.Y(lastPrice);
+        FormattedText? priceLabel = double.IsFinite(priceY) && priceY >= plot.Top && priceY <= plot.Bottom
+            ? Text(lastPrice.ToString("G9", Russian), onAccent) : null;
+        double labelTop = Math.Max(0, priceY - (priceLabel?.Height ?? 0) / 2 - 2);
+        double labelBottom = labelTop + (priceLabel?.Height ?? 0) + 4;
         for (int i = 0; i < rows; i++)
         {
             double fraction = (double)i / (rows - 1);
             double y = plot.Top + plot.Height * fraction;
             dc.DrawLine(gridLine, new Point(plot.Left, y), new Point(plot.Right, y));
-            DrawText(dc, FormatPrice(view.High - view.Span * fraction, view.Span / (rows - 1)), plot.Right + 5, y - 6);
+            if (priceLabel == null || y + 7 < labelTop || y - 6 > labelBottom)
+                DrawText(dc, FormatPrice(view.High - view.Span * fraction, view.Span / (rows - 1)), plot.Right + 5, y - 6);
         }
         for (int i = 0; i < columns; i++)
         {
@@ -504,6 +513,18 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
                 new Rect(x - body / 2, Math.Min(view.Y(c.Open), view.Y(c.Close)), body, Math.Max(1, Math.Abs(view.Y(c.Close) - view.Y(c.Open)))));
         }
         dc.Pop();
+        if (priceLabel != null)
+        {
+            dc.DrawLine(lastPriceLine, new Point(plot.Left, priceY), new Point(plot.Right, priceY));
+            var axisLabel = new Rect(plot.Right, labelTop, ActualWidth - plot.Right, labelBottom - labelTop);
+            dc.DrawRectangle(accent, null, axisLabel);
+            dc.PushClip(new RectangleGeometry(axisLabel));
+            double available = axisLabel.Width - 6;
+            if (priceLabel.Width > available)
+                priceLabel = Text(lastPrice.ToString("G6", Russian), onAccent);
+            dc.DrawText(priceLabel, new Point(plot.Right + 3, labelTop + 2));
+            dc.Pop();
+        }
         if (drag is { Mode: Operation.Ruler } measure) DrawRuler(dc, measure);
     }
 

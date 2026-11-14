@@ -155,6 +155,31 @@ Require(ListingFilter.Apply(split, s => segmentRules.GetValueOrDefault(s)).Marke
     "AKE excluded by derivative base on each marked market");
 Require(ListingFilter.Apply(split, s => s == futBin ? ListingRule.Require : ListingRule.Ignore).Markets.SequenceEqual([akeFutures]),
     "positive futures can select the actual contract");
+var spotBybit = new MarketSource(Venue.Bybit);
+var futBybit = new MarketSource(Venue.Bybit, Segment.Futures);
+var kuUsdc = ku with { Symbol = $"{ku.Base}-USDC", Quote = "USDC" };
+split[spotKu] = new([ake, ku, kuUsdc, btc]);
+split[spotBybit] = new([new(Venue.Bybit, "BTCUSDT", "BTC", "USDT")]);
+split[futBybit] = new([new(Venue.Bybit, "AKEUSDT", "AKE", "USDT", new("linear"))]);
+var overview = new Settings { OverviewSource = spotKu };
+Require(ListingFilter.Apply(split, overview.OverviewRule, spotKu).Markets.SequenceEqual([ake, ku, kuUsdc, btc]),
+    "overview keeps all pairs from the selected source by default");
+foreach (var source in new[] { spotBin, futBin, spotBybit, futBybit })
+    overview.ListingRules(source.Segment, overview: true)[source.Venue] = ListingRule.Exclude;
+Require(ListingFilter.Apply(split, overview.OverviewRule, spotKu).Markets.SequenceEqual([ku, kuUsdc]) &&
+    overview.Rule(spotBin) == ListingRule.Ignore, "overview exclusions keep quotes and are independent of signals");
+overview.OverviewFuturesRules[Venue.Binance] = ListingRule.Require;
+overview.OverviewFuturesRules[Venue.Bybit] = ListingRule.Ignore;
+Require(ListingFilter.Apply(split, overview.OverviewRule, spotKu).Markets.SequenceEqual([ake]),
+    "a required futures match keeps the overview market on its selected spot source");
+split[futBybit] = new([], "unavailable");
+overview.OverviewFuturesRules[Venue.Bybit] = ListingRule.Exclude;
+var waitingOverview = ListingFilter.Apply(split, overview.OverviewRule, spotKu);
+Require(waitingOverview.Markets.Count == 0 && waitingOverview.Missing.SequenceEqual([futBybit]),
+    "overview waits for marked catalogs before excluding");
+Require(Settings.Deserialize(JsonSerializer.Serialize(overview)).OverviewRule(futBin) == ListingRule.Require &&
+    Settings.Deserialize("""{"Rules":{"Binance":2}}""").OverviewRule(spotBin) == ListingRule.Ignore,
+    "overview rules persist and older settings retain a complete overview");
 Require(ExchangeApi.Underlying(Venue.Binance, "1000SHIB") == "SHIB" &&
     ExchangeApi.Underlying(Venue.Binance, "1234SHIB") == "1234SHIB", "only explicit denomination aliases");
 Require(new Market(Venue.Binance, "BTCUSD_PERP", "BTC", "USD", new("coinm", 100, QuantityUnit.Quote))

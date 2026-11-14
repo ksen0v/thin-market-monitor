@@ -73,13 +73,16 @@ internal sealed class Settings
     internal static readonly VolumeRule[] DefaultVolumes = [new(15, true, 100), new(60, true, 400), new(300, true, 2000), new(900, true, 6000)];
     public Dictionary<Venue, ListingRule> Rules { get; set; } = new() { [Venue.KuCoin] = ListingRule.Require };
     public Dictionary<Venue, ListingRule> FuturesRules { get; set; } = [];
-    public ListingRule Rule(MarketSource source) => (source.Segment == Segment.Spot ? Rules : FuturesRules).GetValueOrDefault(source.Venue);
+    public ListingRule Rule(MarketSource source) => ListingRules(source.Segment).GetValueOrDefault(source.Venue);
     public int[] FrameButtons { get; set; } = [15, 60, 300];
     public Key FrameUp { get; set; } = Key.Up;
     public Key FrameDown { get; set; } = Key.Down;
     public bool Overview { get; set; }
     public bool OverviewDrawer { get; set; } = true;
     public MarketSource OverviewSource { get; set; } = new(Venue.KuCoin);
+    public Dictionary<Venue, ListingRule> OverviewSpotRules { get; set; } = [];
+    public Dictionary<Venue, ListingRule> OverviewFuturesRules { get; set; } = [];
+    public ListingRule OverviewRule(MarketSource source) => ListingRules(source.Segment, overview: true).GetValueOrDefault(source.Venue);
     public CellChoice? OverviewChoice { get; set; }
     public int OverviewFrame { get; set; } = 60;
     public OverviewColumn[] OverviewColumns { get; set; } = [new(MetricKind.Turnover, 1440), new(MetricKind.Change, 1440)];
@@ -98,6 +101,10 @@ internal sealed class Settings
     private static string PathName => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ThinMarketMonitor", "settings.json");
 
+    public Dictionary<Venue, ListingRule> ListingRules(Segment segment, bool overview = false) =>
+        overview ? segment == Segment.Spot ? OverviewSpotRules : OverviewFuturesRules :
+        segment == Segment.Spot ? Rules : FuturesRules;
+
     public static Settings Load()
     {
         Settings settings;
@@ -111,6 +118,8 @@ internal sealed class Settings
         var settings = JsonSerializer.Deserialize<Settings>(json) ?? new();
         settings.Rules ??= new();
         settings.FuturesRules ??= [];
+        settings.OverviewSpotRules ??= [];
+        settings.OverviewFuturesRules ??= [];
         settings.FrameButtons = (settings.FrameButtons ?? [15, 60, 300]).Where(Frames.All.Contains).Distinct().Order().ToArray();
         if (!MarketSource.All.Contains(settings.OverviewSource)) settings.OverviewSource = new(Venue.KuCoin);
         if (!Frames.All.Contains(settings.OverviewFrame)) settings.OverviewFrame = 60;
@@ -157,18 +166,23 @@ internal static class ListingFilter
         => Apply(catalogs.ToDictionary(x => new MarketSource(x.Key), x => x.Value),
             source => source.Segment == Segment.Spot ? rules.GetValueOrDefault(source.Venue) : ListingRule.Ignore);
 
-    public static FilterResult Apply(IReadOnlyDictionary<MarketSource, Catalog> catalogs, Func<MarketSource, ListingRule> rule)
+    public static FilterResult Apply(IReadOnlyDictionary<MarketSource, Catalog> catalogs, Func<MarketSource, ListingRule> rule,
+        MarketSource? source = null)
     {
-        var marked = MarketSource.All.Where(v => rule(v) != ListingRule.Ignore).ToArray();
+        ListingRule EffectiveRule(MarketSource market) => market == source ? ListingRule.Require : rule(market);
+        var marked = MarketSource.All.Where(v => EffectiveRule(v) != ListingRule.Ignore).ToArray();
         var missing = marked.Where(v => !catalogs.TryGetValue(v, out var c) || c.Error != null).ToArray();
         if (missing.Length > 0) return new([], missing);
 
-        var required = marked.Where(v => rule(v) == ListingRule.Require).ToArray();
-        var excluded = marked.Where(v => rule(v) == ListingRule.Exclude).ToArray();
-        var sources = required.Length > 0 ? required : catalogs.Keys.Where(v => v.Segment == Segment.Spot && !excluded.Contains(v)).ToArray();
+        var required = marked.Where(v => EffectiveRule(v) == ListingRule.Require).ToArray();
+        var excluded = marked.Where(v => EffectiveRule(v) == ListingRule.Exclude).ToArray();
+        var sources = source is { } selected ? [selected] : required.Length > 0 ? required :
+            catalogs.Keys.Where(v => v.Segment == Segment.Spot && !excluded.Contains(v)).ToArray();
         var bases = marked.ToDictionary(v => v, v => catalogs[v].Markets.Select(m => m.Base).ToHashSet());
-        return new(sources.Where(v => catalogs[v].Error == null).SelectMany(v => catalogs[v].Markets)
-            .Where(m => required.All(v => bases[v].Contains(m.Base)) && excluded.All(v => !bases[v].Contains(m.Base)))
+        var matching = sources.Where(v => catalogs[v].Error == null).SelectMany(v => catalogs[v].Markets)
+            .Where(m => required.All(v => bases[v].Contains(m.Base)) && excluded.All(v => !bases[v].Contains(m.Base)));
+        if (source.HasValue) return new(matching.ToArray(), []);
+        return new(matching
             .GroupBy(m => m.Base)
             .Select(g => g.OrderByDescending(m => m.Streaming)
                 .ThenBy(m => QuoteRank(m.Quote)).ThenBy(m => m.Source.Segment).ThenBy(m => m.Venue)

@@ -277,11 +277,17 @@ public partial class MainWindow : Window, IDisposable
         DrawerSwitch.ToolTip = drawerLabel;
         System.Windows.Automation.AutomationProperties.SetName(DrawerSwitch, drawerLabel);
         OverviewDrawerHost.Visibility = settings.OverviewDrawer ? Visibility.Visible : Visibility.Collapsed;
-        var catalog = catalogs.GetValueOrDefault(settings.OverviewSource);
+        var result = ListingFilter.Apply(catalogs, settings.OverviewRule, settings.OverviewSource);
+        int unavailable = result.Missing.Count(source => catalogs.GetValueOrDefault(source)?.Error != null);
+        string? pending = result.Missing.Count == 0 ? null : unavailable > 0
+            ? $"Недоступно каталогов: {unavailable} · фильтр ожидает данные"
+            : $"Загрузка каталогов: {result.Missing.Count}";
+        string? details = result.Missing.Count == 0 ? null : string.Join("\n", result.Missing.Select(source =>
+            $"{source.Label} · {catalogs.GetValueOrDefault(source)?.Error ?? "загрузка"}"));
         if (overviewChart.Choice?.Key != settings.OverviewChoice?.Key) overviewChart.Choice = settings.OverviewChoice;
-        overviewChart.Resolve(catalog?.Markets.FirstOrDefault(m => m.Key == settings.OverviewChoice?.Key));
+        overviewChart.Resolve(result.Markets.FirstOrDefault(m => m.Key == settings.OverviewChoice?.Key));
         overviewChart.Activate(settings.Overview);
-        overviewPanel.SetSource(catalog, settings.Overview && settings.OverviewDrawer);
+        overviewPanel.SetSource(result.Markets, settings.Overview && settings.OverviewDrawer, pending, details);
     }
 
     internal void SmokeTestLayout()
@@ -323,8 +329,8 @@ public partial class MainWindow : Window, IDisposable
             if (!ReferenceEquals(FullChart.Content, cells[0])) throw new InvalidOperationException("Fullscreen did not retain the chart.");
             ExitFullscreen();
             if (!Charts.Children.Contains(cells[0])) throw new InvalidOperationException("Fullscreen did not restore the chart.");
-            overviewPanel.SetSource(new Catalog([new Market(Venue.KuCoin, "CHECK-USDT", "CHECK", "USDT")]), false);
-            overviewPanel.SetSource(new Catalog([]), false);
+            overviewPanel.SetSource([new Market(Venue.KuCoin, "CHECK-USDT", "CHECK", "USDT")], false);
+            overviewPanel.SetSource([], false);
             settings.Overview = true;
             RefreshOverview();
             UpdateLayout();
@@ -517,12 +523,14 @@ public partial class MainWindow : Window, IDisposable
     private async void SettingsChanged(bool thresholdsChanged)
     {
         ApplyFilter(thresholdsChanged);
+        RefreshOverview();
         foreach (var cell in cells) cell.UpdateFrames();
         overviewChart.UpdateFrames();
         overviewPanel.UpdateColumns();
         Save();
         if (!thresholdsChanged && (catalogs.Count == 0 || catalogs.Any(c => c.Value.Error != null &&
-                settings.Rule(c.Key) != ListingRule.Ignore))) await ReloadCatalogs();
+                (settings.Rule(c.Key) != ListingRule.Ignore || settings.OverviewRule(c.Key) != ListingRule.Ignore ||
+                 c.Key == settings.OverviewSource)))) await ReloadCatalogs();
     }
 
     private void ShowDialog(FrameworkElement content)
