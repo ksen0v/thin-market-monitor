@@ -30,6 +30,7 @@ public partial class MainWindow : Window, IDisposable
     private HashSet<string> eligible = [];
     private MarketStreams? streams;
     private SettingsPanel? settingsPanel;
+    private SignalListingsPanel? signalListings;
     private MarketPicker? picker;
     private IInputElement? previousFocus;
     private ChartCell? fullscreenCell;
@@ -54,6 +55,7 @@ public partial class MainWindow : Window, IDisposable
         System.Windows.Documents.TextElement.SetForeground(mark, Terminal.Brush("Accent"));
         BrandMark.Child = mark;
         SettingsButton.Content = Terminal.LabelWithIcon("settings", "Настройки", 5);
+        SignalListingsButton.Content = Terminal.LabelWithIcon("listings", "Листинги", 5);
         for (int i = 0; i < cells.Length; i++)
         {
             int slot = i;
@@ -269,7 +271,7 @@ public partial class MainWindow : Window, IDisposable
     {
         GridSpace.Visibility = settings.Overview ? Visibility.Collapsed : Visibility.Visible;
         OverviewSpace.Visibility = settings.Overview ? Visibility.Visible : Visibility.Collapsed;
-        GridTwo.Visibility = GridThree.Visibility = settings.Overview ? Visibility.Collapsed : Visibility.Visible;
+        GridSwitch.Visibility = SignalListingsButton.Visibility = settings.Overview ? Visibility.Collapsed : Visibility.Visible;
         SpaceSwitch.Content = settings.Overview ? "Сигналы" : "Обзор";
         DrawerSwitch.Content = Terminal.Icon(settings.OverviewDrawer ? "drawer-open" : "drawer-closed");
         DrawerSwitch.Foreground = Terminal.Brush(settings.OverviewDrawer ? "Accent" : "Muted");
@@ -320,6 +322,11 @@ public partial class MainWindow : Window, IDisposable
             if (DialogHost.Content is not SettingsPanel)
                 throw new InvalidOperationException("The settings overlay did not open.");
             CloseDialog();
+            OpenSignalListings(this, new RoutedEventArgs());
+            UpdateLayout();
+            if (DialogHost.Content is not SignalListingsPanel || !SignalListingsButton.IsVisible)
+                throw new InvalidOperationException("The signal listing dialog did not open.");
+            CloseDialog();
             PickMarket(0);
             UpdateLayout();
             if (DialogHost.Content is not MarketPicker)
@@ -334,7 +341,7 @@ public partial class MainWindow : Window, IDisposable
             settings.Overview = true;
             RefreshOverview();
             UpdateLayout();
-            if (GridSpace.IsVisible || !OverviewSpace.IsVisible || overviewChart.Plot.ActualHeight <= 0)
+            if (GridSpace.IsVisible || SignalListingsButton.IsVisible || !OverviewSpace.IsVisible || overviewChart.Plot.ActualHeight <= 0)
                 throw new InvalidOperationException("The overview workspace did not open.");
         }
         finally
@@ -360,6 +367,7 @@ public partial class MainWindow : Window, IDisposable
                 if (!stop.IsCancellationRequested)
                 {
                     catalogs[v] = catalog;
+                    signalListings?.RefreshCatalogStatus();
                     RefreshOverview();
                     if (v.Segment == Segment.Spot || settings.Rule(v) != ListingRule.Ignore) ApplyFilter(false);
                 }
@@ -515,9 +523,15 @@ public partial class MainWindow : Window, IDisposable
 
     private void OpenSettings(object sender, RoutedEventArgs e)
     {
-        settingsPanel = new SettingsPanel(settings, catalogs, new Updater(http), SettingsChanged, CloseDialog, Close, settings.Overview);
+        settingsPanel = new SettingsPanel(settings, new Updater(http), SettingsChanged, CloseDialog, Close, settings.Overview);
         settingsPanel.UpdateFilter(CatalogStatus.Text);
         ShowDialog(settingsPanel);
+    }
+
+    private void OpenSignalListings(object sender, RoutedEventArgs e)
+    {
+        signalListings = new SignalListingsPanel(settings, catalogs, () => SettingsChanged(false), CloseDialog);
+        ShowDialog(signalListings);
     }
 
     private async void SettingsChanged(bool thresholdsChanged)
@@ -546,6 +560,7 @@ public partial class MainWindow : Window, IDisposable
     {
         settingsPanel?.Dispose();
         settingsPanel = null;
+        signalListings = null;
         picker = null;
         DialogHost.Content = null;
         Overlay.Visibility = Visibility.Collapsed;

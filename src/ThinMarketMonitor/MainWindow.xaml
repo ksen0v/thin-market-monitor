@@ -10,7 +10,9 @@
                 <DockPanel>
                     <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
                         <Button x:Name="SpaceSwitch" Click="ChangeWorkspace" MinHeight="26" Margin="0,0,6,0"/>
-                        <Border Background="{StaticResource Plot}" BorderBrush="{StaticResource Outline}" BorderThickness="1">
+                        <Button x:Name="SignalListingsButton" Click="OpenSignalListings" MinHeight="26" Margin="0,0,6,0"
+                                AutomationProperties.Name="Листинги сигналов"/>
+                        <Border x:Name="GridSwitch" Background="{StaticResource Plot}" BorderBrush="{StaticResource Outline}" BorderThickness="1">
                             <StackPanel Orientation="Horizontal" AutomationProperties.Name="Сетка графиков">
                                 <ToggleButton x:Name="GridTwo" Style="{StaticResource GridButton}" Content="2 × 2" Click="ChangeGrid"/>
                                 <ToggleButton x:Name="GridThree" Style="{StaticResource GridButton}" Content="3 × 3" Click="ChangeGrid" Margin="2,0,0,0"/>

@@ -105,6 +105,17 @@ internal sealed class Settings
         overview ? segment == Segment.Spot ? OverviewSpotRules : OverviewFuturesRules :
         segment == Segment.Spot ? Rules : FuturesRules;
 
+    public void CycleListingRule(MarketSource source, bool overview)
+    {
+        var rules = ListingRules(source.Segment, overview);
+        switch (rules.GetValueOrDefault(source.Venue))
+        {
+            case ListingRule.Ignore: rules[source.Venue] = ListingRule.Require; break;
+            case ListingRule.Require: rules[source.Venue] = ListingRule.Exclude; break;
+            default: rules.Remove(source.Venue); break;
+        }
+    }
+
     public static Settings Load()
     {
         Settings settings;

@@ -4,7 +4,10 @@ using System.Globalization;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Data;
+using System.Windows.Input;
+using System.Windows.Media;
 
 namespace ThinMarketMonitor;
 
@@ -45,6 +48,8 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
     private readonly Action<Market> select;
     private readonly Button source = new() { MinHeight = 32, Margin = new Thickness(8, 7, 8, 7),
         HorizontalContentAlignment = HorizontalAlignment.Stretch };
+    private readonly Popup sourceMenu = new() { Placement = PlacementMode.Bottom, StaysOpen = false, AllowsTransparency = true };
+    private readonly Dictionary<MarketSource, (Button Source, Button Rule)> sourceOptions = new();
     private readonly DataGrid table = new()
     {
         IsReadOnly = true, AutoGenerateColumns = false, HeadersVisibility = DataGridHeadersVisibility.Column,
@@ -73,23 +78,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         Background = Terminal.Brush("Surface");
         Margin = new Thickness(1, 0, 0, 0);
         UpdateSourceButton();
-        var choices = MarketSource.All.Select(next =>
-        {
-            var item = new MenuItem { Header = SourceLabel(next), IsChecked = next == settings.OverviewSource };
-            AutomationProperties.SetName(item, next.Label);
-            item.Click += (_, _) =>
-            {
-                if (next == settings.OverviewSource) return;
-                settings.OverviewSource = next;
-                settings.OverviewChoice = null;
-                loadedCatalog = false;
-                foreach (MenuItem option in source.ContextMenu.Items) option.IsChecked = ReferenceEquals(option, item);
-                UpdateSourceButton();
-                changed();
-            };
-            return item;
-        });
-        Terminal.AttachMenu(source, choices, 235);
+        BuildSourceMenu();
         SetDock(source, Dock.Top);
         Children.Add(source);
         status.Margin = new Thickness(8, 4, 8, 5);
@@ -120,6 +109,109 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         };
         Children.Add(table);
         UpdateColumns();
+    }
+
+    private void BuildSourceMenu()
+    {
+        var choices = new StackPanel { Margin = new Thickness(4) };
+        foreach (var market in MarketSource.All)
+        {
+            var row = new DockPanel();
+            var filter = new Button
+            {
+                Style = Terminal.Style("IconButton"), Width = 36, MinHeight = 26, FontFamily = new FontFamily("Segoe UI Symbol")
+            };
+            ToolTipService.SetShowOnDisabled(filter, true);
+            filter.Click += (_, _) =>
+            {
+                settings.CycleListingRule(market, overview: true);
+                UpdateSourceOptions();
+                changed();
+            };
+            SetDock(filter, Dock.Right);
+            row.Children.Add(filter);
+            var choose = new Button
+            {
+                Style = Terminal.Style("IconButton"), Content = SourceLabel(market), MinHeight = 26,
+                Padding = new Thickness(6, 0, 4, 0), HorizontalContentAlignment = HorizontalAlignment.Left
+            };
+            AutomationProperties.SetName(choose, $"Источник списка · {market.Label}");
+            choose.Click += (_, _) =>
+            {
+                sourceMenu.IsOpen = false;
+                source.Focus();
+                if (settings.OverviewSource == market) return;
+                settings.OverviewSource = market;
+                settings.OverviewChoice = null;
+                loadedCatalog = false;
+                UpdateSourceButton();
+                changed();
+            };
+            row.Children.Add(choose);
+            choices.Children.Add(row);
+            sourceOptions.Add(market, (choose, filter));
+        }
+        var layout = new DockPanel();
+        var header = Terminal.Rule(new Thickness(0, 0, 0, 1));
+        var legend = Terminal.Copy("✓ Есть листинг    × Нет листинга    — Любой");
+        legend.Margin = new Thickness(9, 5, 9, 5);
+        legend.FontSize = 11;
+        header.Child = legend;
+        SetDock(header, Dock.Top);
+        layout.Children.Add(header);
+        layout.Children.Add(new ScrollViewer { Content = choices, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled });
+        var surface = new Border
+        {
+            Child = layout, Background = Terminal.Brush("Surface"), BorderBrush = Terminal.Brush("Outline"),
+            BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(5), MaxHeight = 455
+        };
+        System.Windows.Documents.TextElement.SetForeground(surface, Terminal.Brush("Text"));
+        System.Windows.Documents.TextElement.SetFontFamily(surface, (FontFamily)Application.Current.FindResource("TerminalFont"));
+        System.Windows.Documents.TextElement.SetFontSize(surface, 12);
+        KeyboardNavigation.SetTabNavigation(surface, KeyboardNavigationMode.Cycle);
+        surface.PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key != Key.Escape) return;
+            sourceMenu.IsOpen = false;
+            source.Focus();
+            e.Handled = true;
+        };
+        sourceMenu.Child = surface;
+        sourceMenu.PlacementTarget = source;
+        sourceMenu.VerticalOffset = 3;
+        sourceMenu.Opened += (_, _) => sourceOptions[settings.OverviewSource].Source.Focus();
+        source.Click += (_, _) =>
+        {
+            UpdateSourceOptions();
+            surface.Width = Math.Max(265, source.ActualWidth);
+            sourceMenu.IsOpen = true;
+        };
+        IsVisibleChanged += (_, _) => { if (!IsVisible) sourceMenu.IsOpen = false; };
+    }
+
+    private void UpdateSourceOptions()
+    {
+        foreach (var (market, (choose, filter)) in sourceOptions)
+        {
+            bool active = market == settings.OverviewSource;
+            choose.Background = active ? Terminal.Brush("AccentSurface") : Brushes.Transparent;
+            choose.Foreground = Terminal.Brush(active ? "Accent" : "Text");
+            AutomationProperties.SetItemStatus(choose, active ? "Выбран" : "");
+            var (text, caption, foreground, background) = active ? ("•", "Источник списка", "Accent", "AccentSurface") :
+                settings.OverviewRule(market) switch
+                {
+                    ListingRule.Require => ("✓", "Требовать листинг", "Accent", "AccentSurface"),
+                    ListingRule.Exclude => ("×", "Исключать при листинге", "Excluded", "ExcludedSurface"),
+                    _ => ("—", "Без условия", "Muted", "Surface")
+                };
+            filter.Content = text;
+            filter.IsEnabled = !active;
+            filter.Foreground = Terminal.Brush(foreground);
+            filter.Background = Terminal.Brush(background);
+            filter.ToolTip = active ? caption : $"{caption} · нажмите для смены";
+            AutomationProperties.SetName(filter, $"{market.Label} · {caption}");
+        }
     }
 
     private static StackPanel SourceLabel(MarketSource market)
@@ -326,7 +418,11 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         worker = null;
     }
 
-    public void Dispose() => Cancel();
+    public void Dispose()
+    {
+        sourceMenu.IsOpen = false;
+        Cancel();
+    }
 
     internal sealed class Row(Market market, OverviewColumn[] metrics) : INotifyPropertyChanged
     {
