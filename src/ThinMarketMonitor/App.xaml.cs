@@ -17,6 +17,11 @@ public partial class App : Application
             Shutdown();
             return;
         }
+        if (e.Args is ["--apply-setup-update", ..])
+        {
+            Shutdown(Updater.ApplySetup(e.Args));
+            return;
+        }
         if (e.Args is ["--smoke-test", var marker])
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
@@ -26,7 +31,7 @@ public partial class App : Application
                 test.Show();
                 test.SmokeTestLayout();
                 test.Close();
-                File.WriteAllText(marker, $"Thin Market Monitor {Updater.Current}");
+                File.WriteAllText(marker, $"Thin Market Monitor {Updater.Current}\n{(Updater.Installed ? "Installed" : "Portable")}");
                 Shutdown(0);
             }
             catch (Exception ex)
@@ -46,11 +51,12 @@ public partial class App : Application
             return;
         }
         if (e.Args is [var updateArgument, var id] && Guid.TryParseExact(id, "N", out _) &&
-            updateArgument is "--update-ready" or "--update-cleanup")
+            updateArgument is "--update-ready" or "--update-cleanup" or "--setup-update-ready" or "--setup-update-cleanup")
         {
-            if (updateArgument == "--update-ready" && EventWaitHandle.TryOpenExisting(Updater.ReadyName(id), out var handle))
+            if (updateArgument.EndsWith("-ready", StringComparison.Ordinal) &&
+                EventWaitHandle.TryOpenExisting(Updater.ReadyName(id), out var handle))
                 ready = handle;
-            _ = Updater.CleanupHelper(id);
+            _ = Updater.CleanupHelper(id, installed: updateArgument.StartsWith("--setup-", StringComparison.Ordinal));
         }
 
         var window = new MainWindow();

@@ -13,7 +13,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 16
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
@@ -22,21 +22,22 @@ jobs:
       - name: Check filtering, chart placement, signals and updates
         run: dotnet run --project tests/ThinMarketMonitor.Checks -c Release
       - name: Publish standalone Windows x64 EXE
+        id: publish
         shell: pwsh
         run: |
-          $versionArg = @()
+          $version = dotnet msbuild src/ThinMarketMonitor -getProperty:Version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ($env:GITHUB_REF_TYPE -eq 'tag') {
             if ($env:GITHUB_REF_NAME -notmatch '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
               throw 'Release tag must be vMAJOR.MINOR.PATCH.'
             }
-            $versionArg = @("-p:Version=$($env:GITHUB_REF_NAME.Substring(1))")
+            $version = $env:GITHUB_REF_NAME.Substring(1)
           }
-          dotnet publish src/ThinMarketMonitor -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o artifacts/publish @versionArg
+          dotnet publish src/ThinMarketMonitor -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o artifacts/publish "-p:Version=$version"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "version=$version" >> $env:GITHUB_OUTPUT
           New-Item -ItemType Directory -Path artifacts/release | Out-Null
           Copy-Item artifacts/publish/ThinMarketMonitor.exe artifacts/release/ThinMarketMonitor-win-x64.exe
-          $hash = (Get-FileHash artifacts/release/ThinMarketMonitor-win-x64.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  ThinMarketMonitor-win-x64.exe" | Set-Content artifacts/release/SHA256SUMS.txt -Encoding ascii
       - name: Smoke-test the portable EXE
         shell: pwsh
         run: |
@@ -45,6 +46,43 @@ jobs:
           if (!$process.WaitForExit(60000)) { $process.Kill(); throw 'Smoke test timed out.' }
           if (Test-Path -LiteralPath $marker) { Get-Content -LiteralPath $marker }
           if ($process.ExitCode -ne 0 -or !(Test-Path -LiteralPath $marker)) { throw "Smoke test failed (exit $($process.ExitCode))." }
+          if ((Get-Content -LiteralPath $marker -Raw).Trim() -ne "Thin Market Monitor ${{ steps.publish.outputs.version }}`nPortable") {
+            throw 'Portable smoke test reported an unexpected version or install mode.'
+          }
+      - name: Build Setup and verify the installation lifecycle
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ steps.publish.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $iscc = ./installer/Get-InnoSetup.ps1 -Destination (Join-Path $env:RUNNER_TEMP 'tmm-inno')
+          $exe = (Resolve-Path artifacts/publish/ThinMarketMonitor.exe).Path
+          $release = (Resolve-Path artifacts/release).Path
+          & $iscc /Qp "/DAppVersion=$env:APP_VERSION" "/DAppExe=$exe" "/O$release" installer/ThinMarketMonitor.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $version = [version]$env:APP_VERSION
+          $older = if ($version.Build -gt 0) { [version]::new($version.Major, $version.Minor, $version.Build - 1) }
+            elseif ($version.Minor -gt 0) { [version]::new($version.Major, $version.Minor - 1, 999) }
+            elseif ($version.Major -gt 0) { [version]::new($version.Major - 1, 999, 999) }
+          $setup = Join-Path $release 'ThinMarketMonitor-Setup-win-x64.exe'
+          $test = @{ Setup = $setup; Version = $env:APP_VERSION; WorkDirectory = 'artifacts/setup-test' }
+          if ($older) {
+            dotnet publish src/ThinMarketMonitor -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o artifacts/previous-app "-p:Version=$older"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $previousExe = (Resolve-Path artifacts/previous-app/ThinMarketMonitor.exe).Path
+            $previousDir = Join-Path (Get-Location) 'artifacts/previous-setup'
+            & $iscc /Qp "/DAppVersion=$older" "/DAppExe=$previousExe" "/O$previousDir" installer/ThinMarketMonitor.iss
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $test.PreviousSetup = Join-Path $previousDir 'ThinMarketMonitor-Setup-win-x64.exe'
+            $test.PreviousVersion = $older.ToString()
+          }
+          ./installer/Test-Setup.ps1 @test
+
+          Get-ChildItem -LiteralPath $release -Filter '*.exe' | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          } | Set-Content -LiteralPath (Join-Path $release 'SHA256SUMS.txt') -Encoding ascii
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ThinMarketMonitor-win-x64
@@ -66,5 +104,5 @@ jobs:
         run: |
           gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name ThinMarketMonitor-win-x64 --dir release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          gh release create $env:GITHUB_REF_NAME ./release/ThinMarketMonitor-win-x64.exe ./release/SHA256SUMS.txt --repo $env:GITHUB_REPOSITORY --verify-tag --title "Thin Market Monitor $env:GITHUB_REF_NAME" --generate-notes
+          gh release create $env:GITHUB_REF_NAME ./release/ThinMarketMonitor-Setup-win-x64.exe ./release/ThinMarketMonitor-win-x64.exe ./release/SHA256SUMS.txt --repo $env:GITHUB_REPOSITORY --verify-tag --title "Thin Market Monitor $env:GITHUB_REF_NAME" --generate-notes
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

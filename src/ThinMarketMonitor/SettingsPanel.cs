@@ -258,7 +258,8 @@ internal sealed partial class SettingsPanel : Border, IDisposable
     {
         var panel = new StackPanel();
         panel.Children.Add(Terminal.Heading("Thin Market Monitor", accent: true));
-        panel.Children.Add(Terminal.Copy("Мониторинг спотовых рынков для Windows. Приложение фильтрует монеты и открывает минутный график при импульсе цены или объёма."));
+        panel.Children.Add(Terminal.Copy("Мониторинг спотовых и фьючерсных рынков для Windows."));
+        panel.Children.Add(Terminal.Copy(Updater.Installed ? "Установленная версия · обновляется через Setup" : "Portable · автономный EXE"));
         var section = Terminal.Rule(new Thickness(0, 1, 0, 0));
         section.Margin = new Thickness(0, 16, 0, 0);
         section.Padding = new Thickness(0, 13, 0, 0);

@@ -297,13 +297,32 @@ Require(Settings.Deserialize(JsonSerializer.Serialize(migrated)).Thresholds.Any(
 
 string asset = Updater.Asset;
 string url = $"https://github.com/{Updater.Repository}/releases/download/v0.2.0/{asset}";
+string setupUrl = $"https://github.com/{Updater.Repository}/releases/download/v0.2.0/{Updater.SetupAsset}";
 using var release = JsonDocument.Parse(JsonSerializer.Serialize(new
 {
     tag_name = "v0.2.0", draft = false, prerelease = false,
-    assets = new[] { new { name = asset, state = "uploaded", browser_download_url = url, size = 10, digest = "sha256:" + new string('a', 64) } }
+    assets = new[]
+    {
+        new { name = Updater.SetupAsset, state = "uploaded", browser_download_url = setupUrl, size = 42, digest = "sha256:" + new string('b', 64) },
+        new { name = asset, state = "uploaded", browser_download_url = url, size = 10, digest = "sha256:" + new string('a', 64) }
+    }
 }));
-Require(Updater.Parse(release.RootElement, new(0, 1, 0))?.Download.ToString() == url, "new stable release");
+Require(Updater.Parse(release.RootElement, new(0, 1, 0)) is { Installed: false, Size: 10 } portable &&
+    portable.Download.ToString() == url, "portable uses the portable asset");
+Require(Updater.Parse(release.RootElement, new(0, 1, 0), installed: true) is { Installed: true, Size: 42 } installed &&
+    installed.Download.ToString() == setupUrl && installed.Digest == new string('b', 64), "installed uses Setup metadata");
 Require(Updater.Parse(release.RootElement, new(0, 2, 0)) == null, "same version");
+Require(Updater.Parse(release.RootElement, new(0, 2, 1), installed: true) == null, "installed ignores older releases");
+foreach (string malformed in new[] { release.RootElement.GetRawText().Replace(Updater.SetupAsset, "missing.exe"),
+    release.RootElement.GetRawText().Replace("sha256:" + new string('b', 64), "sha256:invalid"),
+    release.RootElement.GetRawText().Replace(setupUrl, "https://example.com/Setup.exe") })
+{
+    using var badRelease = JsonDocument.Parse(malformed);
+    bool rejected = false;
+    try { Updater.Parse(badRelease.RootElement, new(0, 1, 0), installed: true); }
+    catch (System.IO.IOException) { rejected = true; }
+    Require(rejected, "installed update fails closed on missing or invalid Setup");
+}
 Console.WriteLine("Listings, volume conditions, chart placement, migration, price and volume windows, eight trade adapters and update metadata passed.");
 return 0;
 

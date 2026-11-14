@@ -1,6 +1,13 @@
 # Thin Market Monitor
 
-Windows-приложение для фильтрации спотовых и фьючерсных рынков, мониторинга импульсов цены и объёма и просмотра свечей. [Скачать Windows x64 EXE](https://github.com/ksen0v/thin-market-monitor/releases/latest/download/ThinMarketMonitor-win-x64.exe). Запустите файл из папки, доступной на запись. Приложение сохраняет настройки в `%LOCALAPPDATA%\ThinMarketMonitor\settings.json`.
+Windows-приложение для фильтрации спотовых и фьючерсных рынков, мониторинга импульсов цены и объёма и просмотра свечей.
+
+## Установка на Windows x64
+
+- [Скачать Setup](https://github.com/ksen0v/thin-market-monitor/releases/latest/download/ThinMarketMonitor-Setup-win-x64.exe). Мастер устанавливает приложение для текущего пользователя без прав администратора. Папка по умолчанию — `%LOCALAPPDATA%\Programs\Thin Market Monitor`. Ярлык в «Пуск» добавляется автоматически, ярлык на рабочем столе можно выбрать в мастере. Приложение удаляется через «Установленные приложения» Windows.
+- [Скачать portable EXE](https://github.com/ksen0v/thin-market-monitor/releases/latest/download/ThinMarketMonitor-win-x64.exe). Его можно запустить сразу. Для встроенного обновления нужна папка с правом записи.
+
+Обе версии используют `%LOCALAPPDATA%\ThinMarketMonitor\settings.json`. Установка, обновление и удаление через Windows сохраняют этот файл.
 
 ## Фильтр и выбор рынка
 
@@ -46,7 +53,9 @@ dotnet run --project tests/ThinMarketMonitor.Checks -c Release -- --segments
 dotnet publish src/ThinMarketMonitor -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o artifacts/publish
 ```
 
-Пуш тега формата `vMAJOR.MINOR.PATCH` запускает Windows-сборку, автоматические проверки, запуск EXE и публикацию в GitHub Releases. Раздел «О программе» в настройках проверяет последний стабильный релиз этого репозитория. При наличии новой версии кнопка скачивает EXE, сверяет размер и SHA-256 из метаданных GitHub, затем атомарно заменяет файл после выхода. Предыдущая версия сохраняется до подтверждения запуска новой. При сбое запуска выполняется попытка отката. EXE выпускается без подписи Authenticode. Для автоматического обновления используйте папку с правом записи.
+Пуш тега формата `vMAJOR.MINOR.PATCH` запускает Windows-сборку portable EXE и Setup, проверку установки, обновления и удаления, затем публикацию обоих файлов и `SHA256SUMS.txt` в GitHub Releases. Setup собирается с закреплённой версией [Inno Setup](https://jrsoftware.org/inno-setup/downloads).
+
+«Настройки → О программе» проверяет последний стабильный релиз и сверяет размер и SHA-256 загружаемого файла с метаданными GitHub. Установленная копия скачивает Setup, проверяет его версию, обновляет приложение в текущей папке и запускает его снова. Если Setup завершился с ошибкой, приложение показывает код ошибки и путь к журналу установки, когда журнал доступен. Portable скачивает EXE, заменяет его после выхода и при сбое запуска пытается восстановить предыдущий файл. Оба файла выпускаются без подписи Authenticode.
 
 ## Официальные API
 

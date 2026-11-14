@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Microsoft.Win32;
 using System.IO;
 using System.Net;
 using System.Net.Http;
@@ -9,12 +10,17 @@ using System.Windows;
 
 namespace ThinMarketMonitor;
 
-internal record Release(Version Version, Uri Download, long Size, string Digest);
+internal record Release(Version Version, Uri Download, long Size, string Digest, bool Installed = false);
 
 internal sealed class Updater(HttpClient http)
 {
     internal const string Repository = "ksen0v/thin-market-monitor";
     internal const string Asset = "ThinMarketMonitor-win-x64.exe";
+    internal const string SetupAsset = "ThinMarketMonitor-Setup-win-x64.exe";
+    internal const string Executable = "ThinMarketMonitor.exe";
+    private const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\ThinMarketMonitor_is1";
+    public static bool Installed => RegisteredExecutable() is { } path &&
+        string.Equals(path, Environment.ProcessPath, StringComparison.OrdinalIgnoreCase);
     internal static Version Current => new(typeof(Updater).Assembly
         .GetCustomAttribute<AssemblyInformationalVersionAttribute>()!.InformationalVersion.Split('+')[0]);
 
@@ -27,28 +33,29 @@ internal sealed class Updater(HttpClient http)
         if (response.StatusCode == HttpStatusCode.NotFound) return null;
         response.EnsureSuccessStatusCode();
         using var json = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
-        return Parse(json.RootElement, Current);
+        return Parse(json.RootElement, Current, Installed);
     }
 
-    internal static Release? Parse(JsonElement root, Version current)
+    internal static Release? Parse(JsonElement root, Version current, bool installed = false)
     {
         string tag = root.Str("tag_name");
         if (!tag.StartsWith('v') || !Version.TryParse(tag[1..], out var version) ||
             version.Build < 0 || version.Revision >= 0 || version <= current ||
             root.GetProperty("draft").GetBoolean() || root.GetProperty("prerelease").GetBoolean()) return null;
 
+        string assetName = installed ? SetupAsset : Asset;
         foreach (var asset in root.GetProperty("assets").EnumerateArray())
         {
-            if (asset.Str("name") != Asset || asset.Str("state") != "uploaded") continue;
-            string expected = $"https://github.com/{Repository}/releases/download/{tag}/{Asset}";
+            if (asset.Str("name") != assetName || asset.Str("state") != "uploaded") continue;
+            string expected = $"https://github.com/{Repository}/releases/download/{tag}/{assetName}";
             string digest = asset.Optional("digest");
-            long size = asset.GetProperty("size").Int();
+            long size = asset.GetProperty("size").GetInt64();
             if (asset.Str("browser_download_url") != expected || !digest.StartsWith("sha256:", StringComparison.Ordinal) ||
                 !ValidHash(digest[7..]) || size is <= 0 or > 300_000_000)
                 break;
-            return new(version, new Uri(expected), size, digest[7..]);
+            return new(version, new Uri(expected), size, digest[7..], installed);
         }
-        throw new IOException("В релизе отсутствует Windows EXE с контрольной суммой SHA-256.");
+        throw new IOException($"В релизе отсутствует {assetName} с контрольной суммой SHA-256.");
     }
 
     public async Task Stage(Release release, IProgress<int> progress, CancellationToken ct)
@@ -56,47 +63,21 @@ internal sealed class Updater(HttpClient http)
         string target = Environment.ProcessPath ?? throw new IOException("Путь к EXE недоступен.");
         if (!Path.GetExtension(target).Equals(".exe", StringComparison.OrdinalIgnoreCase))
             throw new IOException("Обновление доступно для автономного EXE.");
+        if (release.Installed != Installed)
+            throw new IOException("Режим установки изменился. Запустите нужную копию и проверьте обновление снова.");
         string id = Guid.NewGuid().ToString("N");
-        string stage = Path.Combine(Path.GetDirectoryName(target)!, ".tmm-update-" + id);
+        string stage = release.Installed ? SetupStage(id) : Path.Combine(Path.GetDirectoryName(target)!, ".tmm-update-" + id);
         Directory.CreateDirectory(stage);
-        string payload = Path.Combine(stage, "download.exe");
+        string payload = Path.Combine(stage, release.Installed ? SetupAsset : "download.exe");
         string helper = Path.Combine(stage, "updater.exe");
         try
         {
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(TimeSpan.FromMinutes(12));
-            var token = timeout.Token;
-            using var response = await http.GetAsync(release.Download, HttpCompletionOption.ResponseHeadersRead, token);
-            response.EnsureSuccessStatusCode();
-            await using (var input = await response.Content.ReadAsStreamAsync(token))
-            await using (var output = new FileStream(payload, FileMode.CreateNew, FileAccess.Write, FileShare.None, 131072, true))
-            {
-                byte[] buffer = new byte[131072];
-                long received = 0;
-                int lastPercent = -1;
-                while (true)
-                {
-                    int read = await input.ReadAsync(buffer, token);
-                    if (read == 0) break;
-                    received += read;
-                    if (received > release.Size) throw new IOException("Размер EXE превышает данные релиза.");
-                    await output.WriteAsync(buffer.AsMemory(0, read), token);
-                    int percent = (int)(received * 100 / release.Size);
-                    if (percent != lastPercent) progress.Report(lastPercent = percent);
-                }
-                if (received != release.Size) throw new IOException("Размер EXE отличается от данных релиза.");
-            }
-
-            await using (var content = File.OpenRead(payload))
-            {
-                var digest = Convert.ToHexString(await SHA256.HashDataAsync(content, token));
-                if (!digest.Equals(release.Digest, StringComparison.OrdinalIgnoreCase))
-                    throw new IOException("Контрольная сумма EXE не совпала.");
-            }
-            await Task.Run(() => File.Copy(target, helper), token);
-            token.ThrowIfCancellationRequested();
-            using var process = Launch(helper, "--apply-update", id, Environment.ProcessId.ToString(),
-                Path.GetFileName(target), release.Digest);
+            await Download(release, payload, progress, ct);
+            await Task.Run(() => File.Copy(target, helper), ct);
+            ct.ThrowIfCancellationRequested();
+            using var process = release.Installed
+                ? Launch(helper, "--apply-setup-update", id, Environment.ProcessId.ToString(), release.Version.ToString(), release.Digest, target)
+                : Launch(helper, "--apply-update", id, Environment.ProcessId.ToString(), Path.GetFileName(target), release.Digest);
         }
         catch
         {
@@ -107,7 +88,140 @@ internal sealed class Updater(HttpClient http)
         }
     }
 
+    private async Task Download(Release release, string payload, IProgress<int> progress, CancellationToken ct)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromMinutes(12));
+        var token = timeout.Token;
+        using var response = await http.GetAsync(release.Download, HttpCompletionOption.ResponseHeadersRead, token);
+        response.EnsureSuccessStatusCode();
+        await using (var input = await response.Content.ReadAsStreamAsync(token))
+        await using (var output = new FileStream(payload, FileMode.CreateNew, FileAccess.Write, FileShare.None, 131072, true))
+        {
+            byte[] buffer = new byte[131072];
+            long received = 0;
+            int lastPercent = -1;
+            while (true)
+            {
+                int read = await input.ReadAsync(buffer, token);
+                if (read == 0) break;
+                received += read;
+                if (received > release.Size) throw new IOException("Размер EXE превышает данные релиза.");
+                await output.WriteAsync(buffer.AsMemory(0, read), token);
+                int percent = (int)(received * 100 / release.Size);
+                if (percent != lastPercent) progress.Report(lastPercent = percent);
+            }
+            if (received != release.Size) throw new IOException("Размер EXE отличается от данных релиза.");
+        }
+
+        await using var content = File.OpenRead(payload);
+        var digest = Convert.ToHexString(await SHA256.HashDataAsync(content, token));
+        if (!digest.Equals(release.Digest, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("Контрольная сумма EXE не совпала.");
+    }
+
     internal static string ReadyName(string id) => @"Local\ThinMarketMonitor-Update-" + id;
+
+    private static string SetupStage(string id) => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ThinMarketMonitor", "Updates", id);
+
+    private static string? RegisteredExecutable()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(UninstallKey);
+        return key?.GetValue("InstallLocation") is string location && Path.IsPathFullyQualified(location)
+            ? Path.GetFullPath(Path.Combine(location, Executable)) : null;
+    }
+
+    private static Version? RegisteredVersion()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(UninstallKey);
+        return Version.TryParse(key?.GetValue("DisplayVersion") as string, out var version) ? version : null;
+    }
+
+    internal static int ApplySetup(string[] args)
+    {
+        if (args is not ["--apply-setup-update", var id, var pidText, var versionText, var digest, var target] ||
+            !Guid.TryParseExact(id, "N", out _) || !int.TryParse(pidText, out int pid) || pid <= 0 || !ValidHash(digest) ||
+            !Version.TryParse(versionText, out var version) || version <= Current || version.Build < 0 || version.Revision >= 0 ||
+            !string.Equals(Environment.ProcessPath, Path.Combine(SetupStage(id), "updater.exe"), StringComparison.OrdinalIgnoreCase))
+            return 1;
+
+        string stage = SetupStage(id);
+        string payload = Path.Combine(stage, SetupAsset);
+        string log = Path.Combine(stage, "setup.log");
+        bool mayRestart = false;
+        try
+        {
+            using var updateLock = new Mutex(true, @"Local\ThinMarketMonitor-SetupUpdate", out bool ownsUpdate);
+            if (!ownsUpdate) throw new IOException("Другое обновление уже выполняется.");
+            if (!IsRegisteredTarget() || RegisteredVersion() != Current)
+                throw new IOException("Не удалось подтвердить путь и версию установленного приложения.");
+            WaitForOriginal(pid, target);
+            mayRestart = true;
+
+            using (var content = File.OpenRead(payload))
+            {
+                if (!Convert.ToHexString(SHA256.HashData(content)).Equals(digest, StringComparison.OrdinalIgnoreCase))
+                    throw new IOException("Контрольная сумма загруженного Setup изменилась.");
+                var info = FileVersionInfo.GetVersionInfo(payload);
+                if (FileVersion(info) != version)
+                    throw new IOException($"Версия Setup не совпадает с v{version}.");
+            }
+
+            using var installer = Launch(payload, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
+                "/NOCLOSEAPPLICATIONS", "/NORESTARTAPPLICATIONS", "/RESTARTEXITCODE=3010",
+                "/DIR=" + Path.GetDirectoryName(target), "/LOG=" + log);
+            installer.WaitForExit();
+            if (installer.ExitCode != 0)
+                throw new IOException(installer.ExitCode == 3010 ? "Для завершения установки требуется перезапуск Windows."
+                    : $"Setup завершился с кодом {installer.ExitCode}.");
+            if (!IsRegisteredTarget() || RegisteredVersion() != version ||
+                FileVersion(FileVersionInfo.GetVersionInfo(target)) != version)
+                throw new IOException($"Setup не подтвердил установку v{version}.");
+
+            using var ready = new EventWaitHandle(false, EventResetMode.ManualReset, ReadyName(id));
+            using var updated = Launch(target, "--setup-update-ready", id);
+            mayRestart = false;
+            var timeout = Stopwatch.StartNew();
+            while (!ready.WaitOne(200))
+                if (updated.HasExited || timeout.Elapsed >= TimeSpan.FromSeconds(40))
+                    throw new IOException("Новая версия установлена. Запустите Thin Market Monitor из меню «Пуск».");
+            TryDelete(log);
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            string message = ex.Message;
+            if (mayRestart && IsRegisteredTarget() && File.Exists(target))
+            {
+                try { using var previous = Launch(target, "--setup-update-cleanup", id); }
+                catch (Exception restart) { message += "\n" + restart.Message; }
+            }
+            if (File.Exists(log)) message += "\nЖурнал установки — " + log;
+            try { File.WriteAllText(Path.Combine(stage, "error.txt"), message); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+            MessageBox.Show(message, "Обновление Thin Market Monitor", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return 1;
+        }
+        finally { TryDelete(payload); }
+
+        bool IsRegisteredTarget() => string.Equals(RegisteredExecutable(), target, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static Version FileVersion(FileVersionInfo info) => new(info.FileMajorPart, info.FileMinorPart, info.FileBuildPart);
+
+    private static void WaitForOriginal(int pid, string target)
+    {
+        Process? original = null;
+        try { original = Process.GetProcessById(pid); } catch (ArgumentException) { }
+        using (original)
+        {
+            if (original == null || original.HasExited) return;
+            if (!string.Equals(original.MainModule?.FileName, target, StringComparison.OrdinalIgnoreCase))
+                throw new IOException("Исходный процесс не совпадает с обновляемым EXE.");
+            if (!original.WaitForExit(30_000)) throw new IOException("Приложение не завершилось за 30 секунд.");
+        }
+    }
 
     internal static void Apply(string[] args)
     {
@@ -123,17 +237,7 @@ internal sealed class Updater(HttpClient http)
         bool replaced = false;
         try
         {
-            Process? original = null;
-            try { original = Process.GetProcessById(pid); } catch (ArgumentException) { }
-            using (original)
-            {
-                if (original != null && !original.HasExited)
-                {
-                    if (!string.Equals(original.MainModule?.FileName, target, StringComparison.OrdinalIgnoreCase))
-                        throw new IOException("Исходный процесс не совпадает с обновляемым EXE.");
-                    if (!original.WaitForExit(30_000)) throw new IOException("Приложение не завершилось за 30 секунд.");
-                }
-            }
+            WaitForOriginal(pid, target);
 
             using (var content = File.OpenRead(payload))
                 if (!Convert.ToHexString(SHA256.HashData(content)).Equals(digest, StringComparison.OrdinalIgnoreCase))
@@ -178,9 +282,9 @@ internal sealed class Updater(HttpClient http)
         }
     }
 
-    internal static async Task CleanupHelper(string id)
+    internal static async Task CleanupHelper(string id, bool installed = false)
     {
-        string stage = Path.Combine(Path.GetDirectoryName(Environment.ProcessPath!)!, ".tmm-update-" + id);
+        string stage = installed ? SetupStage(id) : Path.Combine(Path.GetDirectoryName(Environment.ProcessPath!)!, ".tmm-update-" + id);
         string helper = Path.Combine(stage, "updater.exe");
         for (int attempt = 0; attempt < 60; attempt++)
         {
