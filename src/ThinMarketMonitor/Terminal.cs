@@ -4,6 +4,7 @@ using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Documents;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 
 namespace ThinMarketMonitor;
@@ -30,6 +31,9 @@ internal static class Terminal
                 "volume" => "M4 20 H21 M7 17 V11 M12 17 V5 M17 17 V8",
                 "filter" => "M3 4 H21 L14 12 V20 L10 18 V12 Z",
                 "info" => "M12 2 A10 10 0 1 0 12 22 A10 10 0 1 0 12 2 M12 11 V16 M12 8 H12.1",
+                "chevron" => "M7 10 L12 15 L17 10",
+                "drawer-open" => "M3 4 H21 V20 H3 Z M15 4 V20 M17 8 H19 M17 12 H19 M17 16 H19",
+                "drawer-closed" => "M3 4 H21 V20 H3 Z M15 4 V20 M7 12 H12 M10 10 L12 12 L10 14",
                 _ => throw new ArgumentOutOfRangeException(nameof(name))
             }),
             Width = 24, Height = 24, StrokeThickness = 2,
@@ -57,6 +61,28 @@ internal static class Terminal
         AutomationProperties.SetName(button, label);
         ToolTipService.SetShowOnDisabled(button, true);
         return button;
+    }
+
+    public static FrameworkElement VenueLogo(Venue venue, double size)
+    {
+        string asset = (venue == Venue.Alpha ? Venue.Binance : venue).ToString().ToLowerInvariant();
+        return new Image
+        {
+            Source = new BitmapImage(new Uri($"pack://application:,,,/ThinMarketMonitor;component/Assets/{asset}.png")),
+            Width = size, Height = size, Stretch = Stretch.Uniform, VerticalAlignment = VerticalAlignment.Center
+        };
+    }
+
+    public static void AttachMenu(Button button, IEnumerable<MenuItem> items, double minWidth)
+    {
+        var menu = new ContextMenu { Style = Style("TerminalMenu"), MinWidth = minWidth, PlacementTarget = button };
+        foreach (var item in items)
+        {
+            item.Style = Style("TerminalMenuItem");
+            menu.Items.Add(item);
+        }
+        button.ContextMenu = menu;
+        button.Click += (_, _) => menu.IsOpen = !menu.IsOpen;
     }
 
     public static Border Rule(Thickness thickness) => new()

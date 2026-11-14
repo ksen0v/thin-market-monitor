@@ -159,10 +159,26 @@ Require(ExchangeApi.Underlying(Venue.Binance, "1000SHIB") == "SHIB" &&
     ExchangeApi.Underlying(Venue.Binance, "1234SHIB") == "1234SHIB", "only explicit denomination aliases");
 Require(new Market(Venue.Binance, "BTCUSD_PERP", "BTC", "USD", new("coinm", 100, QuantityUnit.Quote))
     .Turnover(2, 65000) == 200, "inverse quote notional");
-var fromTrade = ExchangeApi.TradeBars([new Trade("AKE", 120000, 2), new Trade("AKE", 122000, 4),
-    new Trade("AKE", 136000, 3)], 15);
-Require(fromTrade.Length == 2 && fromTrade[0] == new Candle(120000, 2, 4, 2, 4),
+var secondsCandles = new LiveCandles(15);
+foreach (var trade in new Trade[] { new("AKE", 120000, 2), new("AKE", 122000, 4), new("AKE", 151000, 3) })
+    secondsCandles.Add(trade);
+var fromTrade = secondsCandles.Snapshot();
+Require(fromTrade.Length == 2 && fromTrade[0] == new Candle(120000, 2, 4, 2, 4) && fromTrade[1].Time == 150000,
     "second candles use trades without filling gaps");
+var liveCandles = new LiveCandles(60);
+liveCandles.Add(new("AKE", 147_000, 17));
+liveCandles.Add(new("AKE", 142_000, 9));
+liveCandles.AddHistory([new(120_000, 10, 14, 10, 12)], 145_000);
+Require(liveCandles.Snapshot().SequenceEqual([new Candle(120_000, 10, 17, 9, 17)]),
+    "an open REST bar retains newer streaming trades and out-of-order lows");
+liveCandles.AddHistory([new(120_000, 10, 18, 9, 15)], 160_000);
+Require(liveCandles.Snapshot()[0].Close == 15, "REST can repair a stale streaming close");
+liveCandles.Add(new("AKE", 181_000, 16));
+liveCandles.AddHistory([new(120_000, 10, 19, 8, 18)], 183_000);
+Require(liveCandles.Snapshot().SequenceEqual([new Candle(120_000, 10, 19, 8, 18), new Candle(180_000, 16, 16, 16, 16)]),
+    "the next stream interval opens without disturbing the closed candle");
+Require(CandlePlot.PanEnd(300_000, -.5, 10, 60000) == 600_000 &&
+    CandlePlot.PanEnd(600_000, -.5, 10, 60000) == 900_000, "chart pans repeatedly beyond the latest bar");
 var bars = new[] { new Candle(0, 10, 10, 10, 10, 5), new Candle(60000, 11, 13, 9, 12, 20) };
 Require(OverviewMetrics.Calculate(ake, bars, 60, 120000, new(MetricKind.Turnover, 1)) == 20 &&
     Math.Abs(OverviewMetrics.Calculate(ake, bars, 60, 120000, new(MetricKind.Atr, 1))!.Value - 100d / 3) < 0.00001 &&

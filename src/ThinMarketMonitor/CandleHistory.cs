@@ -189,8 +189,4 @@ internal sealed partial class ExchangeApi
                 g.All(c => c.QuoteVolume.HasValue) ? g.Sum(c => c.QuoteVolume!.Value) : null)).ToArray();
     }
 
-    internal static Candle[] TradeBars(IEnumerable<Trade> trades, int frame) =>
-        AggregateBars(trades.Where(t => t.Price > 0 && double.IsFinite(t.Price))
-            .OrderBy(t => t.Time).GroupBy(t => t.Time / (frame * 1000L) * (frame * 1000L))
-            .Select(g => new Candle(g.Key, g.First().Price, g.Max(t => t.Price), g.Min(t => t.Price), g.Last().Price)), frame);
 }

@@ -27,7 +27,7 @@ public partial class App : Application
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             try
             {
-                using var test = new MainWindow(startMonitoring: false);
+                using var test = new MainWindow(startMonitoring: false, testSettings: new());
                 test.Show();
                 test.SmokeTestLayout();
                 test.Close();

@@ -5,7 +5,6 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
-using System.Windows.Media.Imaging;
 
 namespace ThinMarketMonitor;
 
@@ -160,14 +159,8 @@ internal sealed partial class SettingsPanel : Border, IDisposable
             var button = new Button { Style = Terminal.Style("VenueButton"), Margin = new Thickness(0, 0, 7, 7) };
             var content = new Grid();
             var logo = new Grid { Width = 48, Height = 46, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
-            string name = (venue == Venue.Alpha ? Venue.Binance : venue).ToString().ToLowerInvariant();
-            logo.Children.Add(new Image
-            {
-                Source = new BitmapImage(new Uri($"pack://application:,,,/Assets/{name}.png")),
-                Width = venue switch { Venue.Okx => 55, Venue.Mexc => 33, Venue.KuCoin => 29, _ => 44 },
-                Height = venue switch { Venue.Okx => 49, Venue.KuCoin => 28, _ => 42 },
-                Stretch = Stretch.Uniform
-            });
+            var image = Terminal.VenueLogo(venue, venue switch { Venue.Okx => 49, Venue.Mexc => 33, Venue.KuCoin => 29, _ => 42 });
+            logo.Children.Add(image);
             if (venue == Venue.Alpha)
             {
                 logo.Children.Add(new TextBlock

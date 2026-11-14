@@ -15,7 +15,8 @@ public partial class MainWindow : Window, IDisposable
     private readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(16) };
     private readonly CancellationTokenSource stop = new();
     private readonly ExchangeApi api;
-    private readonly Settings settings = Settings.Load();
+    private readonly Settings settings;
+    private readonly bool persistSettings;
     private readonly Dictionary<MarketSource, Catalog> catalogs = new();
     private readonly ChartCell[] cells = new ChartCell[9];
     private readonly ChartCell overviewChart;
@@ -43,8 +44,10 @@ public partial class MainWindow : Window, IDisposable
 
     public MainWindow() : this(startMonitoring: true) { }
 
-    internal MainWindow(bool startMonitoring)
+    internal MainWindow(bool startMonitoring, Settings? testSettings = null)
     {
+        settings = testSettings ?? Settings.Load();
+        persistSettings = testSettings == null;
         InitializeComponent();
         api = new(http);
         var mark = Terminal.Icon("candles");
@@ -80,7 +83,7 @@ public partial class MainWindow : Window, IDisposable
             overviewChart.Assign(selected, pinned: false);
             activeCell = overviewChart;
             Save();
-        }, () => OpenSettings(this, new RoutedEventArgs(), overview: true));
+        });
         OverviewDrawerHost.Content = overviewPanel;
         OverviewChartHost.Content = overviewChart;
         order = cells.Max(cell => cell.Order);
@@ -142,6 +145,7 @@ public partial class MainWindow : Window, IDisposable
         }
         else if (e.Key == settings.FrameUp || e.Key == settings.FrameDown)
         {
+            if (overviewPanel.IsKeyboardFocusWithin) return;
             var target = fullscreenCell ?? underMouse ?? (activeCell?.IsVisible == true ? activeCell :
                 overviewChart.IsVisible ? overviewChart : null);
             if (target != null)
@@ -266,9 +270,12 @@ public partial class MainWindow : Window, IDisposable
         GridSpace.Visibility = settings.Overview ? Visibility.Collapsed : Visibility.Visible;
         OverviewSpace.Visibility = settings.Overview ? Visibility.Visible : Visibility.Collapsed;
         GridTwo.Visibility = GridThree.Visibility = settings.Overview ? Visibility.Collapsed : Visibility.Visible;
-        DrawerSwitch.Visibility = settings.Overview ? Visibility.Visible : Visibility.Collapsed;
         SpaceSwitch.Content = settings.Overview ? "Сигналы" : "Обзор";
-        DrawerSwitch.Content = settings.OverviewDrawer ? "Скрыть инструменты" : "Инструменты";
+        DrawerSwitch.Content = Terminal.Icon(settings.OverviewDrawer ? "drawer-open" : "drawer-closed");
+        DrawerSwitch.Foreground = Terminal.Brush(settings.OverviewDrawer ? "Accent" : "Muted");
+        string drawerLabel = settings.OverviewDrawer ? "Скрыть инструменты" : "Показать инструменты";
+        DrawerSwitch.ToolTip = drawerLabel;
+        System.Windows.Automation.AutomationProperties.SetName(DrawerSwitch, drawerLabel);
         OverviewDrawerHost.Visibility = settings.OverviewDrawer ? Visibility.Visible : Visibility.Collapsed;
         var catalog = catalogs.GetValueOrDefault(settings.OverviewSource);
         if (overviewChart.Choice?.Key != settings.OverviewChoice?.Key) overviewChart.Choice = settings.OverviewChoice;
@@ -500,11 +507,9 @@ public partial class MainWindow : Window, IDisposable
         ShowDialog(picker);
     }
 
-    private void OpenSettings(object sender, RoutedEventArgs e) => OpenSettings(sender, e, overview: false);
-
-    private void OpenSettings(object sender, RoutedEventArgs e, bool overview)
+    private void OpenSettings(object sender, RoutedEventArgs e)
     {
-        settingsPanel = new SettingsPanel(settings, catalogs, new Updater(http), SettingsChanged, CloseDialog, Close, overview);
+        settingsPanel = new SettingsPanel(settings, catalogs, new Updater(http), SettingsChanged, CloseDialog, Close, settings.Overview);
         settingsPanel.UpdateFilter(CatalogStatus.Text);
         ShowDialog(settingsPanel);
     }
@@ -545,6 +550,7 @@ public partial class MainWindow : Window, IDisposable
     {
         settings.Cells = cells.Select(c => c.Choice).ToArray();
         settings.OverviewChoice = overviewChart.Choice;
+        if (!persistSettings) return;
         try { settings.Save(); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

@@ -2,6 +2,7 @@ using System.Collections;
 using System.ComponentModel;
 using System.Globalization;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Data;
 
@@ -42,12 +43,15 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
     private readonly Settings settings;
     private readonly Action changed;
     private readonly Action<Market> select;
-    private readonly ComboBox source = new() { MinWidth = 165, Margin = new Thickness(0, 0, 4, 5) };
+    private readonly Button source = new() { MinHeight = 32, Margin = new Thickness(8, 7, 8, 7),
+        HorizontalContentAlignment = HorizontalAlignment.Stretch };
     private readonly DataGrid table = new()
     {
         IsReadOnly = true, AutoGenerateColumns = false, HeadersVisibility = DataGridHeadersVisibility.Column,
         EnableRowVirtualization = true, EnableColumnVirtualization = true, GridLinesVisibility = DataGridGridLinesVisibility.None,
-        SelectionMode = DataGridSelectionMode.Single
+        SelectionMode = DataGridSelectionMode.Single, AlternationCount = 2,
+        CanUserReorderColumns = false, CanUserResizeColumns = false, CanUserResizeRows = false,
+        BorderThickness = new Thickness(0)
     };
     private readonly TextBlock status = Terminal.Copy("");
     private Row[] rows = [];
@@ -59,7 +63,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
     private bool loadedCatalog;
     private OverviewColumn[] columns = [];
 
-    public OverviewPanel(ExchangeApi api, Settings settings, Action changed, Action<Market> select, Action edit)
+    public OverviewPanel(ExchangeApi api, Settings settings, Action changed, Action<Market> select)
     {
         this.api = api;
         this.settings = settings;
@@ -68,36 +72,37 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         Width = 390;
         Background = Terminal.Brush("Surface");
         Margin = new Thickness(1, 0, 0, 0);
-        var header = new DockPanel { Margin = new Thickness(7, 7, 7, 0) };
-        var options = new Button { Content = "Колонки", Margin = new Thickness(0, 0, 0, 5) };
-        options.Click += (_, _) => edit();
-        SetDock(options, Dock.Right);
-        header.Children.Add(options);
-        source.ItemsSource = MarketSource.All;
-        source.SelectedItem = settings.OverviewSource;
-        source.SelectionChanged += (_, _) =>
+        UpdateSourceButton();
+        var choices = MarketSource.All.Select(next =>
         {
-            if (source.SelectedItem is not MarketSource next || next == settings.OverviewSource) return;
-            settings.OverviewSource = next;
-            settings.OverviewChoice = null;
-            loadedCatalog = false;
-            changed();
-        };
-        header.Children.Add(source);
-        SetDock(header, Dock.Top);
-        Children.Add(header);
+            var item = new MenuItem { Header = SourceLabel(next), IsChecked = next == settings.OverviewSource };
+            AutomationProperties.SetName(item, next.Label);
+            item.Click += (_, _) =>
+            {
+                if (next == settings.OverviewSource) return;
+                settings.OverviewSource = next;
+                settings.OverviewChoice = null;
+                loadedCatalog = false;
+                foreach (MenuItem option in source.ContextMenu.Items) option.IsChecked = ReferenceEquals(option, item);
+                UpdateSourceButton();
+                changed();
+            };
+            return item;
+        });
+        Terminal.AttachMenu(source, choices, 235);
+        SetDock(source, Dock.Top);
+        Children.Add(source);
         status.Margin = new Thickness(8, 4, 8, 5);
+        status.FontSize = 11;
         SetDock(status, Dock.Bottom);
         Children.Add(status);
         view = new ListCollectionView(rows);
         table.Background = Terminal.Brush("Plot");
         table.Foreground = Terminal.Brush("Text");
-        table.RowBackground = Terminal.Brush("Plot");
-        table.AlternatingRowBackground = Terminal.Brush("Surface");
-        table.BorderBrush = Terminal.Brush("Outline");
-        table.Resources[typeof(System.Windows.Controls.Primitives.DataGridColumnHeader)] =
-            MakeStyle(typeof(System.Windows.Controls.Primitives.DataGridColumnHeader), "Control");
-        table.Resources[typeof(DataGridCell)] = MakeStyle(typeof(DataGridCell), "Plot");
+        table.RowStyle = Terminal.Style("OverviewRow");
+        table.CellStyle = Terminal.Style("OverviewCell");
+        table.ColumnHeaderStyle = Terminal.Style("OverviewColumnHeader");
+        ScrollViewer.SetHorizontalScrollBarVisibility(table, ScrollBarVisibility.Auto);
         table.ItemsSource = view;
         table.SelectionChanged += (_, _) =>
         {
@@ -116,14 +121,27 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         UpdateColumns();
     }
 
-    private static Style MakeStyle(Type type, string bg)
+    private static StackPanel SourceLabel(MarketSource market)
     {
-        var style = new Style(type);
-        style.Setters.Add(new Setter(Control.BackgroundProperty, Terminal.Brush(bg)));
-        style.Setters.Add(new Setter(Control.ForegroundProperty, Terminal.Brush("Text")));
-        style.Setters.Add(new Setter(Control.BorderBrushProperty, Terminal.Brush("Outline")));
-        style.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(5, 3, 5, 3)));
-        return style;
+        var label = new StackPanel { Orientation = Orientation.Horizontal };
+        label.Children.Add(Terminal.VenueLogo(market.Venue, 18));
+        label.Children.Add(new TextBlock { Text = market.Venue.Label(), Margin = new Thickness(7, 0, 0, 0),
+            VerticalAlignment = VerticalAlignment.Center });
+        if (market.Venue != Venue.Alpha)
+            label.Children.Add(new TextBlock { Text = market.Segment.ToString(), Foreground = Terminal.Brush("Muted"),
+                FontSize = 11, Margin = new Thickness(8, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center });
+        return label;
+    }
+
+    private void UpdateSourceButton()
+    {
+        var content = new DockPanel();
+        var arrow = Terminal.Icon("chevron");
+        SetDock(arrow, Dock.Right);
+        content.Children.Add(arrow);
+        content.Children.Add(SourceLabel(settings.OverviewSource));
+        source.Content = content;
+        AutomationProperties.SetName(source, $"Биржа и сегмент · {settings.OverviewSource.Label}");
     }
 
     public void UpdateColumns()
@@ -131,18 +149,54 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         if (columns.SequenceEqual(settings.OverviewColumns) && table.Columns.Count > 0) return;
         columns = settings.OverviewColumns.ToArray();
         table.Columns.Clear();
-        table.Columns.Add(new DataGridTextColumn { Header = "Тикер", Binding = new Binding("Ticker"), MinWidth = 95 });
+        table.Columns.Add(new DataGridTextColumn { Header = "Тикер", Binding = new Binding("Ticker"), MinWidth = 118,
+            Width = new DataGridLength(1, DataGridLengthUnitType.Star), ElementStyle = TextStyle() });
+        var numberHeader = new Style(typeof(System.Windows.Controls.Primitives.DataGridColumnHeader), table.ColumnHeaderStyle);
+        numberHeader.Setters.Add(new Setter(Control.HorizontalContentAlignmentProperty, HorizontalAlignment.Right));
         for (int i = 0; i < columns.Length; i++)
         {
             var data = columns[i];
+            string unit = data.Kind switch { MetricKind.Turnover => "$", MetricKind.Change => "%", _ => "ATR %" };
             table.Columns.Add(new DataGridTextColumn
             {
-                Header = OverviewMetrics.Label(data), Binding = new Binding($"[{i}]"),
-                Width = DataGridLength.Auto, MinWidth = 85
+                Header = $"{unit} {MainWindow.WindowName(data.Minutes * 60)}", Binding = new Binding($"[{i}]"),
+                Width = data.Kind == MetricKind.Turnover ? 105 : 78,
+                HeaderStyle = numberHeader, ElementStyle = TextStyle(i, data.Kind)
             });
         }
         Sort();
         Restart();
+    }
+
+    private static Style TextStyle(int index = -1, MetricKind kind = MetricKind.Turnover)
+    {
+        var style = new Style(typeof(TextBlock));
+        style.Setters.Add(new Setter(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis));
+        style.Setters.Add(new Setter(VerticalAlignmentProperty, VerticalAlignment.Center));
+        if (index < 0)
+            style.Setters.Add(new Setter(TextBlock.FontWeightProperty, FontWeights.SemiBold));
+        else
+        {
+            style.Setters.Add(new Setter(TextBlock.TextAlignmentProperty, TextAlignment.Right));
+            style.Setters.Add(new Setter(TextBlock.ForegroundProperty, new Binding($"Values[{index}]")
+                { Converter = new MetricBrush(kind) }));
+        }
+        return style;
+    }
+
+    private sealed class MetricBrush(MetricKind kind) : IValueConverter
+    {
+        public object Convert(object value, Type targetType, object parameter, CultureInfo culture) =>
+            Terminal.Brush(value switch
+            {
+                double number when kind == MetricKind.Change && number > 0 => "Rising",
+                double number when kind == MetricKind.Change && number < 0 => "Falling",
+                double => "Text",
+                _ => "Muted"
+            });
+
+        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) =>
+            throw new NotSupportedException();
     }
 
     public void SetSource(Catalog? catalog, bool visible)
@@ -241,7 +295,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
                     done++;
                     if (done % 12 == 0 || done == entries.Length)
                     {
-                        status.Text = $"{done:N0} / {entries.Length:N0} · — нет данных";
+                        status.Text = done == entries.Length ? $"{done:N0} инструментов" : $"{done:N0} / {entries.Length:N0}";
                         if (settings.OverviewSort >= 0) RefreshSort();
                     }
                     if (done % 24 == 0) await Task.Yield();
@@ -278,6 +332,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         private OverviewColumn[] columns = metrics;
         public Market Market { get; } = market;
         public string Ticker => Market.Ticker;
+        public double?[] Values => values;
         public string this[int i] => Number(i) is { } number
             ? number.ToString(columns[i].Kind == MetricKind.Turnover ? "N0" : "+0.00;-0.00;0.00", CultureInfo.CurrentCulture)
             : "—";
@@ -288,6 +343,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
             values = next;
             columns = kinds;
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs("Item[]"));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Values)));
         }
     }
 
