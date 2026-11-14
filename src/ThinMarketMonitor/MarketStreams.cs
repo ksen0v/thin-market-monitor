@@ -8,7 +8,10 @@ using System.Text.Json;
 
 namespace ThinMarketMonitor;
 
-internal sealed record FeedStatus(Venue Venue, int Count, bool Connected, string Detail);
+internal sealed record FeedStatus(MarketSource Source, int Count, bool Connected, string Detail)
+{
+    public Venue Venue => Source.Venue;
+}
 
 internal sealed class MarketStreams : IDisposable
 {
@@ -32,19 +35,20 @@ internal sealed class MarketStreams : IDisposable
         SetEligible(eligibleMarkets);
         detectors = markets.ToDictionary(m => m.Key,
             m => previous?.detectors.GetValueOrDefault(m.Key) ?? new SpikeDetector(thresholds));
-        volumes = volumeRules.Length == 0 ? new() : markets.Where(m => UsdQuotes.Supported(m.Quote))
+        volumes = volumeRules.Length == 0 ? new() : markets.Where(UsdQuotes.Supported)
             .ToDictionary(m => m.Key, _ => new VolumeImpulse(volumeRules));
         int nextId = 0;
         var tasks = new List<Task>();
-        foreach (var venue in markets.GroupBy(m => m.Venue))
+        foreach (var venue in markets.Where(m => m.Streaming).GroupBy(m => (m.Source, m.Contract?.Product)))
         {
             int index = 0;
-            foreach (var group in venue.Chunk(venue.Key == Venue.Mexc ? 30 : 100))
+            foreach (var group in venue.Chunk(venue.Key.Source.Venue is Venue.Mexc or Venue.KuCoin && venue.Key.Product != null ? 30 :
+                venue.Key.Source.Venue == Venue.Mexc ? 30 : 100))
             {
                 int id = nextId++;
                 int delay = index++ * 550;
-                feeds[id] = new(venue.Key, group.Length, false, "подключение");
-                tasks.Add(Task.Run(() => Run(api, venue.Key, group, id, delay, stop.Token)));
+                feeds[id] = new(venue.Key.Source, group.Length, false, "подключение");
+                tasks.Add(Task.Run(() => Run(api, group, id, delay, stop.Token)));
             }
         }
         completion = Task.WhenAll(tasks);
@@ -81,12 +85,13 @@ internal sealed class MarketStreams : IDisposable
         _ = completion.ContinueWith(_ => stop.Dispose(), TaskScheduler.Default);
     }
 
-    private async Task Run(ExchangeApi api, Venue venue, Market[] markets,
+    private async Task Run(ExchangeApi api, Market[] markets,
         int id, int delay, CancellationToken ct)
     {
         var instruments = markets.ToDictionary(x => x.Symbol,
             x => (Market: x, Detector: detectors[x.Key], Volume: volumes.GetValueOrDefault(x.Key)), StringComparer.OrdinalIgnoreCase);
         int backoff = 3;
+        var source = markets[0].Source;
         try
         {
             await Task.Delay(delay, ct);
@@ -95,10 +100,10 @@ internal sealed class MarketStreams : IDisposable
                 var started = DateTimeOffset.UtcNow;
                 try
                 {
-                    await Open(api, venue, markets.Select(x => x.Symbol).ToArray(), ct,
+                    await Open(api, markets, ct,
                         () =>
                         {
-                            feeds[id] = new(venue, markets.Length, true, "подписка подтверждена");
+                            feeds[id] = new(source, markets.Length, true, "подписка подтверждена");
                             long since = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                             foreach (var instrument in instruments.Values) instrument.Volume?.ResetCoverage(since);
                         }, trade =>
@@ -127,7 +132,7 @@ internal sealed class MarketStreams : IDisposable
                         OperationCanceledException => "тайм-аут",
                         _ => ex.Message
                     };
-                    feeds[id] = new(venue, markets.Length, false, detail);
+                    feeds[id] = new(source, markets.Length, false, detail);
                 }
                 finally
                 {
@@ -141,23 +146,28 @@ internal sealed class MarketStreams : IDisposable
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
     }
 
-    private static async Task Open(ExchangeApi api, Venue venue, string[] symbols, CancellationToken ct,
+    internal static async Task Open(ExchangeApi api, Market[] markets, CancellationToken ct,
         Action subscribed, Action<Trade> publish)
     {
-        int heartbeat = venue == Venue.Bitget ? 25_000 : 18_000;
+        var venue = markets[0].Venue;
+        string? product = markets[0].Contract?.Product;
+        var symbols = markets.Select(m => m.Symbol).ToArray();
+        int heartbeat = venue == Venue.Bitget ? 25_000 : venue == Venue.KuCoin && product != null ? 12_000 : 18_000;
         Uri address;
-        if (venue == Venue.KuCoin)
+        if (venue == Venue.KuCoin && product == null)
             (address, heartbeat) = await api.KuCoinSocket(ct);
         else
             address = new Uri(venue switch
             {
-                Venue.Binance => "wss://data-stream.binance.vision/stream",
+                Venue.Binance => product switch { "usdm" => "wss://fstream.binance.com/market/stream",
+                    "coinm" => "wss://dstream.binance.com/stream", _ => "wss://data-stream.binance.vision/stream" },
                 Venue.Alpha => "wss://nbstream.binance.com/w3w/wsa/stream/stream",
-                Venue.Bybit => "wss://stream.bybit.com/v5/public/spot",
+                Venue.Bybit => "wss://stream.bybit.com/v5/public/" + (product ?? "spot"),
                 Venue.Okx => "wss://ws.okx.com/ws/v5/public",
                 Venue.Bitget => "wss://ws.bitget.com/v2/ws/public",
-                Venue.Gate => "wss://api.gateio.ws/ws/v4/",
-                Venue.Mexc => "wss://wbs-api.mexc.com/ws",
+                Venue.KuCoin => "wss://x-push-futures.kucoin.com",
+                Venue.Gate => product == null ? "wss://api.gateio.ws/ws/v4/" : "wss://fx-ws.gateio.ws/v4/ws/" + product.Split('/')[1],
+                Venue.Mexc => product == null ? "wss://wbs-api.mexc.com/ws" : "wss://contract.mexc.com/edge",
                 _ => throw new ArgumentOutOfRangeException(nameof(venue))
             });
 
@@ -170,10 +180,10 @@ internal sealed class MarketStreams : IDisposable
             connect.CancelAfter(TimeSpan.FromSeconds(14));
             await socket.ConnectAsync(address, connect.Token);
         }
-        var requests = Subscriptions(venue, symbols).ToArray();
+        var requests = Subscriptions(venue, symbols, product).ToArray();
         int remaining = venue is Venue.Okx or Venue.Bitget ? symbols.Length : requests.Length;
         var confirmation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var receiving = Receive(socket, venue, publish, () =>
+        var receiving = Receive(socket, venue, product, publish, () =>
         {
             if (Interlocked.Decrement(ref remaining) == 0)
             {
@@ -195,7 +205,7 @@ internal sealed class MarketStreams : IDisposable
             var ready = await Task.WhenAny(receiving, confirmation.Task).WaitAsync(subscribe.Token);
             await ready;
             if (venue is not (Venue.Binance or Venue.Alpha))
-                ping = Ping(socket, venue, heartbeat, connection.Token);
+                ping = Ping(socket, venue, product, heartbeat, connection.Token);
             await await Task.WhenAny(receiving, ping == Task.CompletedTask ? receiving : ping);
         }
         finally
@@ -207,9 +217,10 @@ internal sealed class MarketStreams : IDisposable
         }
     }
 
-    internal static IEnumerable<string> Subscriptions(Venue venue, string[] symbols)
+    internal static IEnumerable<string> Subscriptions(Venue venue, string[] symbols, string? product = null)
     {
-        var batches = symbols.Chunk(venue == Venue.Bybit ? 10 : venue is Venue.Bitget or Venue.Okx ? 25 : symbols.Length);
+        var batches = symbols.Chunk(venue == Venue.Bybit ? 10 : venue is Venue.Bitget or Venue.Okx ? 25 :
+            product != null && venue is Venue.Mexc or Venue.KuCoin ? 1 : symbols.Length);
         int id = 0;
         foreach (string[] batch in batches)
         {
@@ -220,11 +231,14 @@ internal sealed class MarketStreams : IDisposable
                     @params = batch.Select(x => x.ToLowerInvariant() + "@aggTrade"), id },
                 Venue.Bybit => new { op = "subscribe", args = batch.Select(x => "publicTrade." + x) },
                 Venue.Okx => new { op = "subscribe", args = batch.Select(x => new { channel = "trades", instId = x }) },
-                Venue.Bitget => new { op = "subscribe", args = batch.Select(x => new { instType = "SPOT", channel = "trade", instId = x }) },
+                Venue.Bitget => new { op = "subscribe", args = batch.Select(x => new { instType = product ?? "SPOT", channel = "trade", instId = x }) },
+                Venue.KuCoin when product != null => new { id = id.ToString(CultureInfo.InvariantCulture),
+                    action = "SUBSCRIBE", channel = "trade", tradeType = "FUTURES", symbol = batch[0] },
                 Venue.KuCoin => new { id = id.ToString(CultureInfo.InvariantCulture), type = "subscribe",
-                    topic = "/market/match:" + string.Join(",", batch), response = true, @private = false },
-                Venue.Gate => new { time = DateTimeOffset.UtcNow.ToUnixTimeSeconds(), channel = "spot.trades",
+                    topic = "/market/match:" + string.Join(",", batch), response = true, privateChannel = false },
+                Venue.Gate => new { time = DateTimeOffset.UtcNow.ToUnixTimeSeconds(), channel = product == null ? "spot.trades" : "futures.trades",
                     @event = "subscribe", payload = batch },
+                Venue.Mexc when product != null => new { method = "sub.deal", param = new { symbol = batch[0] } },
                 Venue.Mexc => new { method = "SUBSCRIPTION", @params = batch.Select(x => "spot@public.aggre.deals.v3.api.pb@100ms@" + x) },
                 _ => throw new ArgumentOutOfRangeException(nameof(venue))
             };
@@ -235,7 +249,7 @@ internal sealed class MarketStreams : IDisposable
     private static Task Send(ClientWebSocket socket, string message, CancellationToken ct) =>
         socket.SendAsync(new ArraySegment<byte>(Encoding.UTF8.GetBytes(message)), WebSocketMessageType.Text, true, ct);
 
-    private static async Task Ping(ClientWebSocket socket, Venue venue, int heartbeat, CancellationToken ct)
+    private static async Task Ping(ClientWebSocket socket, Venue venue, string? product, int heartbeat, CancellationToken ct)
     {
         using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(heartbeat));
         while (await timer.WaitForNextTickAsync(ct))
@@ -243,16 +257,17 @@ internal sealed class MarketStreams : IDisposable
             string message = venue switch
             {
                 Venue.Bybit => """{"op":"ping"}""",
-                Venue.Mexc => """{"method":"PING"}""",
+                Venue.Mexc => product == null ? """{"method":"PING"}""" : """{"method":"ping"}""",
+                Venue.KuCoin when product != null => JsonSerializer.Serialize(new { id = Guid.NewGuid().ToString("N"), op = "ping" }),
                 Venue.KuCoin => JsonSerializer.Serialize(new { id = Guid.NewGuid().ToString("N"), type = "ping" }),
-                Venue.Gate => JsonSerializer.Serialize(new { time = DateTimeOffset.UtcNow.ToUnixTimeSeconds(), channel = "spot.ping" }),
+                Venue.Gate => JsonSerializer.Serialize(new { time = DateTimeOffset.UtcNow.ToUnixTimeSeconds(), channel = product == null ? "spot.ping" : "futures.ping" }),
                 _ => "ping"
             };
             await Send(socket, message, ct);
         }
     }
 
-    private static async Task Receive(ClientWebSocket socket, Venue venue, Action<Trade> publish, Action acknowledge, CancellationToken ct)
+    private static async Task Receive(ClientWebSocket socket, Venue venue, string? product, Action<Trade> publish, Action acknowledge, CancellationToken ct)
     {
         byte[] buffer = new byte[16_384];
         using var message = new MemoryStream();
@@ -266,28 +281,30 @@ internal sealed class MarketStreams : IDisposable
             var payload = message.GetBuffer().AsMemory(0, (int)message.Length);
             if (frame.MessageType == WebSocketMessageType.Binary && venue == Venue.Mexc)
                 MexcTrades.Decode(payload.Span, publish);
-            else if (frame.MessageType == WebSocketMessageType.Text && payload.Length > 0 && payload.Span[0] == (byte)'{')
+            else if (payload.Length > 0 && payload.Span[0] == (byte)'{' &&
+                (frame.MessageType == WebSocketMessageType.Text || venue == Venue.KuCoin && product != null))
             {
                 using var document = JsonDocument.Parse(payload);
-                DecodeJson(venue, document.RootElement, publish);
-                if (IsAcknowledgement(venue, document.RootElement)) acknowledge();
+                DecodeJson(venue, document.RootElement, publish, product);
+                if (IsAcknowledgement(venue, document.RootElement, product)) acknowledge();
             }
             message.SetLength(0);
         }
     }
 
-    internal static bool IsAcknowledgement(Venue venue, JsonElement root) => venue switch
+    internal static bool IsAcknowledgement(Venue venue, JsonElement root, string? product = null) => venue switch
     {
         Venue.Binance or Venue.Alpha => root.TryGetProperty("id", out _) &&
             root.TryGetProperty("result", out var result) && result.ValueKind == JsonValueKind.Null,
         Venue.Bybit => root.Optional("op") == "subscribe" && root.Optional("success") == "True",
         Venue.Okx or Venue.Bitget or Venue.Gate => root.Optional("event") == "subscribe",
-        Venue.KuCoin => root.Optional("type") == "ack",
+        Venue.KuCoin => product == null ? root.Optional("type") == "ack" : root.Optional("result") == "True",
+        Venue.Mexc when product != null => root.Optional("channel") == "rs.sub.deal",
         Venue.Mexc => root.Optional("code") == "0" && root.Optional("msg").Contains("spot@", StringComparison.Ordinal),
         _ => false
     };
 
-    internal static void DecodeJson(Venue venue, JsonElement root, Action<Trade> emit)
+    internal static void DecodeJson(Venue venue, JsonElement root, Action<Trade> emit, string? product = null)
     {
         if (root.Optional("event") == "error" || root.Optional("type") == "error" ||
             root.Optional("success") == "False" ||
@@ -314,7 +331,14 @@ internal sealed class MarketStreams : IDisposable
                         venue == Venue.Okx ? "sz" : "size", "tradeId", emit);
                 break;
             case Venue.KuCoin:
-                if (root.Optional("type") == "message" && root.Optional("topic").StartsWith("/market/match:", StringComparison.Ordinal))
+                if (product != null && root.Optional("T") == "trade.FUTURES")
+                {
+                    var tradeRow = root.GetProperty("d");
+                    emit(new(tradeRow.Str("s"), tradeRow.GetProperty("M").Int() / 1_000_000, tradeRow.Number("p"),
+                        tradeRow.Number("q"), tradeRow.Optional("ti")));
+                }
+                else if (product == null && root.Optional("type") == "message" &&
+                    root.Optional("topic").StartsWith("/market/match:", StringComparison.Ordinal))
                 {
                     var item = root.GetProperty("data");
                     emit(new(item.Str("symbol"), item.GetProperty("time").Int() / 1_000_000, item.GetProperty("price").Num(),
@@ -322,12 +346,21 @@ internal sealed class MarketStreams : IDisposable
                 }
                 break;
             case Venue.Gate:
-                if (root.Optional("channel") == "spot.trades" && root.Optional("event") == "update")
+                if (product != null && root.Optional("channel") == "futures.trades" && root.Optional("event") == "update")
+                    foreach (var tradeRow in root.GetProperty("result").EnumerateArray())
+                        emit(new(tradeRow.Str("contract"), (long)tradeRow.Number("create_time_ms"),
+                            tradeRow.Number("price"), Math.Abs(tradeRow.Number("size")), tradeRow.Optional("id")));
+                else if (root.Optional("channel") == "spot.trades" && root.Optional("event") == "update")
                 {
                     var item = root.GetProperty("result");
                     emit(new(item.Str("currency_pair"), (long)item.GetProperty("create_time_ms").Num(), item.GetProperty("price").Num(),
                         item.Number("amount"), item.Optional("id")));
                 }
+                break;
+            case Venue.Mexc when product != null && root.Optional("channel") == "push.deal":
+                string symbol = root.Str("symbol");
+                foreach (var item in root.GetProperty("data").EnumerateArray())
+                    emit(new(symbol, (long)item.Number("t"), item.Number("p"), item.Number("v"), item.Optional("i")));
                 break;
         }
     }

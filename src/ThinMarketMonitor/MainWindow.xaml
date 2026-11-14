@@ -9,6 +9,8 @@
                     BorderBrush="{StaticResource Outline}" BorderThickness="0,0,0,1">
                 <DockPanel>
                     <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button x:Name="SpaceSwitch" Click="ChangeWorkspace" MinHeight="26" Margin="0,0,6,0"/>
+                        <Button x:Name="DrawerSwitch" Content="Инструменты" Click="ChangeDrawer" MinHeight="26" Margin="0,0,6,0"/>
                         <Border Background="{StaticResource Plot}" BorderBrush="{StaticResource Outline}" BorderThickness="1">
                             <StackPanel Orientation="Horizontal" AutomationProperties.Name="Сетка графиков">
                                 <ToggleButton x:Name="GridTwo" Style="{StaticResource GridButton}" Content="2 × 2" Click="ChangeGrid"/>
@@ -23,9 +25,9 @@
                     </StackPanel>
                 </DockPanel>
             </Border>
-            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                <StackPanel Margin="10,5,10,10">
-                    <WrapPanel MinHeight="34" Margin="0,0,0,5">
+            <Grid Margin="10,5,10,10">
+                <DockPanel x:Name="GridSpace">
+                    <WrapPanel DockPanel.Dock="Top" MinHeight="34" Margin="0,0,0,5">
                         <TextBlock x:Name="CatalogStatus" Text="Обновление каталогов…" Margin="0,8,9,0" TextTrimming="CharacterEllipsis"/>
                         <Border BorderBrush="{StaticResource Outline}" BorderThickness="1,0,0,0" Padding="9,0,0,0" Margin="0,8,0,0">
                             <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
@@ -34,11 +36,17 @@
                             </StackPanel>
                         </Border>
                     </WrapPanel>
-                    <Border Background="{StaticResource Outline}" Padding="1,1,0,0">
+                    <ScrollViewer x:Name="ChartScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                                  SizeChanged="ResizeChartGrid" Background="{StaticResource Outline}" Padding="1,1,0,0">
                         <UniformGrid x:Name="Charts" Rows="2" Columns="2" AutomationProperties.Name="Свечные графики"/>
-                    </Border>
-                </StackPanel>
-            </ScrollViewer>
+                    </ScrollViewer>
+                </DockPanel>
+                <DockPanel x:Name="OverviewSpace" Visibility="Collapsed">
+                    <ContentControl x:Name="OverviewDrawerHost" DockPanel.Dock="Right" HorizontalContentAlignment="Stretch"
+                                    VerticalContentAlignment="Stretch"/>
+                    <ContentControl x:Name="OverviewChartHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
+                </DockPanel>
+            </Grid>
         </DockPanel>
         <ContentControl x:Name="FullChart" Visibility="Collapsed" Focusable="False"
                         HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>

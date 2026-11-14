@@ -16,12 +16,14 @@ public partial class MainWindow : Window, IDisposable
     private readonly CancellationTokenSource stop = new();
     private readonly ExchangeApi api;
     private readonly Settings settings = Settings.Load();
-    private readonly Dictionary<Venue, Catalog> catalogs = new();
+    private readonly Dictionary<MarketSource, Catalog> catalogs = new();
     private readonly ChartCell[] cells = new ChartCell[9];
+    private readonly ChartCell overviewChart;
+    private readonly OverviewPanel overviewPanel;
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromSeconds(1) };
     private IReadOnlyList<Market> markets = [];
     private IReadOnlyList<Market> candidates = [];
-    private Venue[] missing = [];
+    private MarketSource[] missing = [];
     private VolumeRule[] filterRules = [];
     private VolumeFilterMonitor? volumeFilter;
     private HashSet<string> eligible = [];
@@ -52,15 +54,39 @@ public partial class MainWindow : Window, IDisposable
         for (int i = 0; i < cells.Length; i++)
         {
             int slot = i;
-            var cell = new ChartCell(api, i + 1, () => PickMarket(slot), Save, () => ++order, () => settings.Ruler)
+            var cell = new ChartCell(api, i + 1, () => PickMarket(slot), Save, () => ++order, () => settings.Ruler, () => settings.FrameButtons)
                 { Choice = settings.Cells[i] };
             cells[i] = cell;
             cell.PreviewMouseDown += (_, _) => activeCell = cell;
             cell.GotKeyboardFocus += (_, _) => activeCell = cell;
+            cell.FrameChanged += _ => Save();
         }
+        overviewChart = new ChartCell(api, 0, () =>
+        {
+            settings.OverviewDrawer = true;
+            RefreshOverview();
+            Save();
+        }, Save, () => ++order, () => settings.Ruler, () => settings.FrameButtons)
+        {
+            Choice = settings.OverviewChoice,
+            PlotHeight = double.NaN
+        };
+        overviewChart.SetFrame(settings.OverviewFrame);
+        overviewChart.FrameChanged += value => { settings.OverviewFrame = value; Save(); };
+        overviewChart.PreviewMouseDown += (_, _) => activeCell = overviewChart;
+        overviewChart.GotKeyboardFocus += (_, _) => activeCell = overviewChart;
+        overviewPanel = new OverviewPanel(api, settings, () => { RefreshOverview(); Save(); }, selected =>
+        {
+            overviewChart.Assign(selected, pinned: false);
+            activeCell = overviewChart;
+            Save();
+        }, () => OpenSettings(this, new RoutedEventArgs(), overview: true));
+        OverviewDrawerHost.Content = overviewPanel;
+        OverviewChartHost.Content = overviewChart;
         order = cells.Max(cell => cell.Order);
 
         RebuildGrid();
+        RefreshOverview();
         if (startMonitoring) Loaded += async (_, _) =>
         {
             timer.Tick += Tick;
@@ -93,7 +119,8 @@ public partial class MainWindow : Window, IDisposable
         }
         if (e.Key == Key.Escape && fullscreenCell != null) { ExitFullscreen(); e.Handled = true; return; }
         if (Keyboard.FocusedElement is TextBoxBase || Keyboard.Modifiers != ModifierKeys.None) return;
-        var underMouse = cells.FirstOrDefault(c => c.IsMouseOver && c.IsVisible);
+        var underMouse = overviewChart.IsVisible && overviewChart.IsMouseOver ? overviewChart
+            : cells.FirstOrDefault(c => c.IsMouseOver && c.IsVisible);
         if (e.Key == settings.Fullscreen)
         {
             if (!e.IsRepeat)
@@ -101,7 +128,8 @@ public partial class MainWindow : Window, IDisposable
                 if (fullscreenCell != null) ExitFullscreen();
                 else
                 {
-                    var target = underMouse?.HasMarket == true ? underMouse : activeCell?.IsVisible == true ? activeCell : null;
+                    var target = underMouse?.HasMarket == true ? underMouse : activeCell?.IsVisible == true ? activeCell :
+                        overviewChart.IsVisible ? overviewChart : null;
                     if (target?.HasMarket == true) EnterFullscreen(target);
                 }
             }
@@ -112,11 +140,22 @@ public partial class MainWindow : Window, IDisposable
             if (!e.IsRepeat && underMouse?.Plot.BeginKeyboardRuler() == true) keyboardRuler = underMouse.Plot;
             if (keyboardRuler != null) e.Handled = true;
         }
+        else if (e.Key == settings.FrameUp || e.Key == settings.FrameDown)
+        {
+            var target = fullscreenCell ?? underMouse ?? (activeCell?.IsVisible == true ? activeCell :
+                overviewChart.IsVisible ? overviewChart : null);
+            if (target != null)
+            {
+                if (!e.IsRepeat) target.CycleFrame(e.Key == settings.FrameUp ? 1 : -1);
+                e.Handled = true;
+            }
+        }
     }
 
     private void CancelChartGestures()
     {
         foreach (var cell in cells) cell.Plot.CancelGesture();
+        overviewChart.Plot.CancelGesture();
         keyboardRuler = null;
     }
 
@@ -127,7 +166,8 @@ public partial class MainWindow : Window, IDisposable
         previousWindowState = WindowState;
         previousWindowStyle = WindowStyle;
         previousResizeMode = ResizeMode;
-        Charts.Children.Remove(cell);
+        if (ReferenceEquals(cell, overviewChart)) OverviewChartHost.Content = null;
+        else Charts.Children.Remove(cell);
         cell.PlotHeight = double.NaN;
         cell.Margin = new Thickness(0);
         Workspace.Visibility = Visibility.Collapsed;
@@ -145,7 +185,8 @@ public partial class MainWindow : Window, IDisposable
     {
         if (fullscreenCell == null) return;
         CancelChartGestures();
-        fullscreenCell.Margin = new Thickness(0, 0, 1, 1);
+        var previous = fullscreenCell;
+        previous.Margin = new Thickness(0, 0, 1, 1);
         fullscreenCell = null;
         FullChart.Content = null;
         FullChart.Visibility = Visibility.Collapsed;
@@ -154,6 +195,7 @@ public partial class MainWindow : Window, IDisposable
         ResizeMode = previousResizeMode;
         WindowState = previousWindowState;
         RebuildGrid();
+        if (ReferenceEquals(previous, overviewChart)) OverviewChartHost.Content = overviewChart;
     }
 
     protected override void OnSourceInitialized(EventArgs e)
@@ -191,24 +233,74 @@ public partial class MainWindow : Window, IDisposable
         int visible = settings.Grid * settings.Grid;
         for (int i = 0; i < cells.Length; i++)
         {
-            cells[i].PlotHeight = settings.Grid == 3 ? 140 : 235;
+            cells[i].PlotHeight = double.NaN;
             cells[i].Activate(i < visible);
             if (i < visible) Charts.Children.Add(cells[i]);
         }
+        ResizeChartGrid(this, null);
+    }
+
+    private void ResizeChartGrid(object sender, SizeChangedEventArgs? e)
+    {
+        if (Charts != null && ChartScroll != null)
+            Charts.Height = Math.Max(settings.Grid * 116, ChartScroll.ActualHeight - ChartScroll.Padding.Top);
+    }
+
+    private void ChangeWorkspace(object sender, RoutedEventArgs e)
+    {
+        settings.Overview = !settings.Overview;
+        activeCell = settings.Overview ? overviewChart : null;
+        RefreshOverview();
+        Save();
+    }
+
+    private void ChangeDrawer(object sender, RoutedEventArgs e)
+    {
+        settings.OverviewDrawer = !settings.OverviewDrawer;
+        RefreshOverview();
+        Save();
+    }
+
+    private void RefreshOverview()
+    {
+        GridSpace.Visibility = settings.Overview ? Visibility.Collapsed : Visibility.Visible;
+        OverviewSpace.Visibility = settings.Overview ? Visibility.Visible : Visibility.Collapsed;
+        GridTwo.Visibility = GridThree.Visibility = settings.Overview ? Visibility.Collapsed : Visibility.Visible;
+        DrawerSwitch.Visibility = settings.Overview ? Visibility.Visible : Visibility.Collapsed;
+        SpaceSwitch.Content = settings.Overview ? "Сигналы" : "Обзор";
+        DrawerSwitch.Content = settings.OverviewDrawer ? "Скрыть инструменты" : "Инструменты";
+        OverviewDrawerHost.Visibility = settings.OverviewDrawer ? Visibility.Visible : Visibility.Collapsed;
+        var catalog = catalogs.GetValueOrDefault(settings.OverviewSource);
+        if (overviewChart.Choice?.Key != settings.OverviewChoice?.Key) overviewChart.Choice = settings.OverviewChoice;
+        overviewChart.Resolve(catalog?.Markets.FirstOrDefault(m => m.Key == settings.OverviewChoice?.Key));
+        overviewChart.Activate(settings.Overview);
+        overviewPanel.SetSource(catalog, settings.Overview && settings.OverviewDrawer);
     }
 
     internal void SmokeTestLayout()
     {
         UpdateLayout();
         int original = settings.Grid;
+        bool overview = settings.Overview;
+        double originalHeight = Height;
         try
         {
+            settings.Overview = false;
+            RefreshOverview();
             foreach (int size in new[] { 2, 3 })
             {
                 settings.Grid = size;
                 RebuildGrid();
-                UpdateLayout();
-                if (Charts.Children.Count != size * size) throw new InvalidOperationException("Chart grid is incomplete.");
+                foreach (double height in new[] { MinHeight, originalHeight })
+                {
+                    Height = height;
+                    UpdateLayout();
+                    if (Charts.Children.Count != size * size) throw new InvalidOperationException("Chart grid is incomplete.");
+                    double expected = Math.Max(size * 116, ChartScroll.ActualHeight - ChartScroll.Padding.Top);
+                    if (Math.Abs(Charts.ActualHeight - expected) > 2 || Charts.ActualWidth < Workspace.ActualWidth - 42 ||
+                        cells.Take(size * size).Any(cell => cell.Plot.ActualHeight <= 0))
+                        throw new InvalidOperationException("The grid or chart did not resize to the available area.");
+                }
             }
             OpenSettings(this, new RoutedEventArgs());
             UpdateLayout();
@@ -224,11 +316,21 @@ public partial class MainWindow : Window, IDisposable
             if (!ReferenceEquals(FullChart.Content, cells[0])) throw new InvalidOperationException("Fullscreen did not retain the chart.");
             ExitFullscreen();
             if (!Charts.Children.Contains(cells[0])) throw new InvalidOperationException("Fullscreen did not restore the chart.");
+            overviewPanel.SetSource(new Catalog([new Market(Venue.KuCoin, "CHECK-USDT", "CHECK", "USDT")]), false);
+            overviewPanel.SetSource(new Catalog([]), false);
+            settings.Overview = true;
+            RefreshOverview();
+            UpdateLayout();
+            if (GridSpace.IsVisible || !OverviewSpace.IsVisible || overviewChart.Plot.ActualHeight <= 0)
+                throw new InvalidOperationException("The overview workspace did not open.");
         }
         finally
         {
+            Height = originalHeight;
             settings.Grid = original;
+            settings.Overview = overview;
             RebuildGrid();
+            RefreshOverview();
         }
     }
 
@@ -239,9 +341,17 @@ public partial class MainWindow : Window, IDisposable
         ShowCatalogStatus("Обновление каталогов…");
         try
         {
-            var all = await Task.WhenAll(Enum.GetValues<Venue>().Select(async v => (v, await api.LoadCatalog(v, stop.Token))));
+            await Task.WhenAll(MarketSource.All.Select(async v =>
+            {
+                var catalog = await api.LoadCatalog(v, stop.Token);
+                if (!stop.IsCancellationRequested)
+                {
+                    catalogs[v] = catalog;
+                    RefreshOverview();
+                    if (v.Segment == Segment.Spot || settings.Rule(v) != ListingRule.Ignore) ApplyFilter(false);
+                }
+            }));
             if (stop.IsCancellationRequested) return;
-            foreach (var (venue, catalog) in all) catalogs[venue] = catalog;
             ApplyFilter(false);
         }
         catch (Exception ex) when (stop.IsCancellationRequested && ex is OperationCanceledException or ObjectDisposedException or HttpRequestException) { }
@@ -254,7 +364,7 @@ public partial class MainWindow : Window, IDisposable
 
     private void ApplyFilter(bool thresholdsChanged)
     {
-        var result = ListingFilter.Apply(catalogs, settings.Rules);
+        var result = ListingFilter.Apply(catalogs, settings.Rule);
         missing = result.Missing.ToArray();
         bool candidatesChanged = !candidates.SequenceEqual(result.Markets);
         if (candidatesChanged) candidates = result.Markets;
@@ -284,12 +394,12 @@ public partial class MainWindow : Window, IDisposable
         IReadOnlyList<Market> next = filtered?.Markets ?? candidates;
         var errors = catalogs.Where(x => x.Value.Error != null).ToArray();
         string status = missing.Length > 0
-            ? $"Фильтр ожидает каталоги · {string.Join(", ", missing.Select(v => v.Label()))}"
+            ? $"Фильтр ожидает каталоги · {string.Join(", ", missing.Select(v => v.Label))}"
             : $"{CountLabel(next.Count)} после фильтра" +
               (filtered is { Pending: > 0 } pending ? $" · объём ожидается: {pending.Pending:N0}" : "") +
               (filtered is { Unsupported: > 0 } unsupported ? $" · без котировки USD: {unsupported.Unsupported:N0}" : "") +
-              (errors.Length > 0 ? $" · недоступны {string.Join(", ", errors.Select(x => x.Key.Label()))}" : "");
-        string? tooltip = errors.Length == 0 ? null : string.Join("\n", errors.Select(x => $"{x.Key.Label()} — {x.Value.Error}"));
+              (errors.Length > 0 ? $" · недоступно источников: {errors.Length}" : "");
+        string? tooltip = errors.Length == 0 ? null : string.Join("\n", errors.Select(x => $"{x.Key.Label} — {x.Value.Error}"));
         if (CatalogStatus.Text != status || !Equals(CatalogStatus.ToolTip, tooltip)) ShowCatalogStatus(status, tooltip);
         if (!markets.SequenceEqual(next))
         {
@@ -354,11 +464,11 @@ public partial class MainWindow : Window, IDisposable
         StreamStatus.Text = $"Потоки подключены · {connected:N0} из {candidates.Count:N0}   |   Сделки за последние 15 с · {fresh:N0}";
         if (settings.VolumeModule && settings.VolumeThresholds.Any(t => t.Enabled))
             StreamStatus.Text += $"   |   Объём USD · {streams.VolumeReadyCount(markets, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()):N0}" +
-                $"/{markets.Count(m => UsdQuotes.Supported(m.Quote)):N0} готово";
-        StreamStatus.ToolTip = string.Join("\n", status.GroupBy(s => s.Venue).Select(g =>
-            $"{g.Key.Label()} · {g.Where(s => s.Connected).Sum(s => s.Count)}/{g.Sum(s => s.Count)}" +
+                $"/{markets.Count(UsdQuotes.Supported):N0} готово";
+        StreamStatus.ToolTip = string.Join("\n", status.GroupBy(s => s.Source).Select(g =>
+            $"{g.Key.Label} · {g.Where(s => s.Connected).Sum(s => s.Count)}/{g.Sum(s => s.Count)}" +
             string.Concat(g.Where(s => !s.Connected).Select(s => s.Detail).Distinct().Select(s => $" · {s}")))) +
-            (settings.VolumeModule ? $"\nБез поддерживаемой USD-котировки: {markets.Count(m => !UsdQuotes.Supported(m.Quote))}. " +
+            (settings.VolumeModule ? $"\nБез подтверждённого USD-оборота: {markets.Count(m => !UsdQuotes.Supported(m))}. " +
                 "Готовность по кратчайшему включённому окну. USD-стейблкоины ≈ $1." : "");
     }
 
@@ -390,9 +500,11 @@ public partial class MainWindow : Window, IDisposable
         ShowDialog(picker);
     }
 
-    private void OpenSettings(object sender, RoutedEventArgs e)
+    private void OpenSettings(object sender, RoutedEventArgs e) => OpenSettings(sender, e, overview: false);
+
+    private void OpenSettings(object sender, RoutedEventArgs e, bool overview)
     {
-        settingsPanel = new SettingsPanel(settings, catalogs, new Updater(http), SettingsChanged, CloseDialog, Close);
+        settingsPanel = new SettingsPanel(settings, catalogs, new Updater(http), SettingsChanged, CloseDialog, Close, overview);
         settingsPanel.UpdateFilter(CatalogStatus.Text);
         ShowDialog(settingsPanel);
     }
@@ -400,9 +512,12 @@ public partial class MainWindow : Window, IDisposable
     private async void SettingsChanged(bool thresholdsChanged)
     {
         ApplyFilter(thresholdsChanged);
+        foreach (var cell in cells) cell.UpdateFrames();
+        overviewChart.UpdateFrames();
+        overviewPanel.UpdateColumns();
         Save();
         if (!thresholdsChanged && (catalogs.Count == 0 || catalogs.Any(c => c.Value.Error != null &&
-                settings.Rules.GetValueOrDefault(c.Key) != ListingRule.Ignore))) await ReloadCatalogs();
+                settings.Rule(c.Key) != ListingRule.Ignore))) await ReloadCatalogs();
     }
 
     private void ShowDialog(FrameworkElement content)
@@ -429,6 +544,7 @@ public partial class MainWindow : Window, IDisposable
     private void Save()
     {
         settings.Cells = cells.Select(c => c.Choice).ToArray();
+        settings.OverviewChoice = overviewChart.Choice;
         try { settings.Save(); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -444,6 +560,8 @@ public partial class MainWindow : Window, IDisposable
         settingsPanel?.Dispose();
         streams?.Dispose();
         volumeFilter?.Dispose();
+        overviewPanel.Dispose();
+        overviewChart.Activate(false);
         foreach (var cell in cells) cell.Activate(false);
         http.Dispose();
     }

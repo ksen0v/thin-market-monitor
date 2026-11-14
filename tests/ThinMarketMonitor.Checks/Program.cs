@@ -2,6 +2,56 @@ using System.Net.Http;
 using System.Text.Json;
 using ThinMarketMonitor;
 
+if (args is ["--segments"])
+{
+    using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(24) };
+    var api = new ExchangeApi(http);
+    using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(100));
+    var results = await Task.WhenAll(MarketSource.All.Select(async source =>
+    {
+        var cat = await api.LoadCatalog(source, stop.Token);
+        if (cat.Error != null) { Console.WriteLine($"{source}: {cat.Error}"); return false; }
+        var market = cat.Markets.FirstOrDefault(m => m.Symbol == "ALPHA_1228USDT") ??
+            cat.Markets.FirstOrDefault(m => m.Base == "BTC" && m.Quote == "USDT" && m.Streaming) ?? cat.Markets[0];
+        int[] frames = ExchangeApi.NativeSeconds(market) ? Frames.All : Frames.All.Where(f => f >= 60).ToArray();
+        bool success = true;
+        foreach (int frame in frames)
+        {
+            long unit = frame * 1000L;
+            long end = (Now() / unit + 1) * unit;
+            try
+            {
+                var bars = await api.CandlePage(market, frame, end, 4, stop.Token);
+                if (bars.Length == 0) { Console.WriteLine($"{source} {market.Symbol}: empty {frame}s"); success = false; }
+            }
+            catch (Exception e) { Console.WriteLine($"{source} {market.Symbol} {frame}s: {e.Message}"); success = false; }
+        }
+        if (!ExchangeApi.NativeSeconds(market))
+        {
+            try { Console.WriteLine($"{source} recent trades: {(await api.RecentTrades(market, stop.Token)).Length}"); }
+            catch (Exception e) { Console.WriteLine($"{source} recent trades: {e.Message}"); }
+        }
+        try
+        {
+            var snapshots = market.Venue == Venue.Alpha ? await api.AlphaSnapshot(market, stop.Token) :
+                (await api.Snapshots(cat.Markets.ToArray(), stop.Token)).GetValueOrDefault(market.Key);
+            Console.WriteLine($"{source}: {cat.Markets.Count} markets, {market.Symbol}, daily {snapshots} · AKE {string.Join(",", cat.Markets.Where(m => m.Base == "AKE").Select(m => m.Symbol))}");
+        }
+        catch (Exception e) { Console.WriteLine($"{source} daily: {e.Message}"); }
+        if (source.Segment == Segment.Futures && market.Streaming)
+        {
+            using var probe = new MarketStreams(api, [market], Settings.Defaults, Settings.DefaultVolumes, [market]);
+            for (int i = 0; i < 30 && (!probe.HasSizedTrade(market, Now()) || !probe.Status()[0].Connected); i++)
+                await Task.Delay(500);
+            bool ready = probe.HasSizedTrade(market, Now()) && probe.Status()[0].Connected;
+            Console.WriteLine($"{source}: trades sized={ready}; {probe.Status()[0].Detail}");
+            success &= ready;
+        }
+        return success;
+    }));
+    return results.All(r => r) ? 0 : 1;
+}
+
 if (args is ["--live"])
 {
     using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
@@ -82,7 +132,50 @@ rules[Venue.Gate] = ListingRule.Require;
 Require(ListingFilter.Apply(catalogsFixture, rules).Markets.SequenceEqual([ku]), "intersection");
 catalogsFixture[Venue.Binance] = new([], "unavailable");
 var incomplete = ListingFilter.Apply(catalogsFixture, rules);
-Require(incomplete.Markets.Count == 0 && incomplete.Missing.SequenceEqual([Venue.Binance]), "unknown exclusion fails closed");
+Require(incomplete.Markets.Count == 0 && incomplete.Missing.SequenceEqual([new MarketSource(Venue.Binance)]), "unknown exclusion fails closed");
+
+var ake = new Market(Venue.KuCoin, "AKE-USDT", "AKE", "USDT");
+var akeFutures = new Market(Venue.Binance, "AKEUSDT", "AKE", "USDT", new("usdm"));
+var spotKu = new MarketSource(Venue.KuCoin);
+var spotBin = new MarketSource(Venue.Binance);
+var futBin = new MarketSource(Venue.Binance, Segment.Futures);
+var futKu = new MarketSource(Venue.KuCoin, Segment.Futures);
+var split = new Dictionary<MarketSource, Catalog>
+{
+    [spotKu] = new([ake, ku, btc]), [spotBin] = new([binance]), [futBin] = new([akeFutures]),
+    [futKu] = new([new Market(Venue.KuCoin, "AKEUSDTM", "AKE", "USDT", new("contract", 10000))])
+};
+Require(ListingFilter.Apply(split, s => s == spotKu ? ListingRule.Require : ListingRule.Exclude).Missing.Count > 0,
+    "missing marked segments stay unknown");
+var segmentRules = new Dictionary<MarketSource, ListingRule>
+{
+    [spotKu] = ListingRule.Require, [spotBin] = ListingRule.Exclude, [futBin] = ListingRule.Exclude, [futKu] = ListingRule.Exclude
+};
+Require(ListingFilter.Apply(split, s => segmentRules.GetValueOrDefault(s)).Markets.SequenceEqual([ku]),
+    "AKE excluded by derivative base on each marked market");
+Require(ListingFilter.Apply(split, s => s == futBin ? ListingRule.Require : ListingRule.Ignore).Markets.SequenceEqual([akeFutures]),
+    "positive futures can select the actual contract");
+Require(ExchangeApi.Underlying(Venue.Binance, "1000SHIB") == "SHIB" &&
+    ExchangeApi.Underlying(Venue.Binance, "1234SHIB") == "1234SHIB", "only explicit denomination aliases");
+Require(new Market(Venue.Binance, "BTCUSD_PERP", "BTC", "USD", new("coinm", 100, QuantityUnit.Quote))
+    .Turnover(2, 65000) == 200, "inverse quote notional");
+var fromTrade = ExchangeApi.TradeBars([new Trade("AKE", 120000, 2), new Trade("AKE", 122000, 4),
+    new Trade("AKE", 136000, 3)], 15);
+Require(fromTrade.Length == 2 && fromTrade[0] == new Candle(120000, 2, 4, 2, 4),
+    "second candles use trades without filling gaps");
+var bars = new[] { new Candle(0, 10, 10, 10, 10, 5), new Candle(60000, 11, 13, 9, 12, 20) };
+Require(OverviewMetrics.Calculate(ake, bars, 60, 120000, new(MetricKind.Turnover, 1)) == 20 &&
+    Math.Abs(OverviewMetrics.Calculate(ake, bars, 60, 120000, new(MetricKind.Atr, 1))!.Value - 100d / 3) < 0.00001 &&
+    OverviewMetrics.Calculate(ake, bars, 60, 180000, new(MetricKind.Turnover, 1)) == null, "overview metrics and gaps");
+OverviewColumn[] turnoverColumn = [new(MetricKind.Turnover, 1440)];
+var aRow = new OverviewPanel.Row(ake, turnoverColumn);
+var bRow = new OverviewPanel.Row(btc, turnoverColumn);
+var emptyRow = new OverviewPanel.Row(ku, turnoverColumn);
+aRow.Set([10], turnoverColumn);
+bRow.Set([2], turnoverColumn);
+var ascending = new OverviewPanel.RowComparer(0, false);
+Require(ascending.Compare(aRow, bRow) > 0 && ascending.Compare(emptyRow, bRow) > 0 &&
+    new OverviewPanel.RowComparer(0, true).Compare(emptyRow, bRow) > 0, "numeric sorting separates missing values");
 
 Require(ChartPlacement.Pick(ku.Key, [(null, false, 0), (gate.Key, false, 2)]) == 0, "fill first free");
 Require(ChartPlacement.Pick(ku.Key, [(btc.Key, true, 0), (gate.Key, false, 3), (binance.Key, false, 2)]) == 2, "replace oldest unlocked");
@@ -194,6 +287,9 @@ Require(migrated.Grid == 3 && migrated.Cells[0] is { Pinned: true, Order: 12 } &
     migrated.PriceModule && !migrated.VolumeModule && migrated.VolumeFilters.Length == 0 &&
     migrated.Fullscreen == System.Windows.Input.Key.F && migrated.Ruler.Mouse == System.Windows.Input.MouseButton.Middle,
     "v0.1.1 migration");
+var migratedSpot = Settings.Deserialize("""{"Rules":{"KuCoin":1,"Binance":2}}""");
+Require(migratedSpot.Rule(spotKu) == ListingRule.Require && migratedSpot.Rule(spotBin) == ListingRule.Exclude &&
+    migratedSpot.Rule(futKu) == ListingRule.Ignore && migratedSpot.FrameButtons.SequenceEqual([15, 60, 300]), "v0.2.0 Spot migration");
 migrated.Thresholds = migrated.Thresholds.Append(new Threshold(120, true, 9)).ToArray();
 migrated.VolumeFilters = [new(300, true, 300)];
 Require(Settings.Deserialize(JsonSerializer.Serialize(migrated)).Thresholds.Any(r => r.Seconds == 120) &&

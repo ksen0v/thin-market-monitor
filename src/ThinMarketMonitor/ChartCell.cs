@@ -5,6 +5,8 @@ using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
+using System.Collections.Concurrent;
 
 namespace ThinMarketMonitor;
 
@@ -16,6 +18,10 @@ internal sealed class ChartCell : Border
     private readonly DockPanel layout = new();
     private readonly TextBlock label = new() { TextTrimming = TextTrimming.CharacterEllipsis, FontWeight = FontWeights.SemiBold };
     private readonly TextBlock detail = new() { TextTrimming = TextTrimming.CharacterEllipsis, FontSize = 11 };
+    private readonly StackPanel frameBar = new() { Orientation = Orientation.Horizontal };
+    private readonly Border headerFrame = Terminal.Rule(new Thickness(0, 0, 0, 1));
+    private readonly ContentControl signalIcon = new() { Margin = new Thickness(0, 0, 5, 0) };
+    private readonly Func<int[]> frameButtons;
     private readonly Button pin = Terminal.IconButton("pin-off", "Закрепить график");
     private readonly Button clear = Terminal.IconButton("close", "Очистить ячейку");
     private CancellationTokenSource? refresh;
@@ -23,11 +29,17 @@ internal sealed class ChartCell : Border
     private bool active;
     private CellChoice? choice;
     private Signal? latestSignal;
+    private int frame = 60;
+    private bool olderRequested;
+    private bool autoAssigned;
+    public int Frame => frame;
+    public Market? Instrument => market;
+    public event Action<int>? FrameChanged;
 
     public CellChoice? Choice
     {
         get => choice;
-        set { choice = value; UpdateHeader(); }
+        set { choice = value; if (value != null && Frames.All.Contains(value.Frame)) frame = value.Frame; UpdateHeader(); UpdateFrames(); }
     }
     public long Order => Choice?.Order ?? 0;
     public double PlotHeight { set => plot.Height = value; }
@@ -35,11 +47,14 @@ internal sealed class ChartCell : Border
     public bool IsInteracting => plot.IsMouseCaptured;
     public CandlePlot Plot => plot;
 
-    public ChartCell(ExchangeApi api, int number, Action choose, Action save, Func<long> nextOrder, Func<ChartGesture> gesture)
+    public ChartCell(ExchangeApi api, int number, Action choose, Action save, Func<long> nextOrder, Func<ChartGesture> gesture,
+        Func<int[]> frameButtons)
     {
         this.api = api;
         this.nextOrder = nextOrder;
+        this.frameButtons = frameButtons;
         plot = new CandlePlot(gesture);
+        plot.OlderRequested += () => olderRequested = true;
         Margin = new Thickness(0, 0, 1, 1);
         Padding = new Thickness(0, 0, 0, 4);
         Background = Terminal.Brush("Surface");
@@ -47,7 +62,6 @@ internal sealed class ChartCell : Border
         detail.MinHeight = 15;
         detail.Margin = new Thickness(7, 4, 7, 0);
         Child = layout;
-        var headerFrame = Terminal.Rule(new Thickness(0, 0, 0, 1));
         var header = new DockPanel { Margin = new Thickness(7, 2, 7, 2), MinHeight = 24 };
         headerFrame.Child = header;
         var actions = new StackPanel { Orientation = Orientation.Horizontal };
@@ -77,15 +91,20 @@ internal sealed class ChartCell : Border
         actions.Children.Add(clear);
         DockPanel.SetDock(actions, Dock.Right);
         header.Children.Add(actions);
+        DockPanel.SetDock(signalIcon, Dock.Left);
+        header.Children.Add(signalIcon);
         label.VerticalAlignment = VerticalAlignment.Center;
         label.Margin = new Thickness(0, 0, 7, 0);
         header.Children.Add(label);
         DockPanel.SetDock(headerFrame, Dock.Top);
+        DockPanel.SetDock(frameBar, Dock.Top);
         DockPanel.SetDock(detail, Dock.Bottom);
         layout.Children.Add(headerFrame);
+        layout.Children.Add(frameBar);
         layout.Children.Add(detail);
         layout.Children.Add(plot);
         UpdateHeader();
+        UpdateFrames();
     }
 
     public void Activate(bool visible)
@@ -99,14 +118,23 @@ internal sealed class ChartCell : Border
     {
         market = selected;
         latestSignal = signal;
-        Choice = new(selected.Key, pinned, nextOrder());
+        autoAssigned = signal != null;
+        Choice = new(selected.Key, pinned, nextOrder(), frame);
         ResetFeed();
+        if (signal != null)
+        {
+            var tint = new SolidColorBrush(((SolidColorBrush)Terminal.Brush("AccentSurface")).Color);
+            headerFrame.Background = tint;
+            tint.BeginAnimation(SolidColorBrush.ColorProperty, new ColorAnimation(
+                ((SolidColorBrush)Terminal.Brush("Surface")).Color, TimeSpan.FromMilliseconds(650)));
+        }
     }
 
     public void ShowSignal(Signal signal)
     {
+        if (!autoAssigned) return;
         latestSignal = signal;
-        if (market != null) label.ToolTip = InstrumentTooltip();
+        if (market != null) UpdateHeader();
     }
 
     private string? InstrumentTooltip() => latestSignal is not { } s ? market?.Label :
@@ -152,64 +180,203 @@ internal sealed class ChartCell : Border
         {
             label.Inlines.Add($"{market.Base}/{market.Quote}");
             label.Inlines.Add(new System.Windows.Documents.Run(" " + market.Venue.Label() +
-                (market.Venue == Venue.Alpha ? $" · {market.Symbol}" : ""))
+                (market.Venue == Venue.Alpha || market.Contract != null ? $" · {market.Symbol}" : ""))
             {
                 Foreground = Terminal.Brush("Muted"), FontWeight = FontWeights.Normal, FontSize = 11
             });
         }
         label.ToolTip = InstrumentTooltip() ?? Choice?.Key;
+        signalIcon.Visibility = latestSignal == null ? Visibility.Collapsed : Visibility.Visible;
+        signalIcon.Content = latestSignal == null ? null : Terminal.Icon(latestSignal.Module == SignalModule.Price ? "activity" : "volume");
+        signalIcon.Foreground = Terminal.Brush(latestSignal?.Module == SignalModule.Volume ? "Rising" : "Accent");
+        signalIcon.ToolTip = latestSignal == null ? null : InstrumentTooltip();
         UpdatePin();
         detail.Text = market == null && Choice != null ? "Инструмент вне доступного списка" : "";
         detail.ToolTip = null;
-        AutomationProperties.SetName(plot, market == null ? "" : $"Минутные свечи {market.Label}");
+        AutomationProperties.SetName(plot, market == null ? "" : $"Свечи {Frames.Label(frame)} · {market.Label}");
     }
 
     private void ResetFeed()
     {
         refresh?.Cancel();
         refresh = null;
+        olderRequested = false;
+        plot.Frame = frame;
         plot.Set([], reset: true);
         UpdateHeader();
         if (!active || market == null) return;
         refresh = new();
-        _ = Load(market, refresh);
+        _ = Load(market, frame, refresh);
     }
 
-    private async Task Load(Market instrument, CancellationTokenSource source)
+    public void CycleFrame(int direction) => SetFrame(Frames.All[Math.Clamp(Array.IndexOf(Frames.All, frame) + direction, 0, Frames.All.Length - 1)]);
+
+    public void SetFrame(int value)
+    {
+        if (value == frame || !Frames.All.Contains(value)) return;
+        frame = value;
+        if (choice != null) choice = choice with { Frame = value };
+        UpdateFrames();
+        ResetFeed();
+        FrameChanged?.Invoke(value);
+    }
+
+    public void UpdateFrames()
+    {
+        frameBar.Children.Clear();
+        foreach (int value in frameButtons())
+            Add(value, frameBar);
+        var more = new Button { Content = frameButtons().Contains(frame) ? "▾" : Frames.Label(frame) + " ▾",
+            Style = Terminal.Style("IconButton"), ToolTip = "Все таймфреймы" };
+        AutomationProperties.SetName(more, "Все таймфреймы");
+        var menu = new ContextMenu { Background = Terminal.Brush("Surface"), Foreground = Terminal.Brush("Text") };
+        foreach (int value in Frames.All)
+        {
+            var item = new MenuItem { Header = Frames.Label(value), IsCheckable = true, IsChecked = value == frame };
+            item.Click += (_, _) => SetFrame(value);
+            menu.Items.Add(item);
+        }
+        more.ContextMenu = menu;
+        more.Click += (_, _) => { menu.PlacementTarget = more; menu.IsOpen = true; };
+        frameBar.Children.Add(more);
+
+        void Add(int value, Panel target)
+        {
+            var button = new Button { Content = Frames.Label(value), Style = Terminal.Style("IconButton"), MinHeight = 20,
+                Foreground = Terminal.Brush(value == frame ? "Accent" : "Muted") };
+            AutomationProperties.SetName(button, $"Таймфрейм {Frames.Label(value)}");
+            button.Click += (_, _) => SetFrame(value);
+            target.Children.Add(button);
+        }
+    }
+
+    private async Task Load(Market instrument, int tf, CancellationTokenSource source)
     {
         var ct = source.Token;
         var candles = new SortedDictionary<long, Candle>();
-        detail.Text = "Загрузка минутных свечей…";
+        var live = new ConcurrentQueue<Trade>();
+        bool native = tf >= 60 || ExchangeApi.NativeSeconds(instrument);
+        bool finished = false;
+        int emptyPages = 0;
+        string coverage = "";
+        long nextPage = Boundary(tf);
+        long nextTick = 0;
+        detail.Text = "Загрузка свечей…";
         try
         {
+            if (!native) await LoadSeconds(instrument, tf, ct);
             while (!ct.IsCancellationRequested)
             {
                 try
                 {
-                    var next = await api.Candles(instrument, candles.Count > 0, ct);
-                    ct.ThrowIfCancellationRequested();
-                    foreach (var candle in next) candles[candle.Time] = candle;
-                    while (candles.Count > 240) candles.Remove(candles.Keys.First());
-                    plot.Set(candles.Values.ToArray());
-                    detail.Text = candles.Count == 0 ? "Биржа не вернула свечи" : "1 мин · колесо — масштаб · ЛКМ — сдвиг · шкалы — растяжение";
+                    if (native && olderRequested && !finished && candles.Count > 0)
+                    {
+                        olderRequested = false;
+                        bool found = await Page(nextPage, 180, prepend: true);
+                        if (found) emptyPages = 0;
+                        else if (++emptyPages >= 3)
+                        {
+                            finished = true;
+                            coverage = "Конец доступной истории · три участка без свечей";
+                        }
+                        else coverage = "На предыдущем участке свечей нет · повторите движение влево";
+                    }
+                    if (Environment.TickCount64 >= nextTick)
+                    {
+                        nextTick = Environment.TickCount64 + (tf < 60 ? 4000 : 12000);
+                        if (native) await Page(Boundary(tf), candles.Count == 0 ? (tf < 60 ? 100 : 180) : 4, prepend: false);
+                        else UpdateTrades();
+                    }
+                    else if (!native) UpdateTrades();
+                    if (native && candles.Count >= 12000) { finished = true; coverage = "Достигнут локальный предел 12 000 свечей"; }
+                    detail.Text = $"{Frames.Label(tf)} · " + (coverage.Length > 0 ? coverage :
+                        candles.Count == 0 ? "Биржа не вернула свечи" : "Колесо — масштаб · ЛКМ — сдвиг · шкалы — растяжение");
                     detail.ToolTip = null;
                 }
                 catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
                     detail.Text = candles.Count == 0 ? "Свечи недоступны · повтор через 12 с" : "Свечи не обновились · повтор через 12 с";
                     detail.ToolTip = ex is OperationCanceledException ? "Тайм-аут" : ex.Message;
+                    await Task.Delay(12000, ct);
                 }
-                await Task.Delay(12_000, ct);
+                await Task.Delay(native ? 300 : 450, ct);
             }
         }
         catch (Exception ex) when (ct.IsCancellationRequested && ex is OperationCanceledException or ObjectDisposedException or HttpRequestException) { }
         finally { source.Dispose(); }
+
+        async Task<bool> Page(long before, int count, bool prepend)
+        {
+            if (before <= 0) { finished = true; return false; }
+            var result = await api.CandlePage(instrument, tf, before, count, ct);
+            ct.ThrowIfCancellationRequested();
+            if (prepend || candles.Count == 0) nextPage = result.Length > 0 ? result[0].Time : before - tf * count * 1000L;
+            foreach (var c in result) candles[c.Time] = c;
+            while (candles.Count > 12000) candles.Remove(candles.Keys.First());
+            if (result.Length > 0)
+            {
+                if (prepend || !finished && emptyPages == 0) coverage = "";
+                plot.Set(candles.Values.ToArray());
+            }
+            return result.Length > 0;
+        }
+
+        void UpdateTrades()
+        {
+            var batch = new List<Trade>();
+            while (live.TryDequeue(out var trade)) batch.Add(trade);
+            if (batch.Count == 0) return;
+            foreach (var c in ExchangeApi.TradeBars(batch, tf))
+                candles[c.Time] = candles.TryGetValue(c.Time, out var old)
+                    ? new(c.Time, old.Open, Math.Max(old.High, c.High), Math.Min(old.Low, c.Low), c.Close) : c;
+            while (candles.Count > 12000) candles.Remove(candles.Keys.First());
+            plot.Set(candles.Values.ToArray());
+        }
+
+        async Task LoadSeconds(Market selected, int seconds, CancellationToken token)
+        {
+            coverage = "Сделки REST/WS · более ранняя история биржей не предоставляется";
+            try
+            {
+                foreach (var c in ExchangeApi.TradeBars(await api.RecentTrades(selected, token), seconds)) candles[c.Time] = c;
+                token.ThrowIfCancellationRequested();
+                plot.Set(candles.Values.ToArray());
+            }
+            catch (Exception) when (!token.IsCancellationRequested) { coverage = "История сделок недоступна · только новые сделки"; }
+            if (selected.Streaming) _ = StreamSeconds(selected, live, token);
+        }
+    }
+
+    private static long Boundary(int tf) => (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / (tf * 1000L) + 1) * tf * 1000L;
+
+    private async Task StreamSeconds(Market selected, ConcurrentQueue<Trade> queue, CancellationToken ct)
+    {
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    await MarketStreams.Open(api, [selected], ct, () => { }, t =>
+                    {
+                        if (!ct.IsCancellationRequested && t.Symbol.Equals(selected.Symbol, StringComparison.OrdinalIgnoreCase) &&
+                            t.Time >= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 5000 && queue.Count < 10000) queue.Enqueue(t);
+                    });
+                }
+                catch (Exception) when (!ct.IsCancellationRequested) { }
+                await Task.Delay(5000, ct);
+            }
+        }
+        catch (Exception) when (ct.IsCancellationRequested) { }
     }
 }
 
 internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
 {
     private const double Left = 7, Top = 7;
+    public int Frame { get; set; } = 60;
+    private long BarTime => Frame * 1000L;
+    public event Action? OlderRequested;
     private readonly Brush background = Terminal.Brush("Plot");
     private readonly Brush up = Terminal.Brush("Rising");
     private readonly Brush down = Terminal.Brush("Falling");
@@ -241,7 +408,7 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
     public void Set(Candle[] value, bool reset = false)
     {
         if (!reset && offset > 0 && candles.Length > 0 && value.Length > 0)
-            offset += Math.Max(0, (value[^1].Time - candles[^1].Time) / 60_000d);
+            offset += Math.Max(0, (value[^1].Time - candles[^1].Time) / (double)BarTime);
         candles = value;
         if (reset) Reset();
         else
@@ -265,12 +432,12 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
         if (ActualWidth < 100 || ActualHeight < 48 || candles.Length == 0) return null;
         double right = ActualWidth - (ActualWidth < 160 ? 46 : 70);
         var rect = new Rect(Left, Top, right - Left, ActualHeight - Top - 17);
-        double end = candles[^1].Time + 60_000 - offset * 60_000;
-        double start = end - visible * 60_000;
+        double end = candles[^1].Time + BarTime - offset * BarTime;
+        double start = end - visible * BarTime;
         double low = double.MaxValue, high = 0;
         foreach (var c in candles)
         {
-            if (c.Time + 60_000 <= start || c.Time >= end) continue;
+            if (c.Time + BarTime <= start || c.Time >= end) continue;
             low = Math.Min(low, c.Low);
             high = Math.Max(high, c.High);
         }
@@ -284,7 +451,7 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
         dc.DrawRectangle(background, null, new Rect(0, 0, ActualWidth, ActualHeight));
         if (CurrentView() is not { } view) return;
         var plot = view.Plot;
-        double step = plot.Width * 60_000 / (view.End - view.Start);
+        double step = plot.Width * BarTime / (view.End - view.Start);
         double body = Math.Max(1, step * 0.67);
         int rows = ActualHeight < 105 ? 3 : 5;
         int columns = ActualWidth > 325 ? 4 : ActualWidth > 190 ? 3 : 2;
@@ -301,15 +468,15 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
             double x = plot.Left + plot.Width * fraction;
             dc.DrawLine(gridLine, new Point(x, plot.Top), new Point(x, plot.Bottom));
             long time = (long)(view.Start + fraction * (view.End - view.Start));
-            DrawText(dc, DateTimeOffset.FromUnixTimeMilliseconds(time).ToLocalTime().ToString("HH:mm"),
+            DrawText(dc, DateTimeOffset.FromUnixTimeMilliseconds(time).ToLocalTime().ToString(Frame < 60 ? "HH:mm:ss" : Frame >= 3600 ? "dd.MM HH:mm" : "HH:mm"),
                 x, ActualHeight - 15, i == 0 ? 0 : i == columns - 1 ? 1 : 0.5);
         }
 
         dc.PushClip(new RectangleGeometry(plot));
         foreach (var c in candles)
         {
-            if (c.Time + 60_000 <= view.Start || c.Time >= view.End) continue;
-            double x = plot.Left + ((c.Time - view.Start) / 60_000d + 0.5) * step;
+            if (c.Time + BarTime <= view.Start || c.Time >= view.End) continue;
+            double x = plot.Left + ((c.Time - view.Start) / (double)BarTime + 0.5) * step;
             bool rising = c.Close >= c.Open;
             dc.DrawLine(rising ? upLine : downLine, new Point(x, view.Y(c.High)), new Point(x, view.Y(c.Low)));
             dc.DrawRectangle(rising ? up : down, null,
@@ -346,6 +513,7 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
         double count = ClampCount(visible * Math.Pow(e.Delta > 0 ? .78 : 1.28, Math.Abs(e.Delta) / 120d));
         offset = ClampOffset(offset + (offset > 0 || fraction < .87 ? (visible - count) * (1 - fraction) : 0), count);
         visible = count;
+        RequestOlder(e.Delta < 0);
         InvalidateVisual();
         e.Handled = true;
     }
@@ -410,12 +578,14 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
                 break;
             case Operation.Pan:
                 offset = ClampOffset(move.Offset + dx * move.Visible, move.Visible);
+                RequestOlder(dx > 0);
                 SetPrice(view.Low + dy * view.Span, view.Span);
                 break;
             case Operation.Time:
                 visible = ClampCount(move.Visible * Math.Exp(Math.Clamp(dx * 2.3, -5, 5)));
                 double anchor = Math.Clamp((move.Start.X - view.Plot.Left) / view.Plot.Width, 0, 1);
                 offset = ClampOffset(move.Offset + (move.Visible - visible) * (1 - anchor), visible);
+                RequestOlder(dx > 0);
                 break;
             case Operation.Price:
                 double span = view.Span * Math.Exp(Math.Clamp(dy * 2.3, -5, 5));
@@ -454,11 +624,15 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
 
     private double ClampCount(double count)
     {
-        double max = Math.Clamp(HistoryMinutes, 8, 10080);
+        double max = Math.Clamp(HistoryBars, 8, 1600);
         return Math.Clamp(count, Math.Min(8, max), max);
     }
-    private double ClampOffset(double value, double count) => Math.Clamp(value, 0, Math.Max(0, HistoryMinutes - count));
-    private double HistoryMinutes => candles.Length == 0 ? 0 : (candles[^1].Time - candles[0].Time) / 60_000d + 1;
+    private double ClampOffset(double value, double count) => Math.Clamp(value, 0, Math.Max(0, HistoryBars - count));
+    private double HistoryBars => candles.Length == 0 ? 0 : (candles[^1].Time - candles[0].Time) / (double)BarTime + 1;
+    private void RequestOlder(bool backwards)
+    {
+        if (backwards && offset + visible >= HistoryBars - 6) OlderRequested?.Invoke();
+    }
 
     private void DrawText(DrawingContext dc, string text, double x, double y, double anchor = 0)
     {

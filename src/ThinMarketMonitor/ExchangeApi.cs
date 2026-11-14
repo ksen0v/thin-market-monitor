@@ -15,11 +15,11 @@ internal sealed partial class ExchangeApi(HttpClient http)
     private const string Gate = "https://api.gateio.ws/api/v4/spot/";
     private const string Alpha = "https://www.binance.com/bapi/defi/v1/public/";
 
-    public async Task<Catalog> LoadCatalog(Venue venue, CancellationToken ct)
+    public async Task<Catalog> LoadCatalog(MarketSource source, CancellationToken ct)
     {
         try
         {
-            return new(await GetMarkets(venue, ct));
+            return new(source.Segment == Segment.Spot ? await GetMarkets(source.Venue, ct) : await FuturesMarkets(source.Venue, ct));
         }
         catch (Exception ex) when (!ct.IsCancellationRequested && ex is HttpRequestException or JsonException
                                    or FormatException or InvalidOperationException or KeyNotFoundException or OperationCanceledException)

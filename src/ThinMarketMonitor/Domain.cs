@@ -5,6 +5,16 @@ using System.Windows.Input;
 namespace ThinMarketMonitor;
 
 internal enum Venue { Binance, Bybit, Okx, Bitget, Mexc, KuCoin, Gate, Alpha }
+internal enum Segment { Spot, Futures }
+internal readonly record struct MarketSource(Venue Venue, Segment Segment = Segment.Spot)
+{
+    public static MarketSource[] All { get; } = Enum.GetValues<Venue>().SelectMany(v =>
+        v == Venue.Alpha ? new[] { new MarketSource(v) } : [new(v), new(v, Segment.Futures)]).ToArray();
+    public string Label => Venue == Venue.Alpha ? Venue.Label() : $"{Venue.Label()} · {Segment}";
+    public override string ToString() => Label;
+}
+internal enum QuantityUnit { Base, Quote }
+internal sealed record Contract(string Product, double Multiplier = 1, QuantityUnit Unit = QuantityUnit.Base, bool Streaming = true);
 internal enum ListingRule { Ignore, Require, Exclude }
 internal static class Venues
 {
@@ -15,13 +25,18 @@ internal static class Venues
     };
 }
 
-internal record Market(Venue Venue, string Symbol, string Base, string Quote)
+internal record Market(Venue Venue, string Symbol, string Base, string Quote, Contract? Contract = null)
 {
-    public string Key => $"{Venue}:{Symbol}";
-    public string Label => $"{Base}/{Quote} · {Venue.Label()}" + (Venue == Venue.Alpha ? $" · {Symbol}" : "");
+    public MarketSource Source => new(Venue, Contract == null ? Segment.Spot : Segment.Futures);
+    public string Key => Contract == null ? $"{Venue}:{Symbol}" : $"{Venue}:Futures:{Contract.Product}:{Symbol}";
+    public string Ticker => Contract == null ? $"{Base}/{Quote}" : Symbol;
+    public string Label => $"{Ticker} · {Source.Label}" + (Venue == Venue.Alpha ? $" · {Symbol}" : "");
+    public bool Streaming => Contract?.Streaming != false;
+    public double Turnover(double quantity, double price) => Contract?.Unit == QuantityUnit.Quote
+        ? quantity * Contract.Multiplier : price * quantity * (Contract?.Multiplier ?? 1);
 }
 
-internal record Candle(long Time, double Open, double High, double Low, double Close);
+internal record Candle(long Time, double Open, double High, double Low, double Close, double? QuoteVolume = null);
 internal record Trade(string Symbol, long Time, double Price, double Size = 0, string? Id = null);
 internal record Threshold(int Seconds, bool Enabled, double Percent);
 internal record VolumeRule(int Seconds, bool Enabled, double Usd);
@@ -39,8 +54,15 @@ internal record ChartGesture(Key Key, MouseButton? Mouse = null)
         or >= Key.F1 and <= Key.F24 or >= Key.NumPad0 and <= Key.NumPad9 or Key.Space;
 }
 internal record Catalog(IReadOnlyList<Market> Markets, string? Error = null);
-internal record CellChoice(string Key, bool Pinned, long Order = 0);
-internal record FilterResult(IReadOnlyList<Market> Markets, IReadOnlyList<Venue> Missing);
+internal record CellChoice(string Key, bool Pinned, long Order = 0, int Frame = 60);
+internal record FilterResult(IReadOnlyList<Market> Markets, IReadOnlyList<MarketSource> Missing);
+internal static class Frames
+{
+    public static readonly int[] All = [1, 5, 15, 60, 300, 900, 3600, 14400, 86400];
+    public static string Label(int s) => s >= 86400 ? "1д" : s >= 3600 ? $"{s / 3600}ч" : s >= 60 ? $"{s / 60}м" : $"{s}с";
+}
+internal enum MetricKind { Turnover, Change, Atr }
+internal record OverviewColumn(MetricKind Kind, int Minutes);
 
 internal sealed class Settings
 {
@@ -50,6 +72,19 @@ internal sealed class Settings
     internal static readonly Threshold[] Defaults = [new(15, true, 4), new(60, true, 5), new(300, true, 12), new(900, true, 20)];
     internal static readonly VolumeRule[] DefaultVolumes = [new(15, true, 100), new(60, true, 400), new(300, true, 2000), new(900, true, 6000)];
     public Dictionary<Venue, ListingRule> Rules { get; set; } = new() { [Venue.KuCoin] = ListingRule.Require };
+    public Dictionary<Venue, ListingRule> FuturesRules { get; set; } = [];
+    public ListingRule Rule(MarketSource source) => (source.Segment == Segment.Spot ? Rules : FuturesRules).GetValueOrDefault(source.Venue);
+    public int[] FrameButtons { get; set; } = [15, 60, 300];
+    public Key FrameUp { get; set; } = Key.Up;
+    public Key FrameDown { get; set; } = Key.Down;
+    public bool Overview { get; set; }
+    public bool OverviewDrawer { get; set; } = true;
+    public MarketSource OverviewSource { get; set; } = new(Venue.KuCoin);
+    public CellChoice? OverviewChoice { get; set; }
+    public int OverviewFrame { get; set; } = 60;
+    public OverviewColumn[] OverviewColumns { get; set; } = [new(MetricKind.Turnover, 1440), new(MetricKind.Change, 1440)];
+    public int OverviewSort { get; set; } = -1;
+    public bool OverviewDescending { get; set; }
     public Threshold[] Thresholds { get; set; } = Defaults.ToArray();
     public VolumeRule[] VolumeThresholds { get; set; } = DefaultVolumes.ToArray();
     public VolumeRule[] VolumeFilters { get; set; } = [];
@@ -75,6 +110,13 @@ internal sealed class Settings
     {
         var settings = JsonSerializer.Deserialize<Settings>(json) ?? new();
         settings.Rules ??= new();
+        settings.FuturesRules ??= [];
+        settings.FrameButtons = (settings.FrameButtons ?? [15, 60, 300]).Where(Frames.All.Contains).Distinct().Order().ToArray();
+        if (!MarketSource.All.Contains(settings.OverviewSource)) settings.OverviewSource = new(Venue.KuCoin);
+        if (!Frames.All.Contains(settings.OverviewFrame)) settings.OverviewFrame = 60;
+        settings.OverviewColumns = (settings.OverviewColumns ?? []).Where(x => x != null &&
+            Enum.IsDefined(x.Kind) && x.Minutes is >= 1 and <= 1440).Distinct().Take(5).ToArray();
+        if (settings.OverviewSort < -1 || settings.OverviewSort >= settings.OverviewColumns.Length) settings.OverviewSort = -1;
         var price = (settings.Thresholds ?? []).Where(r => r is { Seconds: >= 1 and <= MaxModuleSeconds, Percent: > 0 and <= 10000 }).ToArray();
         var defaults = Defaults.Select(r => r.Seconds == 300 && price.Length > 0 && price.All(p => !p.Enabled)
             ? r with { Enabled = false } : r);
@@ -92,6 +134,11 @@ internal sealed class Settings
         if (settings.Ruler == null || (settings.Ruler.Mouse is { } mouse ? !Enum.IsDefined(mouse)
                 : !ChartGesture.Bindable(settings.Ruler.Key) || settings.Ruler.Key == settings.Fullscreen))
             settings.Ruler = new(Key.None, MouseButton.Middle);
+        bool ValidFrameKey(Key key) => (ChartGesture.Bindable(key) || key is Key.Up or Key.Down) && key != settings.Fullscreen &&
+            (settings.Ruler.Mouse != null || key != settings.Ruler.Key);
+        if (!ValidFrameKey(settings.FrameUp)) settings.FrameUp = Key.Up;
+        if (!ValidFrameKey(settings.FrameDown) || settings.FrameUp == settings.FrameDown)
+            settings.FrameDown = settings.FrameUp == Key.Down ? Key.Up : Key.Down;
         return settings;
     }
 
@@ -107,19 +154,24 @@ internal sealed class Settings
 internal static class ListingFilter
 {
     public static FilterResult Apply(IReadOnlyDictionary<Venue, Catalog> catalogs, IReadOnlyDictionary<Venue, ListingRule> rules)
+        => Apply(catalogs.ToDictionary(x => new MarketSource(x.Key), x => x.Value),
+            source => source.Segment == Segment.Spot ? rules.GetValueOrDefault(source.Venue) : ListingRule.Ignore);
+
+    public static FilterResult Apply(IReadOnlyDictionary<MarketSource, Catalog> catalogs, Func<MarketSource, ListingRule> rule)
     {
-        var marked = Enum.GetValues<Venue>().Where(v => rules.GetValueOrDefault(v) != ListingRule.Ignore).ToArray();
+        var marked = MarketSource.All.Where(v => rule(v) != ListingRule.Ignore).ToArray();
         var missing = marked.Where(v => !catalogs.TryGetValue(v, out var c) || c.Error != null).ToArray();
         if (missing.Length > 0) return new([], missing);
 
-        var required = marked.Where(v => rules.GetValueOrDefault(v) == ListingRule.Require).ToArray();
-        var excluded = marked.Where(v => rules.GetValueOrDefault(v) == ListingRule.Exclude).ToArray();
-        var sources = required.Length > 0 ? required : catalogs.Keys.Where(v => !excluded.Contains(v)).ToArray();
+        var required = marked.Where(v => rule(v) == ListingRule.Require).ToArray();
+        var excluded = marked.Where(v => rule(v) == ListingRule.Exclude).ToArray();
+        var sources = required.Length > 0 ? required : catalogs.Keys.Where(v => v.Segment == Segment.Spot && !excluded.Contains(v)).ToArray();
         var bases = marked.ToDictionary(v => v, v => catalogs[v].Markets.Select(m => m.Base).ToHashSet());
         return new(sources.Where(v => catalogs[v].Error == null).SelectMany(v => catalogs[v].Markets)
             .Where(m => required.All(v => bases[v].Contains(m.Base)) && excluded.All(v => !bases[v].Contains(m.Base)))
             .GroupBy(m => m.Base)
-            .Select(g => g.OrderBy(m => QuoteRank(m.Quote)).ThenBy(m => m.Venue)
+            .Select(g => g.OrderByDescending(m => m.Streaming)
+                .ThenBy(m => QuoteRank(m.Quote)).ThenBy(m => m.Source.Segment).ThenBy(m => m.Venue)
                 .ThenBy(m => m.Symbol, StringComparer.Ordinal).First())
             .OrderBy(m => m.Base, StringComparer.Ordinal).ToArray(), []);
     }

@@ -2,7 +2,8 @@ namespace ThinMarketMonitor;
 
 internal static class UsdQuotes
 {
-    public static bool Supported(string quote) => quote is "USD" or "USDT" or "USDC" or "FDUSD" or "TUSD" or "USDP" or "PYUSD";
+    public static bool Supported(string quote) => quote is "USD" or "USDT" or "USDC" or "FDUSD" or "TUSD" or "USDP" or "PYUSD" or "USD1";
+    public static bool Supported(Market market) => Supported(market.Quote) && (market.Contract?.Multiplier ?? 1) > 0;
 }
 
 internal sealed class VolumeImpulse(VolumeRule[] rules)
@@ -29,9 +30,9 @@ internal sealed class VolumeImpulse(VolumeRule[] rules)
     public Signal? Observe(Market market, Trade trade, long now, bool eligible)
     {
         long since = coveredSince;
-        if (rules.Length == 0 || !UsdQuotes.Supported(market.Quote) || trade.Time < since)
+        if (rules.Length == 0 || !UsdQuotes.Supported(market) || trade.Time < since)
             return null;
-        double amount = trade.Price * trade.Size;
+        double amount = market.Turnover(trade.Size, trade.Price);
         if (!double.IsFinite(amount) || amount <= 0 || string.IsNullOrEmpty(trade.Id) ||
             trade.Time < now - 5000 || trade.Time > now + 3000)
         {

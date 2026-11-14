@@ -6,6 +6,10 @@ internal sealed partial class ExchangeApi
 {
     internal static bool HasBulkDay(Venue venue) => venue != Venue.Alpha;
 
+    internal static bool HasBulkDay(Market m) => m.Venue != Venue.Alpha &&
+        !(m.Venue == Venue.Okx && m.Contract is { Unit: QuantityUnit.Base }) &&
+        !(m.Venue == Venue.Gate && m.Contract?.Product.StartsWith("delivery", StringComparison.Ordinal) == true);
+
     public async Task<double?> AlphaDayVolume(Market market, CancellationToken ct)
     {
         string symbol = Uri.EscapeDataString(market.Symbol);
@@ -70,6 +74,12 @@ internal sealed partial class ExchangeApi
         if (periods.Length == 0) return new();
         // Leave a full minute for the exchange to finalize the last included bar.
         long end = (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 60_000 - 1) * 60_000;
+        if (market.Contract != null)
+        {
+            var results = await CandlePage(market, 60, end, periods.Max() / 60, ct);
+            return CompleteVolumes(results.Where(c => c.QuoteVolume.HasValue).ToDictionary(c => c.Time, c => c.QuoteVolume!.Value),
+                periods, end, market.Venue == Venue.KuCoin);
+        }
         long start = end - periods.Max() * 1000L;
         var bars = new Dictionary<long, double>();
         string symbol = Uri.EscapeDataString(market.Symbol);

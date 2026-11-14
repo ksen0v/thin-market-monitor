@@ -11,19 +11,20 @@ namespace ThinMarketMonitor;
 
 internal sealed partial class SettingsPanel : Border, IDisposable
 {
-    private const int ListingsPage = 0, FiltersPage = 1, ModulesPage = 2, PricePage = 3, VolumePage = 4, ChartsPage = 5, AboutPage = 6;
+    private const int ListingsPage = 0, FiltersPage = 1, ModulesPage = 2, PricePage = 3, VolumePage = 4, ChartsPage = 5,
+        OverviewPage = 6, AboutPage = 7;
     private readonly CancellationTokenSource stop = new();
     private readonly Grid layout = new();
-    private readonly Button[] navigation = new Button[7];
-    private readonly Border[] indicators = new Border[7];
-    private readonly FrameworkElement[] pages = new FrameworkElement[7];
-    private readonly Dictionary<Venue, (Button Button, TextBlock State)> venues = new();
+    private readonly Button[] navigation = new Button[8];
+    private readonly Border[] indicators = new Border[8];
+    private readonly FrameworkElement[] pages = new FrameworkElement[8];
+    private readonly Dictionary<MarketSource, (Button Button, TextBlock State)> venues = new();
     private readonly TextBlock result = Terminal.Copy("");
     private readonly TextBlock updateStatus = Terminal.Copy($"v{Updater.Current}");
     private readonly Button check = new() { Content = "Проверить версию" };
     private readonly Button install = new() { Content = "Обновить и перезапустить", Visibility = Visibility.Collapsed };
     private readonly Settings settings;
-    private readonly IReadOnlyDictionary<Venue, Catalog> catalogs;
+    private readonly IReadOnlyDictionary<MarketSource, Catalog> catalogs;
     private readonly Updater updater;
     private readonly Action<bool> changed;
     private readonly Action close;
@@ -32,8 +33,8 @@ internal sealed partial class SettingsPanel : Border, IDisposable
     private bool checkedOnOpen;
     public bool Installing { get; private set; }
 
-    public SettingsPanel(Settings settings, IReadOnlyDictionary<Venue, Catalog> catalogs, Updater updater,
-        Action<bool> changed, Action close, Action restart)
+    public SettingsPanel(Settings settings, IReadOnlyDictionary<MarketSource, Catalog> catalogs, Updater updater,
+        Action<bool> changed, Action close, Action restart, bool overview = false)
     {
         this.settings = settings;
         this.catalogs = catalogs;
@@ -74,6 +75,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         AddNavigation(nav, PricePage, "Импульс цены", "activity");
         AddNavigation(nav, VolumePage, "Импульс объёма", "volume");
         AddNavigation(nav, ChartsPage, "Графики", "candles");
+        AddNavigation(nav, OverviewPage, "Обзор", "volume");
         AddNavigation(nav, AboutPage, "О программе", "info");
         var surface = new Border { Background = Terminal.Brush("Surface"), Padding = new Thickness(18, 16, 18, 16) };
         Grid.SetColumn(surface, 1);
@@ -86,6 +88,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         pages[PricePage] = Rules(RuleKind.Price);
         pages[VolumePage] = Rules(RuleKind.Volume);
         pages[ChartsPage] = Shortcuts();
+        pages[OverviewPage] = OverviewOptions();
         pages[AboutPage] = About();
         foreach (var page in pages) pageHost.Children.Add(page);
 
@@ -103,8 +106,8 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         Grid.SetRow(footer, 2);
         layout.Children.Add(footer);
         UpdateModuleNavigation();
-        SelectPage(ListingsPage);
-        Loaded += (_, _) => navigation[0].Focus();
+        SelectPage(overview ? OverviewPage : ListingsPage);
+        Loaded += (_, _) => navigation[overview ? OverviewPage : ListingsPage].Focus();
     }
 
     private void AddNavigation(Panel nav, int index, string text, string icon)
@@ -148,11 +151,12 @@ internal sealed partial class SettingsPanel : Border, IDisposable
     {
         var panel = new StackPanel();
         panel.Children.Add(Terminal.Heading("Листинги"));
-        panel.Children.Add(Terminal.Copy("Нажимайте на значок биржи, чтобы сменить условие."));
-        var logos = new UniformGrid { Columns = 4, Rows = 2, Margin = new Thickness(0, 14, -7, 5) };
+        panel.Children.Add(Terminal.Copy("Нажимайте на плитку сегмента, чтобы сменить условие."));
+        var logos = new UniformGrid { Columns = 4, Margin = new Thickness(0, 14, -7, 5) };
         AutomationProperties.SetName(logos, "Фильтр по биржам");
-        foreach (var venue in Enum.GetValues<Venue>())
+        foreach (var source in MarketSource.All)
         {
+            var venue = source.Venue;
             var button = new Button { Style = Terminal.Style("VenueButton"), Margin = new Thickness(0, 0, 7, 7) };
             var content = new Grid();
             var logo = new Grid { Width = 48, Height = 46, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
@@ -176,6 +180,13 @@ internal sealed partial class SettingsPanel : Border, IDisposable
                 });
             }
             content.Children.Add(logo);
+            logo.Margin = new Thickness(0, 0, 0, 14);
+            content.Children.Add(new TextBlock
+            {
+                Text = venue == Venue.Alpha ? "Alpha" : source.Segment.ToString(), FontSize = 10,
+                HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Bottom,
+                Margin = new Thickness(0, 0, 0, 3)
+            });
             var state = new TextBlock
             {
                 FontSize = 14, FontFamily = new FontFamily("Segoe UI Symbol"),
@@ -185,22 +196,23 @@ internal sealed partial class SettingsPanel : Border, IDisposable
             content.Children.Add(state);
             button.Content = content;
             logos.Children.Add(button);
-            venues.Add(venue, (button, state));
+            venues.Add(source, (button, state));
             button.Click += (_, _) =>
             {
-                var rule = settings.Rules.GetValueOrDefault(venue);
+                var rules = source.Segment == Segment.Spot ? settings.Rules : settings.FuturesRules;
+                var rule = settings.Rule(source);
                 var next = rule switch
                 {
                     ListingRule.Ignore => ListingRule.Require,
                     ListingRule.Require => ListingRule.Exclude,
                     _ => ListingRule.Ignore
                 };
-                if (next == ListingRule.Ignore) settings.Rules.Remove(venue);
-                else settings.Rules[venue] = next;
-                UpdateVenue(venue);
+                if (next == ListingRule.Ignore) rules.Remove(venue);
+                else rules[venue] = next;
+                UpdateVenue(source);
                 changed(false);
             };
-            UpdateVenue(venue);
+            UpdateVenue(source);
         }
         panel.Children.Add(logos);
         var legend = new WrapPanel();
@@ -223,10 +235,10 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         }
     }
 
-    private void UpdateVenue(Venue venue)
+    private void UpdateVenue(MarketSource venue)
     {
         var (button, state) = venues[venue];
-        var rule = settings.Rules.GetValueOrDefault(venue);
+        var rule = settings.Rule(venue);
         var (mark, caption, border, background) = rule switch
         {
             ListingRule.Require => ("✓", "требуется листинг", "Required", "RequiredSurface"),
@@ -236,7 +248,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         state.Text = mark;
         state.Foreground = button.BorderBrush = Terminal.Brush(border);
         button.Background = Terminal.Brush(background);
-        string label = $"{venue.Label()} · {caption}";
+        string label = $"{venue.Label} · {caption}";
         AutomationProperties.SetName(button, label);
         button.ToolTip = catalogs.TryGetValue(venue, out var catalog) && catalog.Error != null
             ? $"{label}\nКаталог недоступен · {catalog.Error}" : label;
