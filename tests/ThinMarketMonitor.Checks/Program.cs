@@ -204,6 +204,14 @@ Require(liveCandles.Snapshot().SequenceEqual([new Candle(120_000, 10, 19, 8, 18)
     "the next stream interval opens without disturbing the closed candle");
 Require(CandlePlot.PanEnd(300_000, -.5, 10, 60000) == 600_000 &&
     CandlePlot.PanEnd(600_000, -.5, 10, 60000) == 900_000, "chart pans repeatedly beyond the latest bar");
+foreach (int count in new[] { 8, CandlePlot.DefaultVisibleBars, CandlePlot.MaxVisibleBars })
+{
+    const long frameMs = 86_400_000;
+    double end = CandlePlot.FollowEnd(1_700_000_000_000, count, frameMs);
+    double lastCenter = 1_700_000_000_000 + .5 * frameMs;
+    Require(Math.Abs((end - lastCenter) / ((double)count * frameMs) - .2) < 1e-9,
+        "follow mode keeps the latest candle at 80 percent for every zoom");
+}
 var bars = new[] { new Candle(0, 10, 10, 10, 10, 5), new Candle(60000, 11, 13, 9, 12, 20) };
 Require(OverviewMetrics.Calculate(ake, bars, 60, 120000, new(MetricKind.Turnover, 1)) == 20 &&
     Math.Abs(OverviewMetrics.Calculate(ake, bars, 60, 120000, new(MetricKind.Atr, 1))!.Value - 100d / 3) < 0.00001 &&

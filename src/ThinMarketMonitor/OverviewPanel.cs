@@ -49,7 +49,10 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
     private readonly Button source = new() { MinHeight = 32, Margin = new Thickness(8, 7, 8, 7),
         HorizontalContentAlignment = HorizontalAlignment.Stretch };
     private readonly Popup sourceMenu = new() { Placement = PlacementMode.Bottom, StaysOpen = false, AllowsTransparency = true };
-    private readonly Dictionary<MarketSource, (Button Source, Button Rule)> sourceOptions = new();
+    private readonly Dictionary<MarketSource, (Button Row, TextBlock Mark)> sourceOptions = new();
+    private readonly Button sourceMode = new() { MinHeight = 25, Margin = new Thickness(0, 4, 5, 4) };
+    private readonly TextBlock sourceLegend = Terminal.Copy("");
+    private bool choosingSource;
     private readonly DataGrid table = new()
     {
         IsReadOnly = true, AutoGenerateColumns = false, HeadersVisibility = DataGridHeadersVisibility.Column,
@@ -116,47 +119,57 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         var choices = new StackPanel { Margin = new Thickness(4) };
         foreach (var market in MarketSource.All)
         {
-            var row = new DockPanel();
-            var filter = new Button
+            var label = new DockPanel();
+            var mark = new TextBlock
             {
-                Style = Terminal.Style("IconButton"), Width = 36, MinHeight = 26, FontFamily = new FontFamily("Segoe UI Symbol")
+                MinWidth = 16, Margin = new Thickness(7, 0, 3, 0), TextAlignment = TextAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Center, FontFamily = new FontFamily("Segoe UI Symbol")
             };
-            ToolTipService.SetShowOnDisabled(filter, true);
-            filter.Click += (_, _) =>
+            SetDock(mark, Dock.Right);
+            label.Children.Add(mark);
+            label.Children.Add(SourceLabel(market));
+            var row = new Button
             {
-                settings.CycleListingRule(market, overview: true);
+                Style = Terminal.Style("IconButton"), Content = label, MinHeight = 26,
+                Padding = new Thickness(6, 0, 4, 0), HorizontalContentAlignment = HorizontalAlignment.Stretch
+            };
+            row.Click += (_, _) =>
+            {
+                if (choosingSource)
+                {
+                    choosingSource = false;
+                    if (settings.OverviewSource == market) { UpdateSourceOptions(); return; }
+                    settings.OverviewSource = market;
+                    settings.OverviewChoice = null;
+                    loadedCatalog = false;
+                    UpdateSourceButton();
+                }
+                else
+                {
+                    if (settings.OverviewSource == market) return;
+                    settings.CycleListingRule(market, overview: true);
+                }
                 UpdateSourceOptions();
                 changed();
             };
-            SetDock(filter, Dock.Right);
-            row.Children.Add(filter);
-            var choose = new Button
-            {
-                Style = Terminal.Style("IconButton"), Content = SourceLabel(market), MinHeight = 26,
-                Padding = new Thickness(6, 0, 4, 0), HorizontalContentAlignment = HorizontalAlignment.Left
-            };
-            AutomationProperties.SetName(choose, $"Источник списка · {market.Label}");
-            choose.Click += (_, _) =>
-            {
-                sourceMenu.IsOpen = false;
-                source.Focus();
-                if (settings.OverviewSource == market) return;
-                settings.OverviewSource = market;
-                settings.OverviewChoice = null;
-                loadedCatalog = false;
-                UpdateSourceButton();
-                changed();
-            };
-            row.Children.Add(choose);
             choices.Children.Add(row);
-            sourceOptions.Add(market, (choose, filter));
+            sourceOptions.Add(market, (row, mark));
         }
         var layout = new DockPanel();
         var header = Terminal.Rule(new Thickness(0, 0, 0, 1));
-        var legend = Terminal.Copy("✓ Есть листинг    × Нет листинга    — Любой");
-        legend.Margin = new Thickness(9, 5, 9, 5);
-        legend.FontSize = 11;
-        header.Child = legend;
+        var tools = new DockPanel();
+        sourceLegend.Margin = new Thickness(9, 4, 6, 4);
+        sourceLegend.FontSize = 11;
+        sourceLegend.VerticalAlignment = VerticalAlignment.Center;
+        sourceMode.Click += (_, _) =>
+        {
+            choosingSource = !choosingSource;
+            UpdateSourceOptions();
+        };
+        SetDock(sourceMode, Dock.Right);
+        tools.Children.Add(sourceMode);
+        tools.Children.Add(sourceLegend);
+        header.Child = tools;
         SetDock(header, Dock.Top);
         layout.Children.Add(header);
         layout.Children.Add(new ScrollViewer { Content = choices, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
@@ -180,9 +193,10 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         sourceMenu.Child = surface;
         sourceMenu.PlacementTarget = source;
         sourceMenu.VerticalOffset = 3;
-        sourceMenu.Opened += (_, _) => sourceOptions[settings.OverviewSource].Source.Focus();
+        sourceMenu.Opened += (_, _) => sourceOptions[settings.OverviewSource].Row.Focus();
         source.Click += (_, _) =>
         {
+            choosingSource = false;
             UpdateSourceOptions();
             surface.Width = Math.Max(265, source.ActualWidth);
             sourceMenu.IsOpen = true;
@@ -192,25 +206,25 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
 
     private void UpdateSourceOptions()
     {
-        foreach (var (market, (choose, filter)) in sourceOptions)
+        sourceMode.Content = choosingSource ? "К условиям" : "Сменить источник";
+        sourceLegend.Text = choosingSource ? "Выберите биржу для таблицы" : "✓ Есть   × Нет   — Любой";
+        foreach (var (market, (row, mark)) in sourceOptions)
         {
             bool active = market == settings.OverviewSource;
-            choose.Background = active ? Terminal.Brush("AccentSurface") : Brushes.Transparent;
-            choose.Foreground = Terminal.Brush(active ? "Accent" : "Text");
-            AutomationProperties.SetItemStatus(choose, active ? "Выбран" : "");
-            var (text, caption, foreground, background) = active ? ("•", "Источник списка", "Accent", "AccentSurface") :
+            var (text, caption, foreground, background) = active ? ("•", "Источник списка", "Accent", "AccentSurface") : choosingSource
+                ? ("", "Выбрать источник списка", "Text", "Surface") :
                 settings.OverviewRule(market) switch
                 {
                     ListingRule.Require => ("✓", "Требовать листинг", "Accent", "AccentSurface"),
                     ListingRule.Exclude => ("×", "Исключать при листинге", "Excluded", "ExcludedSurface"),
                     _ => ("—", "Без условия", "Muted", "Surface")
                 };
-            filter.Content = text;
-            filter.IsEnabled = !active;
-            filter.Foreground = Terminal.Brush(foreground);
-            filter.Background = Terminal.Brush(background);
-            filter.ToolTip = active ? caption : $"{caption} · нажмите для смены";
-            AutomationProperties.SetName(filter, $"{market.Label} · {caption}");
+            mark.Text = text;
+            mark.Foreground = row.Foreground = Terminal.Brush(foreground);
+            row.Background = Terminal.Brush(background);
+            row.ToolTip = active || choosingSource ? caption : $"{caption} · нажмите для смены";
+            AutomationProperties.SetName(row, market.Label);
+            AutomationProperties.SetItemStatus(row, caption);
         }
     }
 

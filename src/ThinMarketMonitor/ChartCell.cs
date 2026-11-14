@@ -297,19 +297,30 @@ internal sealed class ChartCell : Border
                     if (native && olderRequested && !finished && historyLoaded)
                     {
                         olderRequested = false;
-                        bool found = await Page(nextPage, 180, prepend: true);
-                        if (found) emptyPages = 0;
+                        int remaining = plot.MissingHistoryBars(nextPage);
+                        bool found = await Page(nextPage, Math.Clamp(remaining, 180, tf < 60 ? 180 : 480), prepend: true);
+                        if (found)
+                        {
+                            emptyPages = 0;
+                            olderRequested |= plot.MissingHistoryBars(nextPage) > 0;
+                        }
                         else if (++emptyPages >= 3)
                         {
                             finished = true;
                             coverage = "Конец доступной истории · три участка без свечей";
                         }
-                        else coverage = "На предыдущем участке свечей нет · повторите движение влево";
+                        else
+                        {
+                            coverage = "На предыдущем участке свечей нет";
+                            olderRequested |= plot.MissingHistoryBars(nextPage) > 0;
+                        }
                     }
                     if (native && Environment.TickCount64 >= nextTick)
                     {
                         nextTick = Environment.TickCount64 + (tf < 60 ? 4000 : 12000);
-                        await Page(Boundary(tf), historyLoaded ? 4 : tf < 60 ? 100 : 180, prepend: false);
+                        bool initial = !historyLoaded;
+                        bool found = await Page(Boundary(tf), initial ? CandlePlot.InitialHistoryBars(tf) : 4, prepend: false);
+                        if (initial && found && tf < 60) olderRequested |= plot.MissingHistoryBars(nextPage) > 0;
                     }
                     if (native && candles.Count >= LiveCandles.MaxBars) { finished = true; coverage = "Достигнут локальный предел 12 000 свечей"; }
                     detail.Text = $"{Frames.Label(tf)} · " + (coverage.Length > 0 ? coverage :
@@ -389,6 +400,9 @@ internal sealed class ChartCell : Border
 internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
 {
     private const double Left = 7, Top = 7;
+    internal const int DefaultVisibleBars = 220;
+    internal const int MaxVisibleBars = 6000;
+    private const double LatestFraction = .8;
     public int Frame { get; set; } = 60;
     private long BarTime => Frame * 1000L;
     public event Action? OlderRequested;
@@ -407,7 +421,7 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
         FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
     private static readonly CultureInfo Russian = CultureInfo.GetCultureInfo("ru-RU");
     private Candle[] candles = [];
-    private double visible = 55;
+    private double visible = DefaultVisibleBars;
     private double? manualEnd;
     private (double Low, double High)? fixedPrice;
     private Drag? drag;
@@ -436,7 +450,7 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
     public void Reset()
     {
         CancelGesture();
-        visible = 55;
+        visible = DefaultVisibleBars;
         manualEnd = null;
         fixedPrice = null;
         InvalidateVisual();
@@ -444,6 +458,18 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
 
     internal static double PanEnd(double end, double dragFraction, double count, long barTime) =>
         end - dragFraction * count * barTime;
+
+    internal static int InitialHistoryBars(int frame) => frame < 60 ? 100 : DefaultVisibleBars;
+
+    internal static double FollowEnd(long latest, double count, long barTime) =>
+        latest + (.5 + (1 - LatestFraction) * count) * barTime;
+
+    public int MissingHistoryBars(long oldestRequested)
+    {
+        if (candles.Length == 0) return 0;
+        double start = (manualEnd ?? LiveEnd(visible)) - visible * BarTime;
+        return (int)Math.Clamp(Math.Ceiling((oldestRequested - start) / BarTime), 0, MaxVisibleBars);
+    }
 
     private View? CurrentView()
     {
@@ -475,7 +501,9 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
         if (CurrentView() is not { } view) return;
         var plot = view.Plot;
         double step = plot.Width * BarTime / (view.End - view.Start);
-        double body = Math.Max(1, step * 0.67);
+        double body = Math.Max(.12, step * .67);
+        Pen risingWick = step < 1 ? new Pen(up, body) : upLine;
+        Pen fallingWick = step < 1 ? new Pen(down, body) : downLine;
         int rows = ActualHeight < 105 ? 3 : 5;
         int columns = ActualWidth > 325 ? 4 : ActualWidth > 190 ? 3 : 2;
         double lastPrice = candles[^1].Close;
@@ -492,13 +520,15 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
             if (priceLabel == null || y + 7 < labelTop || y - 6 > labelBottom)
                 DrawText(dc, FormatPrice(view.High - view.Span * fraction, view.Span / (rows - 1)), plot.Right + 5, y - 6);
         }
+        string timeFormat = Frame >= 3600 || view.End - view.Start >= 86_400_000 ? "dd.MM HH:mm" :
+            Frame < 60 ? "HH:mm:ss" : "HH:mm";
         for (int i = 0; i < columns; i++)
         {
             double fraction = (double)i / (columns - 1);
             double x = plot.Left + plot.Width * fraction;
             dc.DrawLine(gridLine, new Point(x, plot.Top), new Point(x, plot.Bottom));
             long time = (long)(view.Start + fraction * (view.End - view.Start));
-            DrawText(dc, DateTimeOffset.FromUnixTimeMilliseconds(time).ToLocalTime().ToString(Frame < 60 ? "HH:mm:ss" : Frame >= 3600 ? "dd.MM HH:mm" : "HH:mm"),
+            DrawText(dc, DateTimeOffset.FromUnixTimeMilliseconds(time).ToLocalTime().ToString(timeFormat),
                 x, ActualHeight - 15, i == 0 ? 0 : i == columns - 1 ? 1 : 0.5);
         }
 
@@ -508,7 +538,7 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
             if (c.Time + BarTime <= view.Start || c.Time >= view.End) continue;
             double x = plot.Left + ((c.Time - view.Start) / (double)BarTime + 0.5) * step;
             bool rising = c.Close >= c.Open;
-            dc.DrawLine(rising ? upLine : downLine, new Point(x, view.Y(c.High)), new Point(x, view.Y(c.Low)));
+            dc.DrawLine(rising ? risingWick : fallingWick, new Point(x, view.Y(c.High)), new Point(x, view.Y(c.Low)));
             dc.DrawRectangle(rising ? up : down, null,
                 new Rect(x - body / 2, Math.Min(view.Y(c.Open), view.Y(c.Close)), body, Math.Max(1, Math.Abs(view.Y(c.Close) - view.Y(c.Open)))));
         }
@@ -553,7 +583,7 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
         if (drag != null || CurrentView() is not { } view) return;
         double fraction = Math.Clamp((e.GetPosition(this).X - Left) / view.Plot.Width, 0, 1);
         double count = ClampCount(visible * Math.Pow(e.Delta > 0 ? .78 : 1.28, Math.Abs(e.Delta) / 120d));
-        if (manualEnd.HasValue || fraction < .87)
+        if (manualEnd.HasValue)
             manualEnd = ClampEnd(view.End + (count - visible) * (1 - fraction) * BarTime, count);
         visible = count;
         RequestOlder(e.Delta < 0);
@@ -629,7 +659,8 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
             case Operation.Time:
                 visible = ClampCount(move.Visible * Math.Exp(Math.Clamp(dx * 2.3, -5, 5)));
                 double anchor = Math.Clamp((move.Start.X - view.Plot.Left) / view.Plot.Width, 0, 1);
-                manualEnd = ClampEnd(view.End + (visible - move.Visible) * (1 - anchor) * BarTime, visible);
+                if (manualEnd.HasValue)
+                    manualEnd = ClampEnd(view.End + (visible - move.Visible) * (1 - anchor) * BarTime, visible);
                 RequestOlder(dx > 0);
                 break;
             case Operation.Price:
@@ -668,15 +699,10 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
             fixedPrice = (low, low + span);
     }
 
-    private double ClampCount(double count)
-    {
-        double max = Math.Clamp(HistoryBars, 8, 1600);
-        return Math.Clamp(count, Math.Min(8, max), max);
-    }
-    private double LiveEnd(double count) => candles[^1].Time + (1 + Math.Max(2, count * .08)) * BarTime;
+    private static double ClampCount(double count) => Math.Clamp(count, 8, MaxVisibleBars);
+    private double LiveEnd(double count) => FollowEnd(candles[^1].Time, count, BarTime);
     private double ClampEnd(double value, double count) => Math.Clamp(value,
         Math.Min(LiveEnd(count), candles[0].Time + count * BarTime), DateTimeOffset.MaxValue.AddDays(-2).ToUnixTimeMilliseconds());
-    private double HistoryBars => candles.Length == 0 ? 0 : (candles[^1].Time - candles[0].Time) / (double)BarTime + 1;
     private void RequestOlder(bool backwards)
     {
         if (backwards && (manualEnd ?? LiveEnd(visible)) - visible * BarTime <= candles[0].Time + 6 * BarTime)
