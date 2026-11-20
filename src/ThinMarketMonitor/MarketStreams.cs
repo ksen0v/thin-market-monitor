@@ -20,26 +20,93 @@ internal sealed class MarketStreams : IDisposable
     private readonly ConcurrentDictionary<string, long> sizedTrades = new();
     private readonly ConcurrentDictionary<int, FeedStatus> feeds = new();
     private readonly ConcurrentQueue<Signal> signals = new();
-    private readonly Dictionary<string, SpikeDetector> detectors;
-    private readonly Dictionary<string, VolumeImpulse> volumes;
+    private readonly ConcurrentDictionary<string, SpikeDetector> detectors = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, VolumeImpulse> volumes = new(StringComparer.Ordinal);
+    private readonly ExchangeApi api;
+    private readonly Threshold[] priceRules, growthRules;
+    private readonly int referenceSeconds;
+    private readonly bool startFeeds;
+    private readonly ConcurrentDictionary<int, Subscription> subscriptions = new();
+    private readonly ConcurrentDictionary<int, Task> workers = new();
+    private readonly ConcurrentDictionary<string, OwnedVolume> volumeOwners = new(StringComparer.Ordinal);
+    private IReadOnlyDictionary<string, Market> activeMarkets = new Dictionary<string, Market>();
+    private int nextId;
     private HashSet<string>? eligible;
     private int pendingSignals;
-    private readonly Task completion;
+    private readonly Task evaluation;
+    private sealed record OwnedVolume(int SubscriptionId, VolumeImpulse Detector);
+
+    private VolumeImpulse? Owned(string key, int subscriptionId) =>
+        volumeOwners.TryGetValue(key, out var owner) && owner.SubscriptionId == subscriptionId ? owner.Detector : null;
+
+    private sealed class Subscription(Market[] markets)
+    {
+        public Market[] Markets { get; } = markets;
+        public CancellationTokenSource Stop { get; } = new();
+        public void Cancel() { try { Stop.Cancel(); } catch (ObjectDisposedException) { } }
+    }
 
     public MarketStreams(ExchangeApi api, IReadOnlyList<Market> markets, Threshold[] thresholds, MarketStreams? previous = null)
         : this(api, markets, thresholds, [], null, previous) { }
 
-    public MarketStreams(ExchangeApi api, IReadOnlyList<Market> markets, Threshold[] thresholds, VolumeRule[] volumeRules,
-        IEnumerable<Market>? eligibleMarkets, MarketStreams? previous = null)
+    public MarketStreams(ExchangeApi api, IReadOnlyList<Market> markets, Threshold[] thresholds, Threshold[] volumeRules,
+        IEnumerable<Market>? eligibleMarkets, MarketStreams? previous = null, int referenceSeconds = 3600, bool startFeeds = true)
     {
+        this.api = api;
+        priceRules = thresholds;
+        growthRules = volumeRules;
+        this.referenceSeconds = referenceSeconds;
+        this.startFeeds = startFeeds;
         SetEligible(eligibleMarkets);
-        detectors = markets.ToDictionary(m => m.Key,
-            m => previous?.detectors.GetValueOrDefault(m.Key) ?? new SpikeDetector(thresholds));
-        volumes = volumeRules.Length == 0 ? new() : markets.Where(UsdQuotes.Supported)
-            .ToDictionary(m => m.Key, _ => new VolumeImpulse(volumeRules));
-        int nextId = 0;
-        var tasks = new List<Task>();
-        foreach (var venue in markets.Where(m => m.Streaming).GroupBy(m => (m.Source, m.Contract?.Product)))
+        if (previous != null)
+            foreach (var market in markets)
+                if (previous.detectors.TryGetValue(market.Key, out var detector)) detectors[market.Key] = detector;
+        UpdateMarkets(markets);
+        evaluation = volumeRules.Length == 0 || !startFeeds ? Task.CompletedTask : Task.Run(() => EvaluateVolumes(stop.Token));
+    }
+
+    // Keep healthy subscriptions and their hour-long volume coverage when catalogs/eligibility change.
+    public void UpdateMarkets(IReadOnlyList<Market> markets)
+    {
+        if (stop.IsCancellationRequested) return;
+        var previous = Volatile.Read(ref activeMarkets);
+        var next = markets.ToDictionary(m => m.Key, StringComparer.Ordinal);
+        var added = markets.Where(m => !previous.TryGetValue(m.Key, out var old) || old != m).ToArray();
+        foreach (var market in added)
+        {
+            detectors.TryAdd(market.Key, new SpikeDetector(priceRules));
+            if (growthRules.Length > 0 && market.Streaming && UsdQuotes.Supported(market))
+                volumes[market.Key] = new VolumeImpulse(growthRules, referenceSeconds);
+            else if (volumes.TryRemove(market.Key, out var previousVolume)) previousVolume.ResetCoverage(null);
+        }
+        Volatile.Write(ref activeMarkets, next);
+        foreach (string key in previous.Keys.Where(key => !next.ContainsKey(key)))
+        {
+            if (volumes.TryRemove(key, out var volume)) volume.ResetCoverage(null);
+            volumeOwners.TryRemove(key, out _);
+            detectors.TryRemove(key, out _);
+            lastTrades.TryRemove(key, out _);
+            sizedTrades.TryRemove(key, out _);
+        }
+        foreach (var (id, subscription) in subscriptions)
+        {
+            if (!subscription.Markets.Any(m => next.ContainsKey(m.Key)))
+            {
+                subscriptions.TryRemove(id, out _);
+                feeds.TryRemove(id, out _);
+                subscription.Cancel();
+            }
+            else
+                foreach (var market in added.Where(m => subscription.Markets.Any(existing => existing.Key == m.Key)))
+                    if (volumes.TryGetValue(market.Key, out var volume))
+                    {
+                        volumeOwners[market.Key] = new(id, volume);
+                        if (feeds.TryGetValue(id, out var status) && status.Connected)
+                            volume.ResetCoverage(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                    }
+        }
+        var subscribed = subscriptions.Values.SelectMany(g => g.Markets).Select(m => m.Key).ToHashSet(StringComparer.Ordinal);
+        foreach (var venue in markets.Where(m => m.Streaming && !subscribed.Contains(m.Key)).GroupBy(m => (m.Source, m.Contract?.Product)))
         {
             int index = 0;
             foreach (var group in venue.Chunk(venue.Key.Source.Venue is Venue.Mexc or Venue.KuCoin && venue.Key.Product != null ? 30 :
@@ -47,21 +114,81 @@ internal sealed class MarketStreams : IDisposable
             {
                 int id = nextId++;
                 int delay = index++ * 550;
+                var subscription = new Subscription(group);
+                subscriptions[id] = subscription;
+                foreach (var market in group)
+                    if (volumes.TryGetValue(market.Key, out var volume)) volumeOwners[market.Key] = new(id, volume);
                 feeds[id] = new(venue.Key.Source, group.Length, false, "подключение");
-                tasks.Add(Task.Run(() => Run(api, group, id, delay, stop.Token)));
+                if (!startFeeds) continue;
+                var worker = Task.Run(async () =>
+                {
+                    using var connection = CancellationTokenSource.CreateLinkedTokenSource(stop.Token, subscription.Stop.Token);
+                    try { await Run(api, group, id, delay, connection.Token); }
+                    finally
+                    {
+                        subscriptions.TryRemove(id, out _);
+                        feeds.TryRemove(id, out _);
+                        subscription.Stop.Dispose();
+                    }
+                });
+                workers[id] = worker;
+                _ = worker.ContinueWith(_ => workers.TryRemove(id, out var ignored), TaskScheduler.Default);
             }
         }
-        completion = Task.WhenAll(tasks);
     }
 
-    public FeedStatus[] Status() => feeds.Values.OrderBy(x => x.Venue).ToArray();
+    public FeedStatus[] Status()
+    {
+        var active = Volatile.Read(ref activeMarkets);
+        return feeds.Select(pair => pair.Value with { Count = subscriptions.TryGetValue(pair.Key, out var group)
+            ? group.Markets.Count(m => active.ContainsKey(m.Key)) : 0 }).Where(s => s.Count > 0).OrderBy(x => x.Venue).ToArray();
+    }
     public int FreshCount(long now) => lastTrades.Values.Count(x => x >= now - 15_000 && x <= now + 3000);
     internal bool HasFreshTrade(Market market, long now) => lastTrades.TryGetValue(market.Key, out long time)
         && time >= now - 15_000 && time <= now + 3000;
     internal bool HasSizedTrade(Market market, long now) => sizedTrades.TryGetValue(market.Key, out long time)
         && time >= now - 15_000 && time <= now + 3000;
     public int VolumeReadyCount(IEnumerable<Market> markets, long now) =>
-        markets.Count(m => volumes.TryGetValue(m.Key, out var detector) && detector.HasCoverage(now));
+        VolumeCoverage(markets, now).Ready;
+    public (int Ready, int Waiting, int Zero, int Unsupported) VolumeCoverage(IEnumerable<Market> markets, long now)
+    {
+        int ready = 0, waiting = 0, zero = 0, unsupported = 0;
+        foreach (var market in markets)
+        {
+            if (!volumes.TryGetValue(market.Key, out var detector)) { unsupported++; continue; }
+            switch (detector.Readiness(now))
+            {
+                case VolumePhase.Ready: ready++; break;
+                case VolumePhase.ZeroBaseline: zero++; break;
+                default: waiting++; break;
+            }
+        }
+        return (ready, waiting, zero, unsupported);
+    }
+
+    private async Task EvaluateVolumes(CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+        long previous = Environment.TickCount64;
+        long previousUtc = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        try
+        {
+            while (await timer.WaitForNextTickAsync(ct))
+            {
+                long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                long elapsed = Environment.TickCount64 - previous;
+                if (elapsed > 5000 || Math.Abs(now - previousUtc - elapsed) > 3000)
+                    foreach (var volume in volumes.Values) volume.ProcessingGap(now);
+                previous = Environment.TickCount64;
+                previousUtc = now;
+                var allowed = Volatile.Read(ref eligible);
+                foreach (var market in Volatile.Read(ref activeMarkets).Values)
+                    if (volumes.TryGetValue(market.Key, out var detector))
+                        Publish(detector.Evaluate(market, now, allowed?.Contains(market.Key) != false));
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+    }
     public bool TryRead(out Signal? signal)
     {
         if (!signals.TryDequeue(out signal)) return false;
@@ -82,14 +209,15 @@ internal sealed class MarketStreams : IDisposable
     public void Dispose()
     {
         stop.Cancel();
-        _ = completion.ContinueWith(_ => stop.Dispose(), TaskScheduler.Default);
+        foreach (var subscription in subscriptions.Values) subscription.Cancel();
+        if (!startFeeds) foreach (var subscription in subscriptions.Values) subscription.Stop.Dispose();
+        _ = Task.WhenAll(workers.Values.Append(evaluation)).ContinueWith(_ => stop.Dispose(), TaskScheduler.Default);
     }
 
     private async Task Run(ExchangeApi api, Market[] markets,
         int id, int delay, CancellationToken ct)
     {
-        var instruments = markets.ToDictionary(x => x.Symbol,
-            x => (Market: x, Detector: detectors[x.Key], Volume: volumes.GetValueOrDefault(x.Key)), StringComparer.OrdinalIgnoreCase);
+        var instruments = markets.ToDictionary(x => x.Symbol, StringComparer.OrdinalIgnoreCase);
         int backoff = 3;
         var source = markets[0].Source;
         try
@@ -105,22 +233,27 @@ internal sealed class MarketStreams : IDisposable
                         {
                             feeds[id] = new(source, markets.Length, true, "подписка подтверждена");
                             long since = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                            foreach (var instrument in instruments.Values) instrument.Volume?.ResetCoverage(since);
+                            foreach (var instrument in instruments.Values)
+                                Owned(instrument.Key, id)?.ResetCoverage(since);
                         }, trade =>
                         {
-                            if (ct.IsCancellationRequested || !instruments.TryGetValue(trade.Symbol, out var instrument)) return;
+                            if (ct.IsCancellationRequested || !instruments.TryGetValue(trade.Symbol, out var subscribed) ||
+                                !Volatile.Read(ref activeMarkets).TryGetValue(subscribed.Key, out var instrument) || !instrument.Streaming) return;
                             long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                             if (trade.Time >= now - 5000 && trade.Time <= now + 3000 && double.IsFinite(trade.Price) && trade.Price > 0)
                             {
-                                lastTrades.AddOrUpdate(instrument.Market.Key, trade.Time, (_, old) => Math.Max(old, trade.Time));
+                                lastTrades.AddOrUpdate(instrument.Key, trade.Time, (_, old) => Math.Max(old, trade.Time));
                                 if (trade.Size > 0 && double.IsFinite(trade.Size) && !string.IsNullOrEmpty(trade.Id))
-                                    sizedTrades.AddOrUpdate(instrument.Market.Key, trade.Time, (_, old) => Math.Max(old, trade.Time));
+                                    sizedTrades.AddOrUpdate(instrument.Key, trade.Time, (_, old) => Math.Max(old, trade.Time));
                             }
-                            bool canSignal = Volatile.Read(ref eligible)?.Contains(instrument.Market.Key) != false;
+                            bool canSignal = Volatile.Read(ref eligible)?.Contains(instrument.Key) != false;
                             Signal? signal;
-                            lock (instrument.Detector) signal = instrument.Detector.Observe(instrument.Market, trade, now, canSignal);
-                            Publish(signal);
-                            Publish(instrument.Volume?.Observe(instrument.Market, trade, now, canSignal));
+                            if (detectors.TryGetValue(instrument.Key, out var detector))
+                            {
+                                lock (detector) signal = detector.Observe(instrument, trade, now, canSignal);
+                                Publish(signal);
+                            }
+                            Owned(instrument.Key, id)?.Observe(instrument, trade, now);
                         });
                 }
                 catch (Exception ex) when (!ct.IsCancellationRequested)
@@ -136,7 +269,8 @@ internal sealed class MarketStreams : IDisposable
                 }
                 finally
                 {
-                    foreach (var instrument in instruments.Values) instrument.Volume?.ResetCoverage(null);
+                    foreach (var instrument in instruments.Values)
+                        Owned(instrument.Key, id)?.ResetCoverage(null);
                 }
                 if (DateTimeOffset.UtcNow - started > TimeSpan.FromMinutes(2)) backoff = 3;
                 await Task.Delay(backoff * 1000 + Random.Shared.Next(1200), ct);

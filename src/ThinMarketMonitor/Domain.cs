@@ -1,5 +1,6 @@
 using System.IO;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Windows.Input;
 
 namespace ThinMarketMonitor;
@@ -41,7 +42,8 @@ internal record Trade(string Symbol, long Time, double Price, double Size = 0, s
 internal record Threshold(int Seconds, bool Enabled, double Percent);
 internal record VolumeRule(int Seconds, bool Enabled, double Usd);
 internal enum SignalModule { Price, Volume }
-internal record Signal(Market Market, long Time, int Seconds, double Value, SignalModule Module = SignalModule.Price);
+internal record Signal(Market Market, long Time, int Seconds, double Value, SignalModule Module = SignalModule.Price,
+    double? CurrentTurnover = null, double? AverageTurnover = null, int? ReferenceSeconds = null);
 internal record ChartGesture(Key Key, MouseButton? Mouse = null)
 {
     public string Label => Mouse switch
@@ -69,8 +71,9 @@ internal sealed class Settings
     internal const int MaxModuleSeconds = 3600;
     internal const int MaxFilterSeconds = 86400;
     internal const int MaxRules = 24;
+    internal const int MaxVolumeReferenceSeconds = 3600;
     internal static readonly Threshold[] Defaults = [new(15, true, 4), new(60, true, 5), new(300, true, 12), new(900, true, 20)];
-    internal static readonly VolumeRule[] DefaultVolumes = [new(15, true, 100), new(60, true, 400), new(300, true, 2000), new(900, true, 6000)];
+    internal static readonly Threshold[] DefaultVolumeGrowth = [new(15, true, 100), new(60, true, 100), new(300, true, 100), new(900, true, 100)];
     public Dictionary<Venue, ListingRule> Rules { get; set; } = new() { [Venue.KuCoin] = ListingRule.Require };
     public Dictionary<Venue, ListingRule> FuturesRules { get; set; } = [];
     public ListingRule Rule(MarketSource source) => ListingRules(source.Segment).GetValueOrDefault(source.Venue);
@@ -89,7 +92,11 @@ internal sealed class Settings
     public int OverviewSort { get; set; } = -1;
     public bool OverviewDescending { get; set; }
     public Threshold[] Thresholds { get; set; } = Defaults.ToArray();
-    public VolumeRule[] VolumeThresholds { get; set; } = DefaultVolumes.ToArray();
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public VolumeRule[]? VolumeThresholds { get; set; }
+    public Threshold[] VolumeGrowthThresholds { get; set; } = DefaultVolumeGrowth.ToArray();
+    public int VolumeReferenceSeconds { get; set; } = 3600;
+    public bool VolumePercentMigrationPending { get; set; }
     public VolumeRule[] VolumeFilters { get; set; } = [];
     public SpreadRule SpreadFilter { get; set; } = new();
     public string[] SignalBlacklist { get; set; } = [];
@@ -162,10 +169,24 @@ internal sealed class Settings
             ? r with { Enabled = false } : r);
         settings.Thresholds = defaults.Select(r => price.FirstOrDefault(p => p.Seconds == r.Seconds) ?? r)
             .Concat(price).DistinctBy(r => r.Seconds).Take(MaxRules).OrderBy(r => r.Seconds).ToArray();
-        var volume = (settings.VolumeThresholds ?? []).Where(r => r is { Seconds: >= 1 and <= MaxModuleSeconds, Usd: > 0 and <= 1e12 });
-        var volumes = volume.ToArray();
-        settings.VolumeThresholds = DefaultVolumes.Select(r => volumes.FirstOrDefault(p => p.Seconds == r.Seconds) ?? r)
-            .Concat(volumes).DistinctBy(r => r.Seconds).Take(MaxRules).OrderBy(r => r.Seconds).ToArray();
+        using var document = JsonDocument.Parse(json);
+        bool percentSettings = document.RootElement.ValueKind == JsonValueKind.Object &&
+            document.RootElement.TryGetProperty(nameof(VolumeGrowthThresholds), out _);
+        if (!percentSettings && (settings.VolumeThresholds != null || settings.VolumeModule))
+        {
+            var legacy = (settings.VolumeThresholds ?? []).Where(r => r is { Seconds: >= 1 and <= MaxModuleSeconds })
+                .Select(r => new Threshold(r.Seconds, r.Enabled, 100)).ToArray();
+            settings.VolumeGrowthThresholds = legacy.Concat(DefaultVolumeGrowth)
+                .DistinctBy(r => r.Seconds).Take(MaxRules).OrderBy(r => r.Seconds).ToArray();
+            settings.VolumeModule = false;
+            settings.VolumePercentMigrationPending = true;
+        }
+        settings.VolumeThresholds = null;
+        var growth = (settings.VolumeGrowthThresholds ?? []).Where(r => r is { Seconds: >= 1 and <= MaxModuleSeconds, Percent: > 0 and <= 1e12 }).ToArray();
+        settings.VolumeGrowthThresholds = growth.Concat(DefaultVolumeGrowth)
+            .DistinctBy(r => r.Seconds).Take(MaxRules).OrderBy(r => r.Seconds).ToArray();
+        if (settings.VolumeReferenceSeconds is < 60 or > MaxVolumeReferenceSeconds || settings.VolumeReferenceSeconds % 60 != 0)
+            settings.VolumeReferenceSeconds = 3600;
         settings.VolumeFilters = (settings.VolumeFilters ?? []).Where(r => r is { Seconds: >= 60 and <= MaxFilterSeconds, Usd: > 0 and <= 1e12 }
             && r.Seconds % 60 == 0).Take(MaxRules).ToArray();
         settings.Cells = (settings.Cells ?? []).Take(9).Concat(new CellChoice?[9]).Take(9).ToArray();

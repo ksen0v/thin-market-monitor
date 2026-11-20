@@ -174,6 +174,7 @@ internal static class ColibriChecks
             window.Close();
             await SpreadChecks.Ui();
             await BlacklistChecks.Ui();
+            VolumeGrowthChecks.Ui();
             app.Shutdown();
         });
 

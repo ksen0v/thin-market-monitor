@@ -21,7 +21,15 @@ internal sealed partial class SettingsPanel
         var panel = new StackPanel();
         panel.Children.Add(Terminal.Heading("Модули"));
         var price = ModuleButton("Импульс цены", () => settings.PriceModule, enabled => settings.PriceModule = enabled);
-        var volume = ModuleButton("Импульс объёма", () => settings.VolumeModule, enabled => settings.VolumeModule = enabled);
+        var migration = Terminal.Copy("Импульс объёма переведён из долларов в проценты. Ваши периоды и переключатели сохранены, новые стартовые пороги — +100% (вдвое среднего). Модуль выключен: проверьте пороги и включите его самостоятельно.");
+        migration.Foreground = Terminal.Brush("Accent");
+        migration.Visibility = settings.VolumePercentMigrationPending ? Visibility.Visible : Visibility.Collapsed;
+        panel.Children.Add(migration);
+        var volume = ModuleButton("Импульс объёма", () => settings.VolumeModule, enabled =>
+        {
+            settings.VolumeModule = enabled;
+            if (enabled) { settings.VolumePercentMigrationPending = false; migration.Visibility = Visibility.Collapsed; }
+        });
         price.Margin = new Thickness(0, 7, 0, 5);
         panel.Children.Add(price);
         panel.Children.Add(volume);
@@ -66,7 +74,7 @@ internal sealed partial class SettingsPanel
     {
         var panel = new StackPanel();
         bool price = kind == RuleKind.Price, filter = kind == RuleKind.Filter;
-        string unit = price ? "%" : "USD";
+        string unit = filter ? "USD" : "%";
         panel.Children.Add(Terminal.Heading(kind switch
         {
             RuleKind.Price => "Импульс цены", RuleKind.Volume => "Импульс объёма", _ => "Фильтры списка"
@@ -74,10 +82,11 @@ internal sealed partial class SettingsPanel
         panel.Children.Add(Terminal.Copy(kind switch
         {
             RuleKind.Price => "Рост цены в скользящем окне.",
-            RuleKind.Volume => "Сумма сделок за скользящее окно. USD-стейблкоины считаются по ≈ $1.",
+            RuleKind.Volume => "Рост оборота исполненных сделок относительно среднего: +100% = вдвое среднего. Покупки и продажи суммируются.",
             _ => "Минимальный объём после фильтра листингов. Действуют все включённые условия. USD-стейблкоины ≈ $1."
         }));
         if (filter) panel.Children.Add(Terminal.Copy("24 ч — данные тикера. Остальные периоды — завершённые минутные свечи."));
+        if (kind == RuleKind.Volume) panel.Children.Add(VolumeBaselineOptions());
         var rows = new StackPanel { Margin = new Thickness(0, 12, 0, 6) };
         panel.Children.Add(rows);
         var composer = new WrapPanel { Margin = new Thickness(0, 4, 0, 0) };
@@ -111,7 +120,7 @@ internal sealed partial class SettingsPanel
         }
         var amount = new TextBox
         {
-            Width = 89, Text = filter ? "300" : price ? "8" : "800",
+            Width = 89, Text = filter ? "300" : price ? "8" : "100",
             Margin = new Thickness(0, 0, 5, 4), TextAlignment = TextAlignment.Right
         };
         AutomationProperties.SetName(amount, $"Новый порог, {unit}");
@@ -153,14 +162,14 @@ internal sealed partial class SettingsPanel
         VolumeRule[] GetRules() => kind switch
         {
             RuleKind.Price => settings.Thresholds.Select(r => new VolumeRule(r.Seconds, r.Enabled, r.Percent)).ToArray(),
-            RuleKind.Volume => settings.VolumeThresholds, _ => settings.VolumeFilters
+            RuleKind.Volume => settings.VolumeGrowthThresholds.Select(r => new VolumeRule(r.Seconds, r.Enabled, r.Percent)).ToArray(), _ => settings.VolumeFilters
         };
 
         void Update(VolumeRule[] values)
         {
             if (price) settings.Thresholds = values.Select(r => new Threshold(r.Seconds, r.Enabled, r.Usd)).ToArray();
             else if (filter) settings.VolumeFilters = values;
-            else settings.VolumeThresholds = values;
+            else settings.VolumeGrowthThresholds = values.Select(r => new Threshold(r.Seconds, r.Enabled, r.Usd)).ToArray();
             changed(!filter);
         }
 

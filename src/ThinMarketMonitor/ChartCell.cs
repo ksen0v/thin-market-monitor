@@ -165,7 +165,9 @@ internal sealed class ChartCell : Border
 
     private string? InstrumentTooltip() => latestSignal is not { } s ? market?.Label :
         $"{market?.Label}\n{(s.Module == SignalModule.Price ? "Импульс цены" : "Импульс объёма")} · " +
-        (s.Module == SignalModule.Price ? $"+{s.Value:F2}%" : $"{s.Value:N2} USD") + $" за {MainWindow.WindowName(s.Seconds)}";
+        (s.Module == SignalModule.Price ? $"+{s.Value:F2}%" : $"+{s.Value:N2}%") + $" за {MainWindow.WindowName(s.Seconds)}" +
+        (s.Module == SignalModule.Volume ? $"\nОборот сейчас: {s.CurrentTurnover:G6} USD · средний за такое же окно: {s.AverageTurnover:G6} USD" +
+            $"\nБаза: предыдущие {MainWindow.WindowName(s.ReferenceSeconds ?? 3600)} без текущего окна. {VolumeImpulse.SettlementSeconds} с на доставку сделок." : "");
 
     public void Resolve(Market? resolved)
     {
@@ -216,6 +218,9 @@ internal sealed class ChartCell : Border
         signalIcon.Content = latestSignal == null ? null : Terminal.Icon(latestSignal.Module == SignalModule.Price ? "activity" : "volume");
         signalIcon.Foreground = Terminal.Brush(latestSignal?.Module == SignalModule.Volume ? "Rising" : "Accent");
         signalIcon.ToolTip = latestSignal == null ? null : InstrumentTooltip();
+        if (latestSignal is { Module: SignalModule.Volume } volumeSignal)
+            label.Inlines.Add(new System.Windows.Documents.Run($"  +{volumeSignal.Value:N0}%")
+                { Foreground = Terminal.Brush("Rising"), FontWeight = FontWeights.SemiBold });
         UpdatePin();
         colibri.IsEnabled = market != null;
         detail.Text = market == null && Choice != null ? "Инструмент вне доступного списка" : "";

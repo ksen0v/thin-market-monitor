@@ -437,12 +437,18 @@ public partial class MainWindow : Window, IDisposable
         RefreshEligibility();
         if (candidatesChanged || thresholdsChanged)
         {
-            var previous = streams;
-            previous?.Dispose();
             var price = settings.PriceModule ? settings.Thresholds.Where(t => t.Enabled).ToArray() : [];
-            var volume = settings.VolumeModule ? settings.VolumeThresholds.Where(t => t.Enabled).ToArray() : [];
-            streams = candidates.Count > 0 && (price.Length > 0 || volume.Length > 0)
-                ? new MarketStreams(api, candidates, price, volume, markets, thresholdsChanged ? null : previous) : null;
+            var volume = settings.VolumeModule ? settings.VolumeGrowthThresholds.Where(t => t.Enabled).ToArray() : [];
+            if (streams != null && !thresholdsChanged && candidates.Count > 0)
+                streams.UpdateMarkets(candidates);
+            else
+            {
+                var previous = streams;
+                previous?.Dispose();
+                streams = candidates.Count > 0 && (price.Length > 0 || volume.Length > 0)
+                    ? new MarketStreams(api, candidates, price, volume, markets, thresholdsChanged ? null : previous,
+                        settings.VolumeReferenceSeconds) : null;
+            }
         }
         ShowCoverage();
     }
@@ -458,6 +464,7 @@ public partial class MainWindow : Window, IDisposable
         string status = missing.Length > 0
             ? $"Фильтр ожидает каталоги · {string.Join(", ", missing.Select(v => v.Label))}"
             : $"{CountLabel(next.Count)} после фильтра" +
+              (settings.VolumePercentMigrationPending ? " · объём теперь в %: проверьте настройки модуля" : "") +
               (settings.SignalBlacklist.Length > 0 ? $" · чёрный список: {settings.SignalBlacklist.Length:N0}" : "") +
               (filtered is { Pending: > 0 } pending ? $" · объём ожидается: {pending.Pending:N0}" : "") +
               (filtered is { Unsupported: > 0 } unsupported ? $" · без котировки USD: {unsupported.Unsupported:N0}" : "") +
@@ -519,7 +526,7 @@ public partial class MainWindow : Window, IDisposable
         {
             StreamLed.Fill = Terminal.Brush("Muted");
             bool enabled = settings.PriceModule && settings.Thresholds.Any(t => t.Enabled) ||
-                settings.VolumeModule && settings.VolumeThresholds.Any(t => t.Enabled);
+                settings.VolumeModule && settings.VolumeGrowthThresholds.Any(t => t.Enabled);
             StreamStatus.Text = enabled ? "Сигналы ожидают рынки" : "Сигналы выключены";
             StreamStatus.ToolTip = null;
             return;
@@ -529,14 +536,19 @@ public partial class MainWindow : Window, IDisposable
         int fresh = streams.FreshCount(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         StreamLed.Fill = Terminal.Brush(connected > 0 ? "Rising" : "Muted");
         StreamStatus.Text = $"Потоки подключены · {connected:N0} из {candidates.Count:N0}   |   Сделки за последние 15 с · {fresh:N0}";
-        if (settings.VolumeModule && settings.VolumeThresholds.Any(t => t.Enabled))
-            StreamStatus.Text += $"   |   Объём USD · {streams.VolumeReadyCount(markets, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()):N0}" +
-                $"/{markets.Count(UsdQuotes.Supported):N0} готово";
+        if (settings.VolumeModule && settings.VolumeGrowthThresholds.Any(t => t.Enabled))
+        {
+            var volume = streams.VolumeCoverage(markets, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            StreamStatus.Text += $"   |   Объём % · {volume.Ready:N0}/{markets.Count:N0} готово · история: {volume.Waiting:N0} · база 0: {volume.Zero:N0}" +
+                (volume.Unsupported > 0 ? $" · недоступно: {volume.Unsupported:N0}" : "");
+        }
         StreamStatus.ToolTip = string.Join("\n", status.GroupBy(s => s.Source).Select(g =>
             $"{g.Key.Label} · {g.Where(s => s.Connected).Sum(s => s.Count)}/{g.Sum(s => s.Count)}" +
             string.Concat(g.Where(s => !s.Connected).Select(s => s.Detail).Distinct().Select(s => $" · {s}")))) +
-            (settings.VolumeModule ? $"\nБез подтверждённого USD-оборота: {markets.Count(m => !UsdQuotes.Supported(m))}. " +
-                "Готовность по кратчайшему включённому окну. USD-стейблкоины ≈ $1." : "");
+            (settings.VolumeModule ? $"\nБез потока сделок или подтверждённого USD-оборота: {markets.Count(m => !m.Streaming || !UsdQuotes.Supported(m))}. " +
+                $"База: {WindowName(settings.VolumeReferenceSeconds)} перед текущим окном. Готовность по кратчайшему включённому окну. " +
+                "Нужна непрерывная история базы и окна; при нулевой базе процент не определён. " +
+                "Расчёт раз в секунду с задержкой 6 с. USD-стейблкоины ≈ $1." : "");
     }
 
     private void Place(Signal signal)

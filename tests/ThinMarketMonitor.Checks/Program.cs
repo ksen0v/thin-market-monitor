@@ -2,7 +2,10 @@ using System.Net.Http;
 using System.Text.Json;
 using ThinMarketMonitor;
 
+try
+{
 if (args is ["--spread"]) return await SpreadChecks.Live();
+if (args is ["--volume-live"]) return await VolumeGrowthChecks.Live();
 
 if (args is ["--segments"])
 {
@@ -42,7 +45,7 @@ if (args is ["--segments"])
         catch (Exception e) { Console.WriteLine($"{source} daily: {e.Message}"); }
         if (source.Segment == Segment.Futures && market.Streaming)
         {
-            using var probe = new MarketStreams(api, [market], Settings.Defaults, Settings.DefaultVolumes, [market]);
+            using var probe = new MarketStreams(api, [market], Settings.Defaults, Settings.DefaultVolumeGrowth, [market]);
             for (int i = 0; i < 30 && (!probe.HasSizedTrade(market, Now()) || !probe.Status()[0].Connected); i++)
                 await Task.Delay(500);
             bool ready = probe.HasSizedTrade(market, Now()) && probe.Status()[0].Connected;
@@ -78,7 +81,7 @@ if (args is ["--live"])
         Console.WriteLine($"{venue}: {catalog.Markets.Count} markets; probe {chosen.Label}");
     }
 
-    using var streams = new MarketStreams(api, probes, Settings.Defaults, Settings.DefaultVolumes, probes);
+    using var streams = new MarketStreams(api, probes, Settings.Defaults, Settings.DefaultVolumeGrowth, probes);
     var candleChecks = probes.Select(async market =>
     {
         try
@@ -296,20 +299,7 @@ Require(rolling.Sum(125, 15) == 23, "wrap clears expired buckets");
 rolling.Add(200, 11);
 Require(rolling.Sum(201, 15) == 11, "long gap clears buckets");
 
-var impulse = new VolumeImpulse([new(15, true, 100)]);
-impulse.ResetCoverage(start);
-Trade At(int seconds, double size, string id) => new(ku.Symbol, start + seconds * 1000L, 2, size, id);
-Signal? Observe(Trade trade, bool allowed = true) => impulse.Observe(ku, trade, trade.Time, allowed);
-Require(Observe(At(2, 30, "a")) == null && Observe(At(2, 30, "a")) == null, "volume waits for a complete window and deduplicates");
-Require(Observe(At(16, 1, "b")) == null, "duplicate turnover not counted");
-Require(Observe(At(17, 30, "c")) == null, "newest second not counted");
-Require(Observe(At(18, 30, "d")) == null, "one-second out-of-order buffer");
-Require(Observe(At(20, 1, "e")) is { Module: SignalModule.Volume, Value: 122 }, "absolute USD signal");
-Require(Observe(At(21, 100, "f")) == null, "volume spike latches");
-impulse.ResetCoverage(null);
-Require(Observe(At(40, 100, "g")) == null && !impulse.HasCoverage(start + 40_000), "disconnect invalidates windows");
-impulse.ResetCoverage(start + 40_000);
-Require(Observe(At(41, 100, "g"), allowed: false) == null, "excluded instruments cannot signal");
+VolumeGrowthChecks.Run();
 
 VolumeRule[] conditions = [new(300, true, 100), new(86400, true, 300), new(3600, false, 10000)];
 var unsupported = btc with { Quote = "EUR" };
@@ -379,6 +369,12 @@ await SpreadChecks.Run();
 await ColibriChecks.Run();
 Console.WriteLine("Listings, volume conditions, chart placement, migration, price and volume windows, eight trade adapters and update metadata passed.");
 return 0;
+}
+catch (Exception exception)
+{
+    Console.Error.WriteLine(exception);
+    return 1;
+}
 
 static void Require(bool value, string name)
 {
