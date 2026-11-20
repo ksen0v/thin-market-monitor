@@ -34,6 +34,7 @@ internal static class Terminal
                 "chevron" => "M7 10 L12 15 L17 10",
                 "drawer-open" => "M3 4 H21 V20 H3 Z M15 4 V20 M17 8 H19 M17 12 H19 M17 16 H19",
                 "drawer-closed" => "M3 4 H21 V20 H3 Z M15 4 V20 M7 12 H12 M10 10 L12 12 L10 14",
+                "external" => "M14 3 H21 V10 M21 3 L11 13 M10 5 H4 V21 H20 V15",
                 _ => throw new ArgumentOutOfRangeException(nameof(name))
             }),
             Width = 24, Height = 24, StrokeThickness = 2,
@@ -66,6 +67,11 @@ internal static class Terminal
     public static FrameworkElement VenueLogo(Venue venue, double size)
     {
         string asset = (venue == Venue.Alpha ? Venue.Binance : venue).ToString().ToLowerInvariant();
+        return AssetLogo(asset, size);
+    }
+
+    public static FrameworkElement AssetLogo(string asset, double size)
+    {
         return new Image
         {
             Source = new BitmapImage(new Uri($"pack://application:,,,/ThinMarketMonitor;component/Assets/{asset}.png")),

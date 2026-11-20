@@ -8,6 +8,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace ThinMarketMonitor;
 
@@ -69,7 +70,11 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
     private bool loadingSelection;
     private bool shown;
     private bool loadedCatalog;
+    private bool userSelecting;
+    private readonly CheckBox colibriSync = new() { Content = "Colibri", Margin = new Thickness(9, 0, 9, 7),
+        ToolTip = "Переключать выбранный стакан Colibri при выборе инструмента" };
     private OverviewColumn[] columns = [];
+    public event Action<Market>? UserSelected;
 
     public OverviewPanel(ExchangeApi api, Settings settings, Action changed, Action<Market> select)
     {
@@ -84,6 +89,14 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         BuildSourceMenu();
         SetDock(source, Dock.Top);
         Children.Add(source);
+        colibriSync.IsChecked = settings.ColibriOverviewSync;
+        colibriSync.Click += (_, _) =>
+        {
+            settings.ColibriOverviewSync = colibriSync.IsChecked == true;
+            changed();
+        };
+        SetDock(colibriSync, Dock.Top);
+        Children.Add(colibriSync);
         status.Margin = new Thickness(8, 4, 8, 5);
         status.FontSize = 11;
         status.Foreground = Terminal.Brush("Muted");
@@ -99,7 +112,16 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         table.ItemsSource = view;
         table.SelectionChanged += (_, _) =>
         {
-            if (!loadingSelection && table.SelectedItem is Row selected) select(selected.Market);
+            if (!loadingSelection && table.SelectedItem is Row selected)
+            {
+                select(selected.Market);
+                if (userSelecting) UserSelected?.Invoke(selected.Market);
+            }
+        };
+        table.PreviewMouseLeftButtonDown += (_, _) => MarkUserSelection();
+        table.PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key is Key.Up or Key.Down or Key.PageUp or Key.PageDown or Key.Home or Key.End) MarkUserSelection();
         };
         table.Sorting += (_, e) =>
         {
@@ -112,6 +134,19 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         };
         Children.Add(table);
         UpdateColumns();
+        UpdateIntegration();
+    }
+
+    private void MarkUserSelection()
+    {
+        userSelecting = true;
+        Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() => userSelecting = false));
+    }
+
+    public void UpdateIntegration()
+    {
+        colibriSync.Visibility = settings.ColibriEnabled ? Visibility.Visible : Visibility.Collapsed;
+        colibriSync.IsChecked = settings.ColibriOverviewSync;
     }
 
     private void BuildSourceMenu()

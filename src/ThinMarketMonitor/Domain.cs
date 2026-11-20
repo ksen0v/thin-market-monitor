@@ -93,6 +93,9 @@ internal sealed class Settings
     public VolumeRule[] VolumeFilters { get; set; } = [];
     public bool PriceModule { get; set; } = true;
     public bool VolumeModule { get; set; }
+    public bool ColibriEnabled { get; set; }
+    public bool ColibriOverviewSync { get; set; }
+    public string ColibriSlot { get; set; } = "";
     public ChartGesture Ruler { get; set; } = new(Key.None, MouseButton.Middle);
     public Key Fullscreen { get; set; } = Key.F;
     public int Grid { get; set; } = 2;
@@ -131,6 +134,7 @@ internal sealed class Settings
         settings.FuturesRules ??= [];
         settings.OverviewSpotRules ??= [];
         settings.OverviewFuturesRules ??= [];
+        settings.ColibriSlot = settings.ColibriSlot?.Trim() ?? "";
         settings.FrameButtons = (settings.FrameButtons ?? [15, 60, 300]).Where(Frames.All.Contains).Distinct().Order().ToArray();
         if (!MarketSource.All.Contains(settings.OverviewSource)) settings.OverviewSource = new(Venue.KuCoin);
         if (!Frames.All.Contains(settings.OverviewFrame)) settings.OverviewFrame = 60;

@@ -6,5 +6,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/ThinMarketMonitor/ThinMarketMonitor.csproj"/>
+    <None Include="../../src/ThinMarketMonitor/App.xaml" Link="AppStyles.xaml" CopyToOutputDirectory="PreserveNewest"/>
   </ItemGroup>
 </Project>

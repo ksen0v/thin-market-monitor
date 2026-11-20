@@ -372,6 +372,7 @@ foreach (string malformed in new[] { release.RootElement.GetRawText().Replace(Up
     catch (System.IO.IOException) { rejected = true; }
     Require(rejected, "installed update fails closed on missing or invalid Setup");
 }
+await ColibriChecks.Run();
 Console.WriteLine("Listings, volume conditions, chart placement, migration, price and volume windows, eight trade adapters and update metadata passed.");
 return 0;
 

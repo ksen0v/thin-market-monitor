@@ -17,6 +17,7 @@ public partial class MainWindow : Window, IDisposable
     private readonly ExchangeApi api;
     private readonly Settings settings;
     private readonly bool persistSettings;
+    private readonly ColibriBridge colibri;
     private readonly Dictionary<MarketSource, Catalog> catalogs = new();
     private readonly ChartCell[] cells = new ChartCell[9];
     private readonly ChartCell overviewChart;
@@ -45,12 +46,14 @@ public partial class MainWindow : Window, IDisposable
 
     public MainWindow() : this(startMonitoring: true) { }
 
-    internal MainWindow(bool startMonitoring, Settings? testSettings = null)
+    internal MainWindow(bool startMonitoring, Settings? testSettings = null, ColibriClient? colibriClient = null)
     {
         settings = testSettings ?? Settings.Load();
         persistSettings = testSettings == null;
         InitializeComponent();
         api = new(http);
+        colibri = new(settings, colibriClient);
+        colibri.StatusChanged += ShowIntegrationStatus;
         var mark = Terminal.Icon("candles");
         System.Windows.Documents.TextElement.SetForeground(mark, Terminal.Brush("Accent"));
         BrandMark.Child = mark;
@@ -65,6 +68,7 @@ public partial class MainWindow : Window, IDisposable
             cell.PreviewMouseDown += (_, _) => activeCell = cell;
             cell.GotKeyboardFocus += (_, _) => activeCell = cell;
             cell.FrameChanged += _ => Save();
+            cell.OpenInColibri += market => colibri.Open(market);
         }
         overviewChart = new ChartCell(api, 0, () =>
         {
@@ -80,18 +84,26 @@ public partial class MainWindow : Window, IDisposable
         overviewChart.FrameChanged += value => { settings.OverviewFrame = value; Save(); };
         overviewChart.PreviewMouseDown += (_, _) => activeCell = overviewChart;
         overviewChart.GotKeyboardFocus += (_, _) => activeCell = overviewChart;
-        overviewPanel = new OverviewPanel(api, settings, () => { RefreshOverview(); Save(); }, selected =>
+        overviewPanel = new OverviewPanel(api, settings, () =>
+        {
+            colibri.Configure();
+            colibri.CancelPending();
+            RefreshOverview();
+            Save();
+        }, selected =>
         {
             overviewChart.Assign(selected, pinned: false);
             activeCell = overviewChart;
             Save();
         });
+        overviewPanel.UserSelected += market => colibri.Open(market, automatic: true);
         OverviewDrawerHost.Content = overviewPanel;
         OverviewChartHost.Content = overviewChart;
         order = cells.Max(cell => cell.Order);
 
         RebuildGrid();
         RefreshOverview();
+        UpdateIntegration();
         if (startMonitoring) Loaded += async (_, _) =>
         {
             timer.Tick += Tick;
@@ -254,6 +266,7 @@ public partial class MainWindow : Window, IDisposable
 
     private void ChangeWorkspace(object sender, RoutedEventArgs e)
     {
+        colibri.CancelPending();
         settings.Overview = !settings.Overview;
         activeCell = settings.Overview ? overviewChart : null;
         RefreshOverview();
@@ -523,7 +536,7 @@ public partial class MainWindow : Window, IDisposable
 
     private void OpenSettings(object sender, RoutedEventArgs e)
     {
-        settingsPanel = new SettingsPanel(settings, new Updater(http), SettingsChanged, CloseDialog, Close, settings.Overview);
+        settingsPanel = new SettingsPanel(settings, new Updater(http), colibri, SettingsChanged, CloseDialog, Close, settings.Overview);
         settingsPanel.UpdateFilter(CatalogStatus.Text);
         ShowDialog(settingsPanel);
     }
@@ -536,6 +549,7 @@ public partial class MainWindow : Window, IDisposable
 
     private async void SettingsChanged(bool thresholdsChanged)
     {
+        UpdateIntegration();
         ApplyFilter(thresholdsChanged);
         RefreshOverview();
         foreach (var cell in cells) cell.UpdateFrames();
@@ -581,10 +595,27 @@ public partial class MainWindow : Window, IDisposable
         }
     }
 
+    private void UpdateIntegration()
+    {
+        colibri.Configure();
+        foreach (var cell in cells) cell.SetColibriEnabled(settings.ColibriEnabled);
+        overviewPanel.UpdateIntegration();
+        ShowIntegrationStatus();
+    }
+
+    private void ShowIntegrationStatus()
+    {
+        IntegrationStatusHost.Visibility = settings.ColibriEnabled && colibri.Status.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        IntegrationStatus.Text = "Colibri · " + colibri.Status;
+        IntegrationStatus.Foreground = Terminal.Brush(colibri.HasError ? "Falling" : "Muted");
+        IntegrationStatus.ToolTip = colibri.Status;
+    }
+
     public void Dispose()
     {
         if (stop.IsCancellationRequested) return;
         stop.Cancel();
+        colibri.Dispose();
         timer.Stop();
         settingsPanel?.Dispose();
         streams?.Dispose();

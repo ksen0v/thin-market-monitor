@@ -26,6 +26,10 @@
                     </StackPanel>
                 </DockPanel>
             </Border>
+            <Border x:Name="IntegrationStatusHost" DockPanel.Dock="Bottom" Visibility="Collapsed" Padding="10,4"
+                    Background="{StaticResource Surface}" BorderBrush="{StaticResource Outline}" BorderThickness="0,1,0,0">
+                <TextBlock x:Name="IntegrationStatus" TextTrimming="CharacterEllipsis" FontSize="11"/>
+            </Border>
             <Grid Margin="10,5,10,10">
                 <DockPanel x:Name="GridSpace">
                     <WrapPanel DockPanel.Dock="Top" MinHeight="34" Margin="0,0,0,5">

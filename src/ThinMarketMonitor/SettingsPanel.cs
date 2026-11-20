@@ -10,18 +10,20 @@ namespace ThinMarketMonitor;
 internal sealed partial class SettingsPanel : Border, IDisposable
 {
     private const int FiltersPage = 0, ModulesPage = 1, PricePage = 2, VolumePage = 3, ChartsPage = 4,
-        OverviewPage = 5, AboutPage = 6;
+        OverviewPage = 5, IntegrationsPage = 6, AboutPage = 7;
     private readonly CancellationTokenSource stop = new();
     private readonly Grid layout = new();
-    private readonly Button[] navigation = new Button[7];
-    private readonly Border[] indicators = new Border[7];
-    private readonly FrameworkElement[] pages = new FrameworkElement[7];
+    private readonly Button[] navigation = new Button[8];
+    private readonly Border[] indicators = new Border[8];
+    private readonly FrameworkElement[] pages = new FrameworkElement[8];
     private readonly TextBlock result = Terminal.Copy("");
     private readonly TextBlock updateStatus = Terminal.Copy($"v{Updater.Current}");
     private readonly Button check = new() { Content = "Проверить версию" };
     private readonly Button install = new() { Content = "Обновить и перезапустить", Visibility = Visibility.Collapsed };
     private readonly Settings settings;
     private readonly Updater updater;
+    private readonly ColibriBridge colibri;
+    private readonly TextBlock colibriStatus = Terminal.Copy("");
     private readonly Action<bool> changed;
     private readonly Action close;
     private readonly Action restart;
@@ -29,11 +31,12 @@ internal sealed partial class SettingsPanel : Border, IDisposable
     private bool checkedOnOpen;
     public bool Installing { get; private set; }
 
-    public SettingsPanel(Settings settings, Updater updater,
+    public SettingsPanel(Settings settings, Updater updater, ColibriBridge colibri,
         Action<bool> changed, Action close, Action restart, bool overview = false)
     {
         this.settings = settings;
         this.updater = updater;
+        this.colibri = colibri;
         this.changed = changed;
         this.close = close;
         this.restart = restart;
@@ -70,6 +73,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         AddNavigation(nav, VolumePage, "Импульс объёма", "volume");
         AddNavigation(nav, ChartsPage, "Графики", "candles");
         AddNavigation(nav, OverviewPage, "Обзор", "volume");
+        AddNavigation(nav, IntegrationsPage, "Интеграции", "external");
         AddNavigation(nav, AboutPage, "О программе", "info");
         var surface = new Border { Background = Terminal.Brush("Surface"), Padding = new Thickness(18, 16, 18, 16) };
         Grid.SetColumn(surface, 1);
@@ -82,6 +86,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         pages[VolumePage] = Rules(RuleKind.Volume);
         pages[ChartsPage] = Shortcuts();
         pages[OverviewPage] = OverviewOptions();
+        pages[IntegrationsPage] = Integrations();
         pages[AboutPage] = About();
         foreach (var page in pages) pageHost.Children.Add(page);
 
@@ -222,7 +227,11 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         close();
     }
 
-    public void Dispose() => stop.Cancel();
+    public void Dispose()
+    {
+        stop.Cancel();
+        colibri.StatusChanged -= ShowColibriStatus;
+    }
 }
 
 internal sealed class MarketPicker : Border

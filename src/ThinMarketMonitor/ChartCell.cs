@@ -25,6 +25,7 @@ internal sealed class ChartCell : Border
     private readonly Func<int[]> frameButtons;
     private readonly Button pin = Terminal.IconButton("pin-off", "Закрепить график");
     private readonly Button clear = Terminal.IconButton("close", "Очистить ячейку");
+    private readonly Button colibri = Terminal.IconButton("external", "Открыть в Colibri");
     private CancellationTokenSource? refresh;
     private Market? market;
     private bool active;
@@ -36,6 +37,7 @@ internal sealed class ChartCell : Border
     public int Frame => frame;
     public Market? Instrument => market;
     public event Action<int>? FrameChanged;
+    public event Action<Market>? OpenInColibri;
 
     public CellChoice? Choice
     {
@@ -86,6 +88,11 @@ internal sealed class ChartCell : Border
             select.Focus();
         };
         actions.Children.Add(select);
+        colibri.Visibility = Visibility.Collapsed;
+        colibri.Margin = new Thickness(2, 0, 0, 0);
+        colibri.Click += (_, _) => { if (market != null) OpenInColibri?.Invoke(market); };
+        colibri.Content = Terminal.AssetLogo("colibri", 17);
+        actions.Children.Add(colibri);
         pin.Margin = home.Margin = clear.Margin = new Thickness(2, 0, 0, 0);
         actions.Children.Add(pin);
         actions.Children.Add(home);
@@ -113,6 +120,12 @@ internal sealed class ChartCell : Border
         if (active == visible) return;
         active = visible;
         ResetFeed();
+    }
+
+    public void SetColibriEnabled(bool enabled)
+    {
+        colibri.Visibility = enabled ? Visibility.Visible : Visibility.Collapsed;
+        colibri.IsEnabled = market != null;
     }
 
     public void Assign(Market selected, bool pinned, Signal? signal = null)
@@ -192,6 +205,7 @@ internal sealed class ChartCell : Border
         signalIcon.Foreground = Terminal.Brush(latestSignal?.Module == SignalModule.Volume ? "Rising" : "Accent");
         signalIcon.ToolTip = latestSignal == null ? null : InstrumentTooltip();
         UpdatePin();
+        colibri.IsEnabled = market != null;
         detail.Text = market == null && Choice != null ? "Инструмент вне доступного списка" : "";
         detail.ToolTip = null;
         AutomationProperties.SetName(plot, market == null ? "" : $"Свечи {Frames.Label(frame)} · {market.Label}");
