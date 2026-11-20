@@ -10,12 +10,12 @@ namespace ThinMarketMonitor;
 internal sealed partial class SettingsPanel : Border, IDisposable
 {
     private const int FiltersPage = 0, ModulesPage = 1, PricePage = 2, VolumePage = 3, ChartsPage = 4,
-        OverviewPage = 5, IntegrationsPage = 6, AboutPage = 7;
+        OverviewPage = 5, IntegrationsPage = 6, AboutPage = 7, BlacklistPage = 8;
     private readonly CancellationTokenSource stop = new();
     private readonly Grid layout = new();
-    private readonly Button[] navigation = new Button[8];
-    private readonly Border[] indicators = new Border[8];
-    private readonly FrameworkElement[] pages = new FrameworkElement[8];
+    private readonly Button[] navigation = new Button[9];
+    private readonly Border[] indicators = new Border[9];
+    private readonly FrameworkElement[] pages = new FrameworkElement[9];
     private readonly TextBlock result = Terminal.Copy("");
     private readonly TextBlock updateStatus = Terminal.Copy($"v{Updater.Current}");
     private readonly Button check = new() { Content = "Проверить версию" };
@@ -68,6 +68,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         rail.Child = nav;
         body.Children.Add(rail);
         AddNavigation(nav, FiltersPage, "Фильтры", "filter");
+        AddNavigation(nav, BlacklistPage, "Чёрный список", "ban");
         AddNavigation(nav, ModulesPage, "Модули", "listings");
         AddNavigation(nav, PricePage, "Импульс цены", "activity");
         AddNavigation(nav, VolumePage, "Импульс объёма", "volume");
@@ -88,6 +89,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         pages[OverviewPage] = OverviewOptions();
         pages[IntegrationsPage] = Integrations();
         pages[AboutPage] = About();
+        pages[BlacklistPage] = BlacklistOptions();
         foreach (var page in pages) pageHost.Children.Add(page);
 
         var footer = Terminal.Rule(new Thickness(0, 1, 0, 0));

@@ -72,6 +72,7 @@ public partial class MainWindow : Window, IDisposable
             cell.GotKeyboardFocus += (_, _) => activeCell = cell;
             cell.FrameChanged += _ => Save();
             cell.OpenInColibri += market => colibri.Open(market);
+            cell.BlacklistRequested += BlacklistSignalCoin;
         }
         overviewChart = new ChartCell(api, 0, () =>
         {
@@ -399,12 +400,28 @@ public partial class MainWindow : Window, IDisposable
         }
     }
 
+    private void BlacklistSignalCoin(Market market)
+    {
+        if (!settings.BlockSignals(market)) return;
+        foreach (var cell in cells)
+        {
+            var instrument = cell.Instrument ?? catalogs.Values.SelectMany(c => c.Markets)
+                .FirstOrDefault(m => m.Key == cell.Choice?.Key);
+            if (instrument == null || !settings.SignalBlocked(instrument)) continue;
+            if (ReferenceEquals(fullscreenCell, cell)) ExitFullscreen();
+            cell.Clear();
+        }
+        ApplyFilter(false);
+        Save();
+    }
+
     private void ApplyFilter(bool thresholdsChanged)
     {
         var result = ListingFilter.Apply(catalogs, settings.Rule);
         missing = result.Missing.ToArray();
-        bool candidatesChanged = !candidates.SequenceEqual(result.Markets);
-        if (candidatesChanged) candidates = result.Markets;
+        var allowed = result.Markets.Where(m => !settings.SignalBlocked(m)).ToArray();
+        bool candidatesChanged = !candidates.SequenceEqual(allowed);
+        if (candidatesChanged) candidates = allowed;
         var nextRules = settings.VolumeFilters.Where(r => r.Enabled).ToArray();
         if (candidatesChanged || !filterRules.SequenceEqual(nextRules))
         {
@@ -441,6 +458,7 @@ public partial class MainWindow : Window, IDisposable
         string status = missing.Length > 0
             ? $"Фильтр ожидает каталоги · {string.Join(", ", missing.Select(v => v.Label))}"
             : $"{CountLabel(next.Count)} после фильтра" +
+              (settings.SignalBlacklist.Length > 0 ? $" · чёрный список: {settings.SignalBlacklist.Length:N0}" : "") +
               (filtered is { Pending: > 0 } pending ? $" · объём ожидается: {pending.Pending:N0}" : "") +
               (filtered is { Unsupported: > 0 } unsupported ? $" · без котировки USD: {unsupported.Unsupported:N0}" : "") +
               (spread is { Pending: > 0 } waiting ? $" · спред ожидается: {waiting.Pending:N0}" : "") +
@@ -524,6 +542,7 @@ public partial class MainWindow : Window, IDisposable
     private void Place(Signal signal)
     {
         var market = signal.Market;
+        if (settings.SignalBlocked(market)) return;
         var visible = cells.Take(settings.Grid * settings.Grid).ToArray();
         if (visible.FirstOrDefault(c => c.Choice?.Key == market.Key) is { } existing)
         {

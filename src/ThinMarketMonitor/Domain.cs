@@ -92,6 +92,16 @@ internal sealed class Settings
     public VolumeRule[] VolumeThresholds { get; set; } = DefaultVolumes.ToArray();
     public VolumeRule[] VolumeFilters { get; set; } = [];
     public SpreadRule SpreadFilter { get; set; } = new();
+    public string[] SignalBlacklist { get; set; } = [];
+    public bool SignalBlocked(Market market) => SignalBlacklist.Contains(CoinKey(market.Base), StringComparer.Ordinal);
+    internal static string CoinKey(string coin) => coin.Trim().ToUpperInvariant();
+    public bool BlockSignals(Market market)
+    {
+        string coin = CoinKey(market.Base);
+        if (coin.Length == 0 || SignalBlacklist.Contains(coin, StringComparer.Ordinal)) return false;
+        SignalBlacklist = SignalBlacklist.Append(coin).Order(StringComparer.Ordinal).ToArray();
+        return true;
+    }
     public bool PriceModule { get; set; } = true;
     public bool VolumeModule { get; set; }
     public bool ColibriEnabled { get; set; }
@@ -137,6 +147,8 @@ internal sealed class Settings
         settings.OverviewFuturesRules ??= [];
         settings.ColibriSlot = settings.ColibriSlot?.Trim() ?? "";
         if (settings.SpreadFilter is not { Valid: true }) settings.SpreadFilter = new();
+        settings.SignalBlacklist = (settings.SignalBlacklist ?? []).Where(c => !string.IsNullOrWhiteSpace(c))
+            .Select(CoinKey).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
         settings.FrameButtons = (settings.FrameButtons ?? [15, 60, 300]).Where(Frames.All.Contains).Distinct().Order().ToArray();
         if (!MarketSource.All.Contains(settings.OverviewSource)) settings.OverviewSource = new(Venue.KuCoin);
         if (!Frames.All.Contains(settings.OverviewFrame)) settings.OverviewFrame = 60;

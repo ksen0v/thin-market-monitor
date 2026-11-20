@@ -26,6 +26,7 @@ internal static class Terminal
                 "pin-off" => "M2 2 L22 22 M12 15 V22 M5 15 H15 M9 4 H16 V9 Q16 11 18 12",
                 "latest" => "M15 14 L20 9 L15 4 M20 9 H9 A4 4 0 0 0 5 13 V20",
                 "close" => "M6 6 L18 18 M18 6 L6 18",
+                "ban" => "M12 2 A10 10 0 1 0 12 22 A10 10 0 1 0 12 2 M5 5 L19 19",
                 "listings" => "M12 2 L22 7 L12 12 L2 7 Z M2 12 L12 17 L22 12 M2 17 L12 22 L22 17",
                 "activity" => "M2 12 H6 L9 4 L15 20 L18 12 H22",
                 "volume" => "M4 20 H21 M7 17 V11 M12 17 V5 M17 17 V8",

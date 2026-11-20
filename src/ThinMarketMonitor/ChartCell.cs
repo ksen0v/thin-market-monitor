@@ -25,6 +25,7 @@ internal sealed class ChartCell : Border
     private readonly Func<int[]> frameButtons;
     private readonly Button pin = Terminal.IconButton("pin-off", "Закрепить график");
     private readonly Button clear = Terminal.IconButton("close", "Очистить ячейку");
+    private readonly Button blacklist = Terminal.IconButton("ban", "В чёрный список сигналов");
     private readonly Button colibri = Terminal.IconButton("external", "Открыть в Colibri");
     private CancellationTokenSource? refresh;
     private Market? market;
@@ -38,6 +39,7 @@ internal sealed class ChartCell : Border
     public Market? Instrument => market;
     public event Action<int>? FrameChanged;
     public event Action<Market>? OpenInColibri;
+    public event Action<Market>? BlacklistRequested;
 
     public CellChoice? Choice
     {
@@ -80,10 +82,7 @@ internal sealed class ChartCell : Border
         pin.Click += (_, _) => { SetPinned(Choice?.Pinned != true); save(); };
         clear.Click += (_, _) =>
         {
-            Choice = null;
-            market = null;
-            latestSignal = null;
-            ResetFeed();
+            Clear();
             save();
             select.Focus();
         };
@@ -93,6 +92,10 @@ internal sealed class ChartCell : Border
         colibri.Click += (_, _) => { if (market != null) OpenInColibri?.Invoke(market); };
         colibri.Content = Terminal.AssetLogo("colibri", 17);
         actions.Children.Add(colibri);
+        blacklist.Visibility = number > 0 ? Visibility.Visible : Visibility.Collapsed;
+        blacklist.Margin = new Thickness(2, 0, 0, 0);
+        blacklist.Click += (_, _) => { if (market != null) BlacklistRequested?.Invoke(market); };
+        actions.Children.Add(blacklist);
         pin.Margin = home.Margin = clear.Margin = new Thickness(2, 0, 0, 0);
         actions.Children.Add(pin);
         actions.Children.Add(home);
@@ -142,6 +145,15 @@ internal sealed class ChartCell : Border
             tint.BeginAnimation(SolidColorBrush.ColorProperty, new ColorAnimation(
                 ((SolidColorBrush)Terminal.Brush("Surface")).Color, TimeSpan.FromMilliseconds(650)));
         }
+    }
+
+    public void Clear()
+    {
+        market = null;
+        latestSignal = null;
+        autoAssigned = false;
+        Choice = null;
+        ResetFeed();
     }
 
     public void ShowSignal(Signal signal)
@@ -207,6 +219,10 @@ internal sealed class ChartCell : Border
         UpdatePin();
         colibri.IsEnabled = market != null;
         detail.Text = market == null && Choice != null ? "Инструмент вне доступного списка" : "";
+        blacklist.IsEnabled = market != null;
+        string blockLabel = market == null ? "В чёрный список сигналов" : $"В чёрный список сигналов · {market.Base}";
+        blacklist.ToolTip = blockLabel;
+        AutomationProperties.SetName(blacklist, blockLabel);
         detail.ToolTip = null;
         AutomationProperties.SetName(plot, market == null ? "" : $"Свечи {Frames.Label(frame)} · {market.Label}");
     }
