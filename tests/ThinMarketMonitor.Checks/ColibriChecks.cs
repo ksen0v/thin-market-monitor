@@ -172,6 +172,7 @@ internal static class ColibriChecks
             Ensure(open.Visibility == Visibility.Collapsed && sync.Visibility == Visibility.Collapsed,
                 "disabling integration updates signal and overview controls");
             window.Close();
+            await SpreadChecks.Ui();
             app.Shutdown();
         });
 

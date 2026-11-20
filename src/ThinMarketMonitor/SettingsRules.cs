@@ -147,6 +147,7 @@ internal sealed partial class SettingsPanel
         };
 
         RenderRows();
+        if (filter) panel.Children.Add(SpreadOptions());
         return panel;
 
         VolumeRule[] GetRules() => kind switch
@@ -346,18 +347,23 @@ internal sealed partial class SettingsPanel
     {
         var panel = new StackPanel();
         panel.Children.Add(Terminal.Heading("Колонки обзора"));
-        panel.Children.Add(Terminal.Copy("Тикер всегда виден. ATR% — средний истинный диапазон за период, делённый на последнюю цену закрытия."));
+        panel.Children.Add(Terminal.Copy("Тикер всегда виден. ATR% — средний истинный диапазон за период, делённый на последнюю цену закрытия. Спред% — текущая разница лучших ask и bid относительно их средней цены; период не нужен."));
         var list = new StackPanel { Margin = new Thickness(0, 10, 0, 8) };
         panel.Children.Add(list);
         var addBar = new WrapPanel();
-        var types = new ComboBox { ItemsSource = new[] { "Оборот USD", "Изменение %", "ATR %" }, SelectedIndex = 0,
+        var types = new ComboBox { ItemsSource = new[] { "Оборот USD", "Изменение %", "ATR %", "Спред %" }, SelectedIndex = 0,
             Width = 135, Margin = new Thickness(0, 0, 6, 4), VerticalAlignment = VerticalAlignment.Center };
         var minutes = new TextBox { Text = "1440", Width = 60, Margin = new Thickness(0, 0, 5, 4) };
         AutomationProperties.SetName(minutes, "Период колонки, минуты");
+        AutomationProperties.SetName(types, "Тип колонки обзора");
         var add = new Button { Content = "Добавить", MinHeight = 26, Margin = new Thickness(0, 0, 0, 4) };
+        AutomationProperties.SetName(add, "Добавить колонку обзора");
         addBar.Children.Add(types);
         addBar.Children.Add(minutes);
-        addBar.Children.Add(new TextBlock { Text = "мин", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 4) });
+        var periodUnit = new TextBlock { Text = "мин", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 4) };
+        addBar.Children.Add(periodUnit);
+        types.SelectionChanged += (_, _) => minutes.Visibility = periodUnit.Visibility =
+            types.SelectedIndex == (int)MetricKind.Spread ? Visibility.Collapsed : Visibility.Visible;
         addBar.Children.Add(add);
         panel.Children.Add(addBar);
         var status = Terminal.Copy("");
@@ -365,7 +371,9 @@ internal sealed partial class SettingsPanel
         panel.Children.Add(status);
         add.Click += (_, _) =>
         {
-            if (!int.TryParse(minutes.Text, out int value) || value is < 1 or > 1440)
+            bool spread = types.SelectedIndex == (int)MetricKind.Spread;
+            int value = 0;
+            if (!spread && (!int.TryParse(minutes.Text, out value) || value is < 1 or > 1440))
             { status.Text = "Введите период от 1 до 1440 минут."; return; }
             var metric = new OverviewColumn((MetricKind)types.SelectedIndex, value);
             if (settings.OverviewColumns.Length >= 5 || settings.OverviewColumns.Contains(metric))

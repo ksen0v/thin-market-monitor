@@ -12,7 +12,7 @@ namespace ThinMarketMonitor;
 
 public partial class MainWindow : Window, IDisposable
 {
-    private readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(16) };
+    private readonly HttpClient http;
     private readonly CancellationTokenSource stop = new();
     private readonly ExchangeApi api;
     private readonly Settings settings;
@@ -28,6 +28,7 @@ public partial class MainWindow : Window, IDisposable
     private MarketSource[] missing = [];
     private VolumeRule[] filterRules = [];
     private VolumeFilterMonitor? volumeFilter;
+    private SpreadFilterMonitor? spreadFilter;
     private HashSet<string> eligible = [];
     private MarketStreams? streams;
     private SettingsPanel? settingsPanel;
@@ -46,8 +47,10 @@ public partial class MainWindow : Window, IDisposable
 
     public MainWindow() : this(startMonitoring: true) { }
 
-    internal MainWindow(bool startMonitoring, Settings? testSettings = null, ColibriClient? colibriClient = null)
+    internal MainWindow(bool startMonitoring, Settings? testSettings = null, ColibriClient? colibriClient = null,
+        HttpClient? testHttp = null)
     {
+        http = testHttp ?? new() { Timeout = TimeSpan.FromSeconds(16) };
         settings = testSettings ?? Settings.Load();
         persistSettings = testSettings == null;
         InitializeComponent();
@@ -409,6 +412,11 @@ public partial class MainWindow : Window, IDisposable
             volumeFilter?.Dispose();
             volumeFilter = nextRules.Length > 0 && candidates.Count > 0 ? new(api, candidates, nextRules) : null;
         }
+        if (candidatesChanged || (spreadFilter != null) != (settings.SpreadFilter.Enabled && candidates.Count > 0))
+        {
+            spreadFilter?.Dispose();
+            spreadFilter = settings.SpreadFilter.Enabled && candidates.Count > 0 ? new(api, candidates) : null;
+        }
         RefreshEligibility();
         if (candidatesChanged || thresholdsChanged)
         {
@@ -424,16 +432,23 @@ public partial class MainWindow : Window, IDisposable
 
     private void RefreshEligibility()
     {
-        var filtered = volumeFilter?.Evaluate(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var filtered = volumeFilter?.Evaluate(now);
         IReadOnlyList<Market> next = filtered?.Markets ?? candidates;
+        var spread = spreadFilter?.Evaluate(next, settings.SpreadFilter, now);
+        if (spread is { } range) next = range.Markets;
         var errors = catalogs.Where(x => x.Value.Error != null).ToArray();
         string status = missing.Length > 0
             ? $"Фильтр ожидает каталоги · {string.Join(", ", missing.Select(v => v.Label))}"
             : $"{CountLabel(next.Count)} после фильтра" +
               (filtered is { Pending: > 0 } pending ? $" · объём ожидается: {pending.Pending:N0}" : "") +
               (filtered is { Unsupported: > 0 } unsupported ? $" · без котировки USD: {unsupported.Unsupported:N0}" : "") +
+              (spread is { Pending: > 0 } waiting ? $" · спред ожидается: {waiting.Pending:N0}" : "") +
+              (spread is { Unsupported: > 0 } unavailable ? $" · спред недоступен: {unavailable.Unsupported:N0}" : "") +
               (errors.Length > 0 ? $" · недоступно источников: {errors.Length}" : "");
-        string? tooltip = errors.Length == 0 ? null : string.Join("\n", errors.Select(x => $"{x.Key.Label} — {x.Value.Error}"));
+        string? tooltip = string.Join("\n", errors.Select(x => $"{x.Key.Label} — {x.Value.Error}")
+            .Concat(spreadFilter == null ? [] : new[] { spreadFilter.Coverage(now) }));
+        if (tooltip.Length == 0) tooltip = null;
         if (CatalogStatus.Text != status || !Equals(CatalogStatus.ToolTip, tooltip)) ShowCatalogStatus(status, tooltip);
         if (!markets.SequenceEqual(next))
         {
@@ -471,7 +486,7 @@ public partial class MainWindow : Window, IDisposable
     {
         if (!loading && DateTimeOffset.UtcNow >= nextRefresh) await ReloadCatalogs();
         if (stop.IsCancellationRequested) return;
-        if (!loading && volumeFilter != null) RefreshEligibility();
+        if (!loading && (volumeFilter != null || spreadFilter != null)) RefreshEligibility();
         for (int i = 0; i < 150 && streams != null && streams.TryRead(out var signal); i++)
             if (eligible.Contains(signal!.Market.Key)) Place(signal);
         ShowCoverage();
@@ -620,6 +635,7 @@ public partial class MainWindow : Window, IDisposable
         settingsPanel?.Dispose();
         streams?.Dispose();
         volumeFilter?.Dispose();
+        spreadFilter?.Dispose();
         overviewPanel.Dispose();
         overviewChart.Activate(false);
         foreach (var cell in cells) cell.Activate(false);

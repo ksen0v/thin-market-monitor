@@ -15,11 +15,12 @@ namespace ThinMarketMonitor;
 internal static class OverviewMetrics
 {
     public static string Label(OverviewColumn c) =>
-        (c.Kind switch { MetricKind.Turnover => "Оборот $", MetricKind.Change => "Изм. %", _ => "ATR %" }) +
+        c.Kind == MetricKind.Spread ? "Спред %" : (c.Kind switch { MetricKind.Turnover => "Оборот $", MetricKind.Change => "Изм. %", _ => "ATR %" }) +
         $" · {MainWindow.WindowName(c.Minutes * 60)}";
 
     public static double? Calculate(Market m, Candle[] bars, int frame, long end, OverviewColumn metric)
     {
+        if (metric.Kind == MetricKind.Spread) return null;
         long interval = frame * 1000L;
         int count = metric.Minutes * 60 / frame;
         long first = end - count * interval;
@@ -66,6 +67,8 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
     private Row[] rows = [];
     private ListCollectionView view;
     private CancellationTokenSource? worker;
+    private SpreadFilterMonitor? spreadQuotes;
+    private readonly DispatcherTimer spreadTimer = new() { Interval = TimeSpan.FromSeconds(1) };
     private Market[] markets = [];
     private bool loadingSelection;
     private bool shown;
@@ -82,6 +85,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         this.settings = settings;
         this.changed = changed;
         this.select = select;
+        spreadTimer.Tick += (_, _) => RefreshSpreads();
         Width = 390;
         Background = Terminal.Brush("Surface");
         Margin = new Thickness(1, 0, 0, 0);
@@ -301,7 +305,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
             string unit = data.Kind switch { MetricKind.Turnover => "$", MetricKind.Change => "%", _ => "ATR %" };
             table.Columns.Add(new DataGridTextColumn
             {
-                Header = $"{unit} {MainWindow.WindowName(data.Minutes * 60)}", Binding = new Binding($"[{i}]"),
+                Header = data.Kind == MetricKind.Spread ? "Спред %" : $"{unit} {MainWindow.WindowName(data.Minutes * 60)}", Binding = new Binding($"[{i}]"),
                 Width = data.Kind == MetricKind.Turnover ? 105 : 78,
                 HeaderStyle = numberHeader, ElementStyle = TextStyle(i, data.Kind)
             });
@@ -382,7 +386,23 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         status.Text = $"{rows.Length:N0} инструментов";
         var run = new CancellationTokenSource();
         worker = run;
+        if (columns.Any(m => m.Kind == MetricKind.Spread))
+        {
+            spreadQuotes = new(api, markets);
+            spreadTimer.Start();
+            RefreshSpreads();
+        }
         _ = Load(rows.ToArray(), columns.ToArray(), run);
+    }
+
+    private void RefreshSpreads()
+    {
+        if (spreadQuotes == null) return;
+        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        foreach (var row in rows) row.SetSpread(spreadQuotes.Quote(row.Market)?.Percent(now), columns);
+        status.ToolTip = spreadQuotes.Coverage(now);
+        if (settings.OverviewSort >= 0 && settings.OverviewSort < columns.Length &&
+            columns[settings.OverviewSort].Kind == MetricKind.Spread) RefreshSort();
     }
 
     private async Task Load(Row[] entries, OverviewColumn[] metrics, CancellationTokenSource run)
@@ -393,7 +413,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
             while (true)
             {
                 var snapshots = new Dictionary<string, MarketSnapshot>();
-                if (entries[0].Market.Venue != Venue.Alpha && metrics.Any(m => m.Minutes == 1440 && m.Kind != MetricKind.Atr))
+                if (entries[0].Market.Venue != Venue.Alpha && metrics.Any(m => m.Minutes == 1440 && m.Kind is MetricKind.Turnover or MetricKind.Change))
                 {
                     try { snapshots = await api.Snapshots(entries.Select(r => r.Market).ToArray(), ct); }
                     catch (Exception) when (!ct.IsCancellationRequested) { }
@@ -405,13 +425,14 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
                     var snapshot = snapshots.GetValueOrDefault(row.Market.Key);
                     try
                     {
-                        if (row.Market.Venue == Venue.Alpha && metrics.Any(m => m.Minutes == 1440 && m.Kind != MetricKind.Atr))
+                        if (row.Market.Venue == Venue.Alpha && metrics.Any(m => m.Minutes == 1440 && m.Kind is MetricKind.Turnover or MetricKind.Change))
                             snapshot = await api.AlphaSnapshot(row.Market, ct);
                         var values = new double?[metrics.Length];
                         var history = new List<int>();
                         for (int i = 0; i < metrics.Length; i++)
                         {
                             var m = metrics[i];
+                            if (m.Kind == MetricKind.Spread) continue;
                             if (m.Minutes == 1440 && m.Kind != MetricKind.Atr)
                                 values[i] = m.Kind == MetricKind.Turnover ? snapshot?.Turnover : snapshot?.Change;
                             if (values[i] == null && (m.Kind != MetricKind.Turnover || UsdQuotes.Supported(row.Market))) history.Add(i);
@@ -463,6 +484,9 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
 
     public void Cancel()
     {
+        spreadTimer.Stop();
+        spreadQuotes?.Dispose();
+        spreadQuotes = null;
         worker?.Cancel();
         worker = null;
     }
@@ -481,12 +505,31 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         public string Ticker => Market.Ticker;
         public double?[] Values => values;
         public string this[int i] => Number(i) is { } number
-            ? number.ToString(columns[i].Kind == MetricKind.Turnover ? "N0" : "+0.00;-0.00;0.00", CultureInfo.CurrentCulture)
+            ? number.ToString(columns[i].Kind == MetricKind.Turnover ? "N0" : columns[i].Kind == MetricKind.Spread ? "0.######" : "+0.00;-0.00;0.00", CultureInfo.CurrentCulture)
             : "—";
         public double? Number(int i) => i < values.Length ? values[i] : null;
         public event PropertyChangedEventHandler? PropertyChanged;
         public void Set(double?[] next, OverviewColumn[] kinds)
         {
+            for (int i = 0; i < kinds.Length; i++)
+                if (kinds[i].Kind == MetricKind.Spread)
+                {
+                    int previous = Array.FindIndex(columns, c => c.Kind == MetricKind.Spread);
+                    next[i] = previous >= 0 ? Number(previous) : null;
+                }
+            values = next;
+            columns = kinds;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs("Item[]"));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Values)));
+        }
+
+        public void SetSpread(double? spread, OverviewColumn[] kinds)
+        {
+            var next = kinds.Select(metric =>
+            {
+                int previous = Array.IndexOf(columns, metric);
+                return metric.Kind == MetricKind.Spread ? spread : previous >= 0 ? Number(previous) : null;
+            }).ToArray();
             values = next;
             columns = kinds;
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs("Item[]"));

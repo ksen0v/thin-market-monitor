@@ -61,7 +61,7 @@ internal static class Frames
     public static readonly int[] All = [1, 5, 15, 60, 300, 900, 3600, 14400, 86400];
     public static string Label(int s) => s >= 86400 ? "1д" : s >= 3600 ? $"{s / 3600}ч" : s >= 60 ? $"{s / 60}м" : $"{s}с";
 }
-internal enum MetricKind { Turnover, Change, Atr }
+internal enum MetricKind { Turnover, Change, Atr, Spread }
 internal record OverviewColumn(MetricKind Kind, int Minutes);
 
 internal sealed class Settings
@@ -91,6 +91,7 @@ internal sealed class Settings
     public Threshold[] Thresholds { get; set; } = Defaults.ToArray();
     public VolumeRule[] VolumeThresholds { get; set; } = DefaultVolumes.ToArray();
     public VolumeRule[] VolumeFilters { get; set; } = [];
+    public SpreadRule SpreadFilter { get; set; } = new();
     public bool PriceModule { get; set; } = true;
     public bool VolumeModule { get; set; }
     public bool ColibriEnabled { get; set; }
@@ -135,11 +136,14 @@ internal sealed class Settings
         settings.OverviewSpotRules ??= [];
         settings.OverviewFuturesRules ??= [];
         settings.ColibriSlot = settings.ColibriSlot?.Trim() ?? "";
+        if (settings.SpreadFilter is not { Valid: true }) settings.SpreadFilter = new();
         settings.FrameButtons = (settings.FrameButtons ?? [15, 60, 300]).Where(Frames.All.Contains).Distinct().Order().ToArray();
         if (!MarketSource.All.Contains(settings.OverviewSource)) settings.OverviewSource = new(Venue.KuCoin);
         if (!Frames.All.Contains(settings.OverviewFrame)) settings.OverviewFrame = 60;
-        settings.OverviewColumns = (settings.OverviewColumns ?? []).Where(x => x != null &&
-            Enum.IsDefined(x.Kind) && x.Minutes is >= 1 and <= 1440).Distinct().Take(5).ToArray();
+        settings.OverviewColumns = (settings.OverviewColumns ?? [])
+            .Select(x => x?.Kind == MetricKind.Spread ? new OverviewColumn(MetricKind.Spread, 0) : x)
+            .Where(x => x != null && Enum.IsDefined(x.Kind) && (x.Kind == MetricKind.Spread || x.Minutes is >= 1 and <= 1440))
+            .Distinct().Take(5).ToArray()!;
         if (settings.OverviewSort < -1 || settings.OverviewSort >= settings.OverviewColumns.Length) settings.OverviewSort = -1;
         var price = (settings.Thresholds ?? []).Where(r => r is { Seconds: >= 1 and <= MaxModuleSeconds, Percent: > 0 and <= 10000 }).ToArray();
         var defaults = Defaults.Select(r => r.Seconds == 300 && price.Length > 0 && price.All(p => !p.Enabled)

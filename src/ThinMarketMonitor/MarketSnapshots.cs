@@ -10,33 +10,12 @@ internal sealed partial class ExchangeApi
         var output = new Dictionary<string, MarketSnapshot>();
         foreach (var group in markets.GroupBy(m => m.Source).SelectMany(source => source.GroupBy(m => m.Contract?.Product)))
         {
-            string? p = group.Key;
-            var venue = group.First().Venue;
-            string? url = venue switch
-            {
-                Venue.Binance => (p == "usdm" ? Usdm : p == "coinm" ? Coinm : Binance) + "ticker/24hr",
-                Venue.Bybit => Bybit + "tickers?category=" + (p ?? "spot"),
-                Venue.Okx => Okx + "market/tickers?instType=" + (p ?? "SPOT"),
-                Venue.Bitget => p == null ? Bitget + "market/tickers" : Mix + "tickers?productType=" + p,
-                Venue.Mexc => p == null ? Mexc + "ticker/24hr" : MexcContract + "ticker",
-                Venue.KuCoin => p == null ? KuCoin + "v1/market/allTickers" : KuContract + "contracts/active",
-                Venue.Gate => p == null ? Gate + "tickers" : p.StartsWith("futures/", StringComparison.Ordinal) ? GateContract + p + "/tickers" : null,
-                _ => null
-            };
+            string? url = TickerUrl(group.First());
             if (url == null) continue;
-            var root = await Get(url, ct);
-            var rows = venue switch
-            {
-                Venue.Bybit => BybitResult(root).GetProperty("list"),
-                Venue.Okx => Envelope(root, "0"),
-                Venue.Bitget => Envelope(root, "00000"),
-                Venue.Mexc when p != null => Envelope(root, "0"),
-                Venue.KuCoin when p == null => Envelope(root, "200000").GetProperty("ticker"),
-                Venue.KuCoin => Envelope(root, "200000"),
-                _ => root
-            };
+            var (root, _) = await TickerBatch(url, ct);
+            var rows = TickerRows(group.First(), root);
             var lookup = group.ToDictionary(m => m.Symbol, StringComparer.Ordinal);
-            string name = venue == Venue.Okx ? "instId" : venue == Venue.Gate ? p == null ? "currency_pair" : "contract" : "symbol";
+            string name = TickerSymbolField(group.First());
             foreach (var row in rows.EnumerateArray())
                 if (lookup.TryGetValue(row.Optional(name), out var m)) output[m.Key] = DecodeSnapshot(m, row);
         }
