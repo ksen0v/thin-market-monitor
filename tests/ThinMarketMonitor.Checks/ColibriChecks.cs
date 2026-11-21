@@ -173,6 +173,7 @@ internal static class ColibriChecks
                 "disabling integration updates signal and overview controls");
             window.Close();
             await SpreadChecks.Ui();
+            await OverviewSpreadChecks.Run();
             await BlacklistChecks.Ui();
             VolumeGrowthChecks.Ui();
             app.Shutdown();

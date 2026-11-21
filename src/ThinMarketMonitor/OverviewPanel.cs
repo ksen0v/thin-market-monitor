@@ -67,9 +67,13 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
     private Row[] rows = [];
     private ListCollectionView view;
     private CancellationTokenSource? worker;
-    private SpreadFilterMonitor? spreadQuotes;
-    private readonly DispatcherTimer spreadTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    private OverviewSpreadSampler? spreadQuotes;
+    private readonly TimeSpan spreadInterval;
+    private readonly TimeSpan spreadTimeout;
     private Market[] markets = [];
+    private MarketSource boundSource;
+    private string? catalogDetails;
+    private string? spreadDetails;
     private bool loadingSelection;
     private bool shown;
     private bool loadedCatalog;
@@ -79,13 +83,15 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
     private OverviewColumn[] columns = [];
     public event Action<Market>? UserSelected;
 
-    public OverviewPanel(ExchangeApi api, Settings settings, Action changed, Action<Market> select)
+    public OverviewPanel(ExchangeApi api, Settings settings, Action changed, Action<Market> select,
+        TimeSpan? spreadInterval = null, TimeSpan? spreadTimeout = null)
     {
         this.api = api;
         this.settings = settings;
         this.changed = changed;
         this.select = select;
-        spreadTimer.Tick += (_, _) => RefreshSpreads();
+        this.spreadInterval = spreadInterval ?? TimeSpan.FromMinutes(1);
+        this.spreadTimeout = spreadTimeout ?? TimeSpan.FromSeconds(12);
         Width = 390;
         Background = Terminal.Brush("Surface");
         Margin = new Thickness(1, 0, 0, 0);
@@ -113,6 +119,8 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         table.CellStyle = Terminal.Style("OverviewCell");
         table.ColumnHeaderStyle = Terminal.Style("OverviewColumnHeader");
         ScrollViewer.SetHorizontalScrollBarVisibility(table, ScrollBarVisibility.Auto);
+        ScrollViewer.SetCanContentScroll(table, true);
+        VirtualizingPanel.SetScrollUnit(table, ScrollUnit.Item);
         table.ItemsSource = view;
         table.SelectionChanged += (_, _) =>
         {
@@ -294,6 +302,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
     {
         if (columns.SequenceEqual(settings.OverviewColumns) && table.Columns.Count > 0) return;
         columns = settings.OverviewColumns.ToArray();
+        foreach (var row in rows) row.UpdateColumns(columns);
         table.Columns.Clear();
         table.Columns.Add(new DataGridTextColumn { Header = "Тикер", Binding = new Binding("Ticker"), MinWidth = 118,
             Width = new DataGridLength(1, DataGridLengthUnitType.Star), ElementStyle = TextStyle() });
@@ -326,6 +335,8 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
             style.Setters.Add(new Setter(TextBlock.TextAlignmentProperty, TextAlignment.Right));
             style.Setters.Add(new Setter(TextBlock.ForegroundProperty, new Binding($"Values[{index}]")
                 { Converter = new MetricBrush(kind) }));
+            if (kind == MetricKind.Spread)
+                style.Setters.Add(new Setter(ToolTipService.ToolTipProperty, new Binding(nameof(Row.SpreadToolTip))));
         }
         return style;
     }
@@ -348,9 +359,12 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
     public void SetSource(IReadOnlyList<Market> next, bool visible, string? pending = null, string? details = null)
     {
         shown = visible;
-        if (!loadedCatalog || !markets.SequenceEqual(next))
+        catalogDetails = details;
+        if (!loadedCatalog || boundSource != settings.OverviewSource || markets.Length != next.Count ||
+            !markets.ToHashSet().SetEquals(next))
         {
             loadedCatalog = true;
+            boundSource = settings.OverviewSource;
             markets = next.ToArray();
             loadingSelection = true;
             rows = next.OrderBy(m => m.Symbol, StringComparer.Ordinal).ThenBy(m => m.Contract?.Product)
@@ -358,22 +372,25 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
             view = new ListCollectionView(rows);
             table.ItemsSource = view;
             Sort();
+            var selected = rows.FirstOrDefault(r => r.Market.Key == settings.OverviewChoice?.Key);
+            if (selected == null) table.CurrentCell = default;
+            table.SelectedItem = selected;
+            (table.Template?.FindName("DG_ScrollViewer", table) as ScrollViewer)?.ScrollToTop();
             loadingSelection = false;
             Restart();
         }
-        else if (visible && worker == null && rows.Length > 0) Restart();
+        else if (visible && worker == null && rows.Length > 0 && columns.Length > 0) Restart();
         else if (!visible) Cancel();
         if (next.Count == 0) status.Text = pending ?? "Нет инструментов по этим условиям";
-        status.ToolTip = details;
+        UpdateStatusTip();
     }
+
+    private bool SortingSpread => settings.OverviewSort >= 0 && settings.OverviewSort < columns.Length &&
+        columns[settings.OverviewSort].Kind == MetricKind.Spread;
 
     private void Sort()
     {
-        bool wasLoading = loadingSelection;
-        loadingSelection = true;
-        view.CustomSort = new RowComparer(settings.OverviewSort, settings.OverviewDescending);
-        RestoreSelection();
-        loadingSelection = wasLoading;
+        SortKeepingViewport(new RowComparer(settings.OverviewSort, settings.OverviewDescending));
         for (int i = 0; i < table.Columns.Count; i++)
             table.Columns[i].SortDirection = i - 1 == settings.OverviewSort
                 ? settings.OverviewDescending ? ListSortDirection.Descending : ListSortDirection.Ascending : null;
@@ -384,96 +401,130 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         Cancel();
         if (!shown || rows.Length == 0) return;
         status.Text = $"{rows.Length:N0} инструментов";
+        if (columns.Length == 0) return;
         var run = new CancellationTokenSource();
         worker = run;
         if (columns.Any(m => m.Kind == MetricKind.Spread))
         {
             spreadQuotes = new(api, markets);
-            spreadTimer.Start();
-            RefreshSpreads();
+            spreadDetails = "Спред · сбор котировок";
+            UpdateStatusTip();
         }
-        _ = Load(rows.ToArray(), columns.ToArray(), run);
+        _ = LoadOverview(rows, columns, spreadQuotes, run);
     }
 
-    private void RefreshSpreads()
-    {
-        if (spreadQuotes == null) return;
-        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        foreach (var row in rows) row.SetSpread(spreadQuotes.Quote(row.Market)?.Percent(now), columns);
-        status.ToolTip = spreadQuotes.Coverage(now);
-        if (settings.OverviewSort >= 0 && settings.OverviewSort < columns.Length &&
-            columns[settings.OverviewSort].Kind == MetricKind.Spread) RefreshSort();
-    }
-
-    private async Task Load(Row[] entries, OverviewColumn[] metrics, CancellationTokenSource run)
+    private async Task LoadOverview(Row[] entries, OverviewColumn[] metrics, OverviewSpreadSampler? quotes,
+        CancellationTokenSource run)
     {
         var ct = run.Token;
         try
         {
-            while (true)
+            await Task.WhenAll(
+                quotes == null ? Task.CompletedTask : LoadSpreads(quotes, entries, run),
+                metrics.Any(m => m.Kind != MetricKind.Spread) ? Load(entries, metrics, ct) : Task.CompletedTask);
+        }
+        catch (Exception) when (ct.IsCancellationRequested) { }
+        finally
+        {
+            if (ReferenceEquals(worker, run)) worker = null;
+            run.Dispose();
+        }
+    }
+
+    private async Task LoadSpreads(OverviewSpreadSampler quotes, Row[] entries, CancellationTokenSource run)
+    {
+        var ct = run.Token;
+        bool first = true;
+        while (true)
+        {
+            var snapshot = await Task.Run(() => quotes.Capture(first, spreadTimeout, ct), ct);
+            if (ct.IsCancellationRequested || !ReferenceEquals(worker, run)) return;
+            int stale = 0;
+            bool numbersChanged = false;
+            var updated = new List<Row>();
+            foreach (var row in entries)
             {
-                var snapshots = new Dictionary<string, MarketSnapshot>();
-                if (entries[0].Market.Venue != Venue.Alpha && metrics.Any(m => m.Minutes == 1440 && m.Kind is MetricKind.Turnover or MetricKind.Change))
-                {
-                    try { snapshots = await api.Snapshots(entries.Select(r => r.Market).ToArray(), ct); }
-                    catch (Exception) when (!ct.IsCancellationRequested) { }
-                    foreach (var row in entries)
-                    {
-                        ct.ThrowIfCancellationRequested();
-                        if (!snapshots.TryGetValue(row.Market.Key, out var snapshot)) continue;
-                        row.Set(metrics.Select((metric, i) => SnapshotValue(metric, snapshot) ?? row.Number(i)).ToArray(), metrics);
-                    }
-                    if (snapshots.Count != 0 && settings.OverviewSort >= 0) RefreshSort();
-                }
-                int done = 0;
+                var value = snapshot.TryGetValue(row.Market.Key, out var spread) ? spread : (OverviewSpreadValue?)null;
+                var (numberChanged, stateChanged) = row.SetSpread(value);
+                numbersChanged |= numberChanged;
+                if (numberChanged || stateChanged) updated.Add(row);
+                if (row.SpreadStale) stale++;
+            }
+            foreach (var row in updated) row.NotifySpread();
+            spreadDetails = $"Спред · свежие котировки {snapshot.Count:N0}/{entries.Length:N0} · устаревшие {stale:N0}";
+            UpdateStatusTip();
+            if (numbersChanged && SortingSpread) RefreshSort();
+            first = false;
+            await Task.Delay(spreadInterval, ct);
+        }
+    }
+
+    private void UpdateStatusTip() => status.ToolTip = catalogDetails == null ? spreadDetails :
+        spreadDetails == null ? catalogDetails : $"{catalogDetails}\n{spreadDetails}";
+
+    private async Task Load(Row[] entries, OverviewColumn[] metrics, CancellationToken ct)
+    {
+        while (true)
+        {
+            var snapshots = new Dictionary<string, MarketSnapshot>();
+            if (entries[0].Market.Venue != Venue.Alpha && metrics.Any(m => m.Minutes == 1440 && m.Kind is MetricKind.Turnover or MetricKind.Change))
+            {
+                try { snapshots = await api.Snapshots(entries.Select(r => r.Market).ToArray(), ct); }
+                catch (Exception) when (!ct.IsCancellationRequested) { }
                 foreach (var row in entries)
                 {
                     ct.ThrowIfCancellationRequested();
-                    var snapshot = snapshots.GetValueOrDefault(row.Market.Key);
-                    try
-                    {
-                        if (row.Market.Venue == Venue.Alpha && metrics.Any(m => m.Minutes == 1440 && m.Kind is MetricKind.Turnover or MetricKind.Change))
-                            snapshot = await api.AlphaSnapshot(row.Market, ct);
-                        var values = new double?[metrics.Length];
-                        var history = new List<int>();
-                        for (int i = 0; i < metrics.Length; i++)
-                        {
-                            var m = metrics[i];
-                            if (m.Kind == MetricKind.Spread) continue;
-                            values[i] = SnapshotValue(m, snapshot);
-                            if (values[i] == null && (m.Kind != MetricKind.Turnover ||
-                                UsdQuotes.Supported(row.Market) && ExchangeApi.HasHistoricalQuoteVolume(row.Market))) history.Add(i);
-                        }
-                        if (history.Count > 0)
-                        {
-                            int frame = new[] { 900, 300, 60 }.First(f => history.All(i => metrics[i].Minutes * 60 % f == 0));
-                            long unit = frame * 1000L;
-                            long end = (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 60_000) / unit * unit;
-                            int count = history.Max(i => metrics[i].Minutes * 60 / frame) + 1;
-                            var bars = await api.CandlePage(row.Market, frame, end, count, ct);
-                            foreach (int i in history) values[i] = OverviewMetrics.Calculate(row.Market, bars, frame, end, metrics[i]);
-                        }
-                        ct.ThrowIfCancellationRequested();
-                        row.Set(values, metrics);
-                    }
-                    catch (Exception) when (!ct.IsCancellationRequested)
-                    {
-                        var fallback = metrics.Select(m => SnapshotValue(m, snapshot)).ToArray();
-                        row.Set(fallback, metrics);
-                    }
-                    done++;
-                    if (done % 12 == 0 || done == entries.Length)
-                    {
-                        status.Text = done == entries.Length ? $"{done:N0} инструментов" : $"{done:N0} / {entries.Length:N0}";
-                        if (settings.OverviewSort >= 0) RefreshSort();
-                    }
-                    if (done % 24 == 0) await Task.Yield();
+                    if (!snapshots.TryGetValue(row.Market.Key, out var snapshot)) continue;
+                    row.Set(metrics.Select((metric, i) => SnapshotValue(metric, snapshot) ?? row.Number(i)).ToArray(), metrics);
                 }
-                await Task.Delay(TimeSpan.FromSeconds(60), ct);
+                if (snapshots.Count != 0 && settings.OverviewSort >= 0 && !SortingSpread) RefreshSort();
             }
+            int done = 0;
+            foreach (var row in entries)
+            {
+                ct.ThrowIfCancellationRequested();
+                var snapshot = snapshots.GetValueOrDefault(row.Market.Key);
+                try
+                {
+                    if (row.Market.Venue == Venue.Alpha && metrics.Any(m => m.Minutes == 1440 && m.Kind is MetricKind.Turnover or MetricKind.Change))
+                        snapshot = await api.AlphaSnapshot(row.Market, ct);
+                    var values = new double?[metrics.Length];
+                    var history = new List<int>();
+                    for (int i = 0; i < metrics.Length; i++)
+                    {
+                        var m = metrics[i];
+                        if (m.Kind == MetricKind.Spread) continue;
+                        values[i] = SnapshotValue(m, snapshot);
+                        if (values[i] == null && (m.Kind != MetricKind.Turnover ||
+                            UsdQuotes.Supported(row.Market) && ExchangeApi.HasHistoricalQuoteVolume(row.Market))) history.Add(i);
+                    }
+                    if (history.Count > 0)
+                    {
+                        int frame = new[] { 900, 300, 60 }.First(f => history.All(i => metrics[i].Minutes * 60 % f == 0));
+                        long unit = frame * 1000L;
+                        long end = (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 60_000) / unit * unit;
+                        int count = history.Max(i => metrics[i].Minutes * 60 / frame) + 1;
+                        var bars = await api.CandlePage(row.Market, frame, end, count, ct);
+                        foreach (int i in history) values[i] = OverviewMetrics.Calculate(row.Market, bars, frame, end, metrics[i]);
+                    }
+                    ct.ThrowIfCancellationRequested();
+                    row.Set(values, metrics);
+                }
+                catch (Exception) when (!ct.IsCancellationRequested)
+                {
+                    var fallback = metrics.Select(m => SnapshotValue(m, snapshot)).ToArray();
+                    row.Set(fallback, metrics);
+                }
+                done++;
+                if (done % 12 == 0 || done == entries.Length)
+                {
+                    status.Text = done == entries.Length ? $"{done:N0} инструментов" : $"{done:N0} / {entries.Length:N0}";
+                    if (settings.OverviewSort >= 0 && !SortingSpread) RefreshSort();
+                }
+                if (done % 24 == 0) await Task.Yield();
+            }
+            await Task.Delay(TimeSpan.FromSeconds(60), ct);
         }
-        catch (Exception) when (ct.IsCancellationRequested) { }
-        finally { if (ReferenceEquals(worker, run)) worker = null; run.Dispose(); }
     }
 
     private static double? SnapshotValue(OverviewColumn metric, MarketSnapshot? snapshot) =>
@@ -486,20 +537,67 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
 
     private void RefreshSort()
     {
-        loadingSelection = true;
-        view.Refresh();
-        RestoreSelection();
-        loadingSelection = false;
+        if (view.CustomSort == null) return;
+        for (int i = 1; i < view.Count; i++)
+        {
+            if (view.CustomSort.Compare(view.GetItemAt(i - 1), view.GetItemAt(i)) <= 0) continue;
+            SortKeepingViewport();
+            return;
+        }
     }
 
-    private void RestoreSelection() =>
-        table.SelectedItem = rows.FirstOrDefault(r => r.Market.Key == settings.OverviewChoice?.Key);
+    private void SortKeepingViewport(IComparer? sort = null)
+    {
+        var scroll = table.Template?.FindName("DG_ScrollViewer", table) as ScrollViewer;
+        int top = (int)(scroll?.VerticalOffset ?? 0);
+        var anchor = top < table.Items.Count ? table.Items[top] : null;
+        double horizontal = scroll?.HorizontalOffset ?? 0;
+        var current = table.CurrentCell;
+        bool restoreFocus = Keyboard.FocusedElement is DependencyObject focused && Ancestor<DataGridCell>(focused) != null &&
+            table.IsKeyboardFocusWithin;
+        var selection = table.SelectedItem ?? rows.FirstOrDefault(r => r.Market.Key == settings.OverviewChoice?.Key);
+        bool wasLoading = loadingSelection;
+        loadingSelection = true;
+        try
+        {
+            if (sort == null) view.Refresh();
+            else view.CustomSort = sort;
+            if (table.SelectedItem != selection) table.SelectedItem = selection;
+            bool hasCurrentCell = current.IsValid && table.Columns.Contains(current.Column);
+            if (hasCurrentCell && current != table.CurrentCell) table.CurrentCell = current;
+            if (scroll == null || anchor == null) return;
+            int position = table.Items.IndexOf(anchor);
+            if (position < 0) return;
+            scroll.ScrollToVerticalOffset(position);
+            scroll.ScrollToHorizontalOffset(horizontal);
+            if (!restoreFocus) return;
+            table.UpdateLayout();
+            if (hasCurrentCell && table.ItemContainerGenerator.ContainerFromItem(current.Item) is DataGridRow row &&
+                current.Column.GetCellContent(row) is { } content && Ancestor<DataGridCell>(content) is { } cell)
+                cell.Focus();
+            else table.Focus();
+            scroll.ScrollToVerticalOffset(position);
+            scroll.ScrollToHorizontalOffset(horizontal);
+        }
+        finally { loadingSelection = wasLoading; }
+    }
+
+    private static T? Ancestor<T>(DependencyObject? element) where T : DependencyObject
+    {
+        while (element is Visual visual)
+        {
+            if (visual is T match) return match;
+            element = VisualTreeHelper.GetParent(visual);
+        }
+        return null;
+    }
 
     public void Cancel()
     {
-        spreadTimer.Stop();
         spreadQuotes?.Dispose();
         spreadQuotes = null;
+        spreadDetails = null;
+        UpdateStatusTip();
         worker?.Cancel();
         worker = null;
     }
@@ -514,37 +612,65 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
     {
         private double?[] values = new double?[metrics.Length];
         private OverviewColumn[] columns = metrics;
+        private long spreadTime;
         public Market Market { get; } = market;
         public string Ticker => Market.Ticker;
         public double?[] Values => values;
+        public bool SpreadStale { get; private set; }
+        public string? SpreadToolTip => SpreadStale
+            ? $"Свежих bid/ask нет. Последняя котировка в {DateTimeOffset.FromUnixTimeMilliseconds(spreadTime).ToLocalTime():HH:mm:ss}"
+            : null;
         public string this[int i] => Number(i) is { } number
-            ? number.ToString(columns[i].Kind == MetricKind.Turnover ? "N0" : columns[i].Kind == MetricKind.Spread ? "0.######" : "+0.00;-0.00;0.00", CultureInfo.CurrentCulture)
+            ? number.ToString(columns[i].Kind == MetricKind.Turnover ? "N0" : columns[i].Kind == MetricKind.Spread ? "0.######" : "+0.00;-0.00;0.00", CultureInfo.CurrentCulture) +
+                (columns[i].Kind == MetricKind.Spread && SpreadStale ? "*" : "")
             : "—";
-        public double? Number(int i) => i < values.Length ? values[i] : null;
+        public double? Number(int i) => i >= 0 && i < values.Length ? values[i] : null;
         public event PropertyChangedEventHandler? PropertyChanged;
+
+        public void UpdateColumns(OverviewColumn[] kinds)
+        {
+            Set(kinds.Select(kind => Number(Array.IndexOf(columns, kind))).ToArray(), kinds);
+            if (kinds.Any(kind => kind.Kind == MetricKind.Spread)) return;
+            SpreadStale = false;
+            spreadTime = 0;
+        }
+
         public void Set(double?[] next, OverviewColumn[] kinds)
         {
             for (int i = 0; i < kinds.Length; i++)
                 if (kinds[i].Kind == MetricKind.Spread)
                 {
-                    int previous = Array.FindIndex(columns, c => c.Kind == MetricKind.Spread);
-                    next[i] = previous >= 0 ? Number(previous) : null;
+                    next[i] = Number(Array.FindIndex(columns, c => c.Kind == MetricKind.Spread));
                 }
+            if (columns.SequenceEqual(kinds) && values.SequenceEqual(next)) return;
             values = next;
             columns = kinds;
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs("Item[]"));
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Values)));
+            NotifyValues();
         }
 
-        public void SetSpread(double? spread, OverviewColumn[] kinds)
+        public (bool NumberChanged, bool StateChanged) SetSpread(OverviewSpreadValue? sample)
         {
-            var next = kinds.Select(metric =>
+            int index = Array.FindIndex(columns, kind => kind.Kind == MetricKind.Spread);
+            if (index < 0) return default;
+            double? old = values[index];
+            bool wasStale = SpreadStale;
+            if (sample is { } fresh)
             {
-                int previous = Array.IndexOf(columns, metric);
-                return metric.Kind == MetricKind.Spread ? spread : previous >= 0 ? Number(previous) : null;
-            }).ToArray();
-            values = next;
-            columns = kinds;
+                values[index] = fresh.Percent;
+                spreadTime = fresh.QuoteTime;
+            }
+            SpreadStale = sample == null && old.HasValue;
+            return (old != values[index], wasStale != SpreadStale);
+        }
+
+        public void NotifySpread()
+        {
+            NotifyValues();
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SpreadToolTip)));
+        }
+
+        private void NotifyValues()
+        {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs("Item[]"));
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Values)));
         }
