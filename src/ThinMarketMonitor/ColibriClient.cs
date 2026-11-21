@@ -89,6 +89,9 @@ internal sealed class ColibriClient : IDisposable
     {
         var contract = market.Contract;
         if (contract == null) return ["Spot"];
+        // Colibri publishes WEEX crypto and TradFi perpetuals together as WeexLinearFutures.
+        if (market.Venue == Venue.Weex)
+            return contract is { Product: "linear", Unit: QuantityUnit.Base } ? ["LinearFutures"] : [];
         bool inverse = contract.Unit == QuantityUnit.Quote || contract.Product is "inverse" or "coinm" or "COIN-FUTURES";
         if (market.Venue == Venue.Mexc && contract.Multiplier <= 0)
             throw new IOException("Тип этого контракта MEXC не подтверждён для Colibri.");

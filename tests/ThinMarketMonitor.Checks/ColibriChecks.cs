@@ -18,6 +18,10 @@ internal static class ColibriChecks
     private const string Slot = "91f1c08302a14ced8e452631843f3075";
     private static readonly Market Btc = new(Venue.Binance, "BTCUSDT", "BTC", "USDT");
     private static readonly Market Eth = new(Venue.Binance, "ETHUSDT", "ETH", "USDT");
+    private static readonly Market[] WeexContracts = new[] { "HYUNDAI", "AMD", "CRV", "BTC", "AMDL", "PAXG", "WXT" }
+        .Select(asset => new Market(Venue.Weex, asset + "USDT", asset, "USDT", new("linear"))).ToArray();
+    private static readonly Market WeexAmdSpot = new(Venue.Weex, "AMDUSDT", "AMD", "USDT");
+    private static readonly Market WeexUsdcSpot = new(Venue.Weex, "BTCUSDC", "BTC", "USDC");
 
     public static async Task Run()
     {
@@ -50,6 +54,26 @@ internal static class ColibriChecks
             "unsupported venue has no fallback");
         await Fails(() => client.Resolve(port, Btc with { Symbol = "XBTUSDT" }, CancellationToken.None),
             "a similar symbol has no fallback");
+        foreach (var market in WeexContracts)
+            Ensure(await client.Resolve(port, market, CancellationToken.None) == new ColibriInstrument("WeexLinearFutures", market.Symbol),
+                $"WEEX {market.Symbol} uses the exact symbol on Colibri's linear futures venue");
+        foreach (var spot in new[] { WeexAmdSpot, WeexUsdcSpot })
+            Ensure(await client.Resolve(port, spot, CancellationToken.None) == new ColibriInstrument("WeexSpot", spot.Symbol),
+                $"WEEX Spot {spot.Symbol} remains on its own segment");
+        var hyundai = WeexContracts[0];
+        await Fails(() => client.Resolve(port, hyundai with { Contract = null }, CancellationToken.None),
+            "a WEEX futures-only symbol cannot be resolved on spot");
+        await Fails(() => client.Resolve(port, hyundai with { Quote = "USDC" }, CancellationToken.None),
+            "WEEX matching also requires the exact quote asset");
+        await Fails(() => client.Resolve(port, hyundai with { Base = "AMD" }, CancellationToken.None),
+            "WEEX matching also requires the exact base asset");
+        await Fails(() => client.Resolve(port, hyundai with { Contract = new("inverse", 1, QuantityUnit.Quote) }, CancellationToken.None),
+            "WEEX inverse does not use the linear catalog");
+        await Fails(() => client.Resolve(port, hyundai with { Symbol = "CRVDUSDT", Base = "CRVD" }, CancellationToken.None),
+            "the verified CRVUSDT is never substituted for CRVDUSDT");
+        server.DuplicateWeexSymbol = true;
+        await Fails(() => client.Resolve(port, hyundai, CancellationToken.None), "ambiguous WEEX futures matches are rejected");
+        server.DuplicateWeexSymbol = false;
         await Fails(() => client.Check("../wrong-slot", CancellationToken.None), "slot IDs cannot become paths");
 
         server.PingVersion = 99;
@@ -158,6 +182,20 @@ internal static class ColibriChecks
             typeof(OverviewPanel).GetMethod("RefreshSort", flags)!.Invoke(panel, null);
             await Task.Delay(250);
             Ensure(events == 1 && server.Writes.Count == initial + 2, "catalog refresh and numeric sorting send nothing");
+
+            cell.Assign(hyundai, pinned: true);
+            open.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await Until(() => server.CompletedWrites.Count == initial + 3);
+            CheckWeexWrite(server, "HYUNDAIUSDT");
+            var amd = WeexContracts[1];
+            settings.OverviewSource = amd.Source;
+            panel.SetSource([amd], visible: false);
+            grid.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, Environment.TickCount, MouseButton.Left)
+                { RoutedEvent = UIElement.PreviewMouseLeftButtonDownEvent });
+            grid.SelectedIndex = 0;
+            await Until(() => server.CompletedWrites.Count == initial + 4);
+            CheckWeexWrite(server, "AMDUSDT");
+
             sync.IsChecked = false;
             sync.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
             Ensure(!settings.ColibriOverviewSync, "overview toggle persists its setting");
@@ -185,6 +223,16 @@ internal static class ColibriChecks
         Ensure(persisted.ColibriEnabled && persisted.ColibriOverviewSync && persisted.ColibriSlot == Slot &&
             !Settings.Deserialize("{}").ColibriEnabled, "settings persist and migration starts disabled");
         Console.WriteLine("Colibri local API payload, matching, error handling, serialization and cancellation passed.");
+    }
+
+    private static void CheckWeexWrite(LocalApi server, string symbol)
+    {
+        var request = server.Requests.Last(r => r.Method == "PUT");
+        using var json = JsonDocument.Parse(request.Body);
+        var content = json.RootElement.GetProperty("content");
+        Ensure(request.Path == "/app/slots/" + Slot && content.GetProperty("kind").GetString() == "orderbook" &&
+            content.GetProperty("exchange").GetString() == "WeexLinearFutures" && content.GetProperty("symbol").GetString() == symbol &&
+            content.EnumerateObject().Count() == 3, "the selected WEEX contract reaches only the configured test order book");
     }
 
     private static async Task Fails(Func<Task> action, string check)
@@ -256,6 +304,7 @@ internal static class ColibriChecks
         public bool Redirect { get; set; }
         public bool DelayWrite { get; set; }
         public bool WriteError { get; set; }
+        public bool DuplicateWeexSymbol { get; set; }
         public int MaxConcurrentWrites { get; private set; }
 
         public LocalApi()
@@ -308,17 +357,21 @@ internal static class ColibriChecks
                     else if (request.Path == "/exchanges") payload = """
                         {"exchanges":[{"id":"BinanceSpot","name":"Binance","marketType":"Spot","trading":true},
                         {"id":"BinanceLinearFutures","name":"Binance","marketType":"LinearFutures","trading":true},
-                        {"id":"BybitSpot","name":"Bybit","marketType":"Spot","trading":true}]}
+                        {"id":"BybitSpot","name":"Bybit","marketType":"Spot","trading":true},
+                        {"id":"WeexSpot","name":"WEEX","marketType":"Spot"},
+                        {"id":"WeexLinearFutures","name":"WEEX Futures","marketType":"LinearFutures"}]}
                         """;
                     else if (request.Path.EndsWith("/symbols", StringComparison.Ordinal))
                     {
                         string exchange = request.Path.Split('/')[2];
-                        payload = JsonSerializer.Serialize(new { exchange, symbols = new[]
+                        Market[] instruments = exchange switch
                         {
-                            new { symbol = "BTCUSDT", baseAsset = "BTC", quoteAsset = "USDT" },
-                            new { symbol = "ETHUSDT", baseAsset = "ETH", quoteAsset = "USDT" },
-                            new { symbol = "1000SHIBUSDT", baseAsset = "1000SHIB", quoteAsset = "USDT" }
-                        } });
+                            "WeexSpot" => [WeexAmdSpot, WeexUsdcSpot],
+                            "WeexLinearFutures" => DuplicateWeexSymbol ? [.. WeexContracts, WeexContracts[0]] : WeexContracts,
+                            _ => [Btc, Eth, new(Venue.Binance, "1000SHIBUSDT", "1000SHIB", "USDT")]
+                        };
+                        payload = JsonSerializer.Serialize(new { exchange, symbols = instruments.Select(m =>
+                            new { symbol = m.Symbol, baseAsset = m.Base, quoteAsset = m.Quote }) });
                     }
                     else if (request.Path == "/app/slots/" + Slot && SlotMissing)
                     { code = 404; payload = """{"code":"unknown_slot","message":"missing"}"""; }
