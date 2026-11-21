@@ -58,6 +58,12 @@ internal static class ExtendedVenueChecks
             ExtendedStreams.DecodeBook(Venue.Lighter, Json("""{"type":"update/ticker","channel":"ticker:2048","last_updated_at":1795265850000000,"ticker":{"b":{"price":"99","size":"2"},"a":{"price":"101","size":"1"}}}"""))
                 is { Symbol: "2048", Quote.Bid: 99, Quote.Ask: 101, Quote.Time: now },
             "Lighter numeric market ID, explicit spot assets and microsecond ticker timestamp");
+        var lighterTrades = ExtendedStreams.DecodeTrades(lighter,
+            Json("""{"type":"update/trade","channel":"trade:2048","trades":[{"market_id":2048,"price":"100.1","size":"2","timestamp":1795265850000,"trade_id":42025564497}],"liquidation_trades":null}"""));
+        Check(lighterTrades is [{ Symbol: "2048", Price: 100.1, Size: 2, Time: now, Id: "42025564497" }] &&
+            ExtendedStreams.DecodeTrades(lighter,
+                Json("""{"type":"subscribed/trade","channel":"trade:2048","trades":null,"liquidation_trades":[]}""")).Length == 0,
+            "Lighter trade frames allow null arrays and snapshots do not trigger signals");
         var hlBook = ExtendedStreams.DecodeBook(Venue.Hyperliquid,
             Json("""{"channel":"bbo","data":{"coin":"@107","time":1795265850000,"bbo":[null,{"px":"101","sz":"1"}]}}"""));
         Check(hlBook?.Symbol == "@107" && hlBook?.Quote.Percent(now) == null, "one-sided books remain unknown");

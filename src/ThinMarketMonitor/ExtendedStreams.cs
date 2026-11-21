@@ -207,7 +207,8 @@ internal static class ExtendedStreams
         {
             string index = ChannelSymbol(channel);
             trades = new[] { "trades", "liquidation_trades" }
-                .SelectMany(property => root.TryGetProperty(property, out var data) ? data.EnumerateArray().AsEnumerable() : [])
+                .SelectMany(property => root.TryGetProperty(property, out var data) && data.ValueKind == JsonValueKind.Array
+                    ? data.EnumerateArray().AsEnumerable() : [])
                 .Where(row => row.Optional("market_id") == index)
                 .Select(row => new Trade(index, row.GetProperty("timestamp").Int(), row.Number("price"), row.Number("size"), row.Optional("trade_id")));
         }
