@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.IO;
 using System.Net.Http;
+using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls.Primitives;
@@ -44,13 +45,21 @@ public partial class MainWindow : Window, IDisposable
     private bool loading;
     private long order;
     private DateTimeOffset nextRefresh;
+    private DateTimeOffset nextRetry = DateTimeOffset.MaxValue;
+    private int connectionFailures;
+    private long networkChanged;
+    private bool watchingNetwork;
 
     public MainWindow() : this(startMonitoring: true) { }
 
     internal MainWindow(bool startMonitoring, Settings? testSettings = null, ColibriClient? colibriClient = null,
         HttpClient? testHttp = null)
     {
-        http = testHttp ?? new() { Timeout = TimeSpan.FromSeconds(16) };
+        http = testHttp ?? new(new SocketsHttpHandler
+        {
+            PooledConnectionLifetime = TimeSpan.FromMinutes(1),
+            PooledConnectionIdleTimeout = TimeSpan.FromSeconds(20)
+        }) { Timeout = TimeSpan.FromSeconds(16) };
         settings = testSettings ?? Settings.Load();
         persistSettings = testSettings == null;
         InitializeComponent();
@@ -110,6 +119,11 @@ public partial class MainWindow : Window, IDisposable
         UpdateIntegration();
         if (startMonitoring) Loaded += async (_, _) =>
         {
+            if (!watchingNetwork)
+            {
+                NetworkChange.NetworkAddressChanged += NetworkAddressChanged;
+                watchingNetwork = true;
+            }
             timer.Tick += Tick;
             timer.Start();
             await ReloadCatalogs();
@@ -371,14 +385,14 @@ public partial class MainWindow : Window, IDisposable
         }
     }
 
-    private async Task ReloadCatalogs()
+    private async Task ReloadCatalogs(MarketSource[]? retry = null)
     {
         if (loading) return;
         loading = true;
         ShowCatalogStatus("Обновление каталогов…");
         try
         {
-            await Task.WhenAll(MarketSource.All.Select(async v =>
+            await Task.WhenAll((retry ?? MarketSource.All).Select(async v =>
             {
                 var catalog = await api.LoadCatalog(v, stop.Token);
                 if (!stop.IsCancellationRequested)
@@ -396,9 +410,24 @@ public partial class MainWindow : Window, IDisposable
         finally
         {
             loading = false;
-            nextRefresh = DateTimeOffset.UtcNow.AddMinutes(5);
+            var now = DateTimeOffset.UtcNow;
+            if (retry == null) nextRefresh = now.AddMinutes(5);
+            connectionFailures = CatalogsToRetry().Length > 0 ? Math.Min(connectionFailures + 1, 6) : 0;
+            nextRetry = connectionFailures == 0 ? DateTimeOffset.MaxValue :
+                now.AddSeconds(Math.Min(300, 15 << (connectionFailures - 1)));
         }
     }
+
+    private MarketSource[] CatalogsToRetry()
+    {
+        bool defaultSpot = !MarketSource.All.Any(source => settings.Rule(source) == ListingRule.Require);
+        return catalogs.Where(entry => entry.Value.ConnectionFailed).Select(entry => entry.Key).Where(source =>
+            settings.Rule(source) != ListingRule.Ignore || defaultSpot && source.Segment == Segment.Spot ||
+            settings.Overview && (source == settings.OverviewSource || settings.OverviewRule(source) != ListingRule.Ignore)).ToArray();
+    }
+
+    private void NetworkAddressChanged(object? sender, EventArgs e) =>
+        Interlocked.Exchange(ref networkChanged, Environment.TickCount64);
 
     private void BlacklistSignalCoin(Market market)
     {
@@ -509,7 +538,24 @@ public partial class MainWindow : Window, IDisposable
 
     private async void Tick(object? sender, EventArgs e)
     {
-        if (!loading && DateTimeOffset.UtcNow >= nextRefresh) await ReloadCatalogs();
+        if (!loading)
+        {
+            long change = Volatile.Read(ref networkChanged);
+            if (change != 0 && Environment.TickCount64 - change >= 1500 &&
+                Interlocked.CompareExchange(ref networkChanged, 0, change) == change)
+            {
+                connectionFailures = 0;
+                nextRefresh = DateTimeOffset.MinValue;
+            }
+            var now = DateTimeOffset.UtcNow;
+            if (now >= nextRefresh) await ReloadCatalogs();
+            else if (now >= nextRetry)
+            {
+                var retry = CatalogsToRetry();
+                if (retry.Length != 0) await ReloadCatalogs(retry);
+                else nextRetry = DateTimeOffset.MaxValue;
+            }
+        }
         if (stop.IsCancellationRequested) return;
         if (!loading && (volumeFilter != null || spreadFilter != null)) RefreshEligibility();
         for (int i = 0; i < 150 && streams != null && streams.TryRead(out var signal); i++)
@@ -661,6 +707,7 @@ public partial class MainWindow : Window, IDisposable
     {
         if (stop.IsCancellationRequested) return;
         stop.Cancel();
+        if (watchingNetwork) NetworkChange.NetworkAddressChanged -= NetworkAddressChanged;
         colibri.Dispose();
         timer.Stop();
         settingsPanel?.Dispose();

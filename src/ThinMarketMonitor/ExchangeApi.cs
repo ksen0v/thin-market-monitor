@@ -1,11 +1,14 @@
 using System.Globalization;
 using System.Net.Http;
+using System.Security.Authentication;
 using System.Text.Json;
 
 namespace ThinMarketMonitor;
 
-internal sealed partial class ExchangeApi(HttpClient http)
+internal sealed partial class ExchangeApi(HttpClient http, TimeProvider? timeProvider = null)
 {
+    internal long CandleNow => (timeProvider ?? TimeProvider.System).GetUtcNow().ToUnixTimeMilliseconds();
+
     private const string Binance = "https://api.binance.com/api/v3/";
     private const string Bybit = "https://api.bybit.com/v5/market/";
     private const string Okx = "https://www.okx.com/api/v5/";
@@ -25,8 +28,35 @@ internal sealed partial class ExchangeApi(HttpClient http)
         catch (Exception ex) when (!ct.IsCancellationRequested && ex is HttpRequestException or JsonException
                                    or FormatException or InvalidOperationException or KeyNotFoundException or OperationCanceledException)
         {
-            return new([], ex is OperationCanceledException ? "тайм-аут" : ex.Message);
+            string? connection = ConnectionProblem(ex);
+            return new([], connection ?? ex.Message, connection != null);
         }
+    }
+
+    internal static string? ConnectionProblem(Exception error)
+    {
+        if (error is OperationCanceledException) return "Тайм-аут подключения";
+        for (Exception? exception = error; exception != null; exception = exception.InnerException)
+        {
+            if (exception is HttpRequestException request)
+            {
+                switch (request.HttpRequestError)
+                {
+                    case HttpRequestError.SecureConnectionError:
+                        return request.GetBaseException() is System.IO.IOException interrupted
+                            ? $"TLS · соединение оборвалось при согласовании · {interrupted.Message}"
+                            : $"TLS · {request.GetBaseException().Message}";
+                    case HttpRequestError.ProxyTunnelError:
+                        return $"Прокси не открыл соединение · {request.GetBaseException().Message}";
+                    case HttpRequestError.NameResolutionError:
+                        return $"DNS · {request.GetBaseException().Message}";
+                    case HttpRequestError.ConnectionError:
+                        return $"Соединение недоступно · {request.GetBaseException().Message}";
+                }
+            }
+            if (exception is AuthenticationException tls) return $"TLS · {tls.Message}";
+        }
+        return null;
     }
 
     private async Task<Market[]> GetMarkets(Venue venue, CancellationToken ct)

@@ -290,14 +290,15 @@ internal sealed class ChartCell : Border
     private async Task Load(Market instrument, int tf, CancellationTokenSource source)
     {
         var ct = source.Token;
-        var candles = new LiveCandles(tf);
+        long offset = ExchangeApi.CandleOffset(instrument, tf);
+        var candles = new LiveCandles(tf, offset);
         var live = new ConcurrentQueue<Trade>();
         bool native = tf >= 60 || ExchangeApi.NativeSeconds(instrument);
         int queuedTrades = 0;
         bool finished = false;
         int emptyPages = 0;
         string coverage = "";
-        long nextPage = Boundary(tf);
+        long nextPage = Boundary(tf, offset);
         long nextTick = 0;
         bool historyLoaded = false;
         var refreshPlot = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(100) };
@@ -327,10 +328,12 @@ internal sealed class ChartCell : Border
             if (!native) await LoadTradeHistory();
             while (!ct.IsCancellationRequested)
             {
+                bool loadingOlder = false;
                 try
                 {
                     if (native && olderRequested && !finished && historyLoaded)
                     {
+                        loadingOlder = true;
                         olderRequested = false;
                         int remaining = plot.MissingHistoryBars(nextPage);
                         bool found = await Page(nextPage, Math.Clamp(remaining, 180, tf < 60 ? 180 : 480), prepend: true);
@@ -349,12 +352,13 @@ internal sealed class ChartCell : Border
                             coverage = "На предыдущем участке свечей нет";
                             olderRequested |= plot.MissingHistoryBars(nextPage) > 0;
                         }
+                        loadingOlder = false;
                     }
                     if (native && Environment.TickCount64 >= nextTick)
                     {
                         nextTick = Environment.TickCount64 + (tf < 60 ? 4000 : 12000);
                         bool initial = !historyLoaded;
-                        bool found = await Page(Boundary(tf), initial ? CandlePlot.InitialHistoryBars(tf) : 4, prepend: false);
+                        bool found = await Page(Boundary(tf, offset), initial ? CandlePlot.InitialHistoryBars(tf) : 4, prepend: false);
                         if (initial && found && tf < 60) olderRequested |= plot.MissingHistoryBars(nextPage) > 0;
                     }
                     if (native && candles.Count >= LiveCandles.MaxBars) { finished = true; coverage = "Достигнут локальный предел 12 000 свечей"; }
@@ -364,8 +368,11 @@ internal sealed class ChartCell : Border
                 }
                 catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
-                    detail.Text = candles.Count == 0 ? "Свечи недоступны · повтор через 12 с" : "Свечи не обновились · повтор через 12 с";
-                    detail.ToolTip = ex is OperationCanceledException ? "Тайм-аут" : ex.Message;
+                    if (loadingOlder) olderRequested = true;
+                    detail.Text = loadingOlder ? "История слева не загрузилась · повтор через 12 с" :
+                        !historyLoaded ? "История не загрузилась полностью · повтор через 12 с" :
+                        "Свечи не обновились · повтор через 12 с";
+                    detail.ToolTip = ExchangeApi.ConnectionProblem(ex) ?? ex.Message;
                     await Task.Delay(12000, ct);
                 }
                 await Task.Delay(native ? 300 : 450, ct);
@@ -377,8 +384,19 @@ internal sealed class ChartCell : Border
         async Task<bool> Page(long before, int count, bool prepend)
         {
             if (before <= 0) { finished = true; return false; }
-            long requestedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            var result = await api.CandlePage(instrument, tf, before, count, ct);
+            long requestedAt = api.CandleNow;
+            var partial = new List<Candle>();
+            Candle[] result;
+            try
+            {
+                result = await api.CandlePage(instrument, tf, before, count, ct, partial.AddRange);
+            }
+            catch (Exception) when (!ct.IsCancellationRequested && partial.Count > 0)
+            {
+                candles.AddHistory(partial, requestedAt);
+                Draw();
+                throw;
+            }
             ct.ThrowIfCancellationRequested();
             if (prepend || !historyLoaded) nextPage = result.Length > 0 ? result[0].Time : before - tf * count * 1000L;
             if (result.Length > 0)
@@ -407,7 +425,11 @@ internal sealed class ChartCell : Border
         }
     }
 
-    private static long Boundary(int tf) => (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / (tf * 1000L) + 1) * tf * 1000L;
+    private long Boundary(int tf, long offset)
+    {
+        long interval = tf * 1000L;
+        return ExchangeApi.CandleStart(api.CandleNow, interval, offset) + interval;
+    }
 
     private async Task StreamTrades(Market selected, Action<Trade> publish, CancellationToken ct)
     {

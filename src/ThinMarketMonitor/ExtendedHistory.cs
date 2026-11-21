@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Net.Http;
 using System.Text.Json;
 
 namespace ThinMarketMonitor;
@@ -16,7 +17,8 @@ internal sealed partial class ExchangeApi
     private static string HtxParameter(Market m) => m.Contract?.Product is "linear" or "inverse" ? "contract_code" : "symbol";
     private static string WeexMarket(Market m) => m.Contract == null ? WeexSpot + "market/" : WeexFutures;
 
-    private async Task<Candle[]> ExtendedCandlePage(Market m, int frame, long before, int count, CancellationToken ct)
+    private async Task<Candle[]> ExtendedCandlePage(Market m, int frame, long before, int count, CancellationToken ct,
+        Action<Candle[]>? onBatch)
     {
         if (frame < 60) return [];
         long unit = frame * 1000L;
@@ -27,13 +29,13 @@ internal sealed partial class ExchangeApi
             60 => "1m", 300 => "5m", 900 => "15m", 3600 => "1h", 14400 => "4h", 86400 => "1d",
             _ => throw new ArgumentOutOfRangeException(nameof(frame))
         };
-        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        long current = (now / unit + 1) * unit;
-        bool latestWeex = m.Venue == Venue.Weex && before == current && count <= (m.Contract == null ? 100 : 1000);
-        bool latestOnly = latestWeex || m.Venue is Venue.Kraken or Venue.Htx && m.Contract == null;
-        int limit = m.Venue == Venue.Kraken && m.Contract == null ? 720 : m.Venue == Venue.Weex ? 1000 : 2000;
+        long now = CandleNow;
+        long open = CandleStart(now, unit, CandleOffset(m, frame));
+        long current = open + unit;
+        bool latestOnly = m.Venue is Venue.Kraken or Venue.Htx && m.Contract == null;
         if (latestOnly)
         {
+            int limit = m.Venue == Venue.Kraken ? 720 : 2000;
             int offset = (int)Math.Clamp((current - before) / unit, 0, limit);
             if (offset >= limit) return [];
             int size = Math.Min(limit, count + offset + 1);
@@ -41,18 +43,42 @@ internal sealed partial class ExchangeApi
         }
         var result = new List<Candle>();
         int page = m.Venue switch { Venue.Hyperliquid => 500, Venue.Lighter => 240, Venue.Weex => 100, _ => 450 };
-        for (long end = before; end > start;)
+        long end = before;
+        if (m.Venue == Venue.Weex)
+        {
+            // The range endpoint rejects an endTime inside the open candle. The latest endpoint supplies it.
+            if (before >= current)
+            {
+                int limit = Math.Min(count, m.Contract == null ? 100 : 1000);
+                var latest = await ReadWeex($"klines?symbol={symbol}&interval={interval}&limit={limit}");
+                var bars = InRange(latest, start, before);
+                AddBatch(bars);
+                if (bars.Length != 0) end = bars[0].Time;
+            }
+            end = Math.Min(end, open);
+        }
+        while (end > start)
         {
             long first = Math.Max(start, end - unit * page);
-            result.AddRange(await Page(first, end, (int)Math.Ceiling((end - first) / (double)unit)));
+            AddBatch(await Page(first, end, (int)Math.Ceiling((end - first) / (double)unit)));
             end = first;
         }
         return result.DistinctBy(x => x.Time).OrderBy(x => x.Time).ToArray();
 
+        void AddBatch(Candle[] bars)
+        {
+            if (bars.Length == 0) return;
+            result.AddRange(bars);
+            onBatch?.Invoke(bars);
+        }
+
         async Task<Candle[]> Page(long from, long until, int size)
         {
             JsonElement root;
-            if (m.Venue == Venue.Hyperliquid)
+            if (m.Venue == Venue.Weex)
+                root = await ReadWeex($"historyKlines?symbol={symbol}&interval={interval}&limit={size}" +
+                    $"&startTime={from}&endTime={until - 1}" + (m.Contract == null ? "" : "&priceType=LAST"));
+            else if (m.Venue == Venue.Hyperliquid)
                 root = await HyperInfo("candleSnapshot", ct, req: new { coin = m.Symbol, interval, startTime = from, endTime = until - 1 });
             else
             {
@@ -61,20 +87,46 @@ internal sealed partial class ExchangeApi
                     Venue.Htx => HtxMarket(m) + $"history/kline?{HtxParameter(m)}={symbol}&period={HtxInterval(frame)}" +
                         (latestOnly ? $"&size={size}" : $"&from={from / 1000}&to={(until - 1) / 1000}"),
                     Venue.Kraken when m.Contract == null => KrakenSpot + $"OHLC?pair={Uri.EscapeDataString(m.RestSymbol)}&interval={frame / 60}&since={from / 1000}",
-                    Venue.Kraken => KrakenCharts + $"{symbol}/{interval}?from={from / 1000}&to={(until - 1) / 1000}",
-                    Venue.Weex when latestWeex => WeexMarket(m) + $"klines?symbol={symbol}&interval={interval}&limit={Math.Min(size, limit)}",
-                    Venue.Weex => WeexMarket(m) + $"historyKlines?symbol={symbol}&interval={interval}&limit={size}" +
-                        $"&startTime={from}&endTime={Math.Min(now, until - 1)}" + (m.Contract == null ? "" : "&priceType=LAST"),
+                    Venue.Kraken => KrakenCharts + $"{symbol}/{interval}?from={from / 1000}&to={(until - 1) / 1000}&count={size}",
                     Venue.Lighter => Lighter + $"candles?market_id={symbol}&resolution={interval}&start_timestamp={from}&end_timestamp={until - 1}&count_back={size}",
                     _ => throw new ArgumentOutOfRangeException(nameof(m))
                 };
                 await PaceHistory(m.Venue, ct);
                 root = await Get(url, ct);
             }
-            return DecodeExtendedCandles(m, root).Where(c => c.Time >= from && c.Time < until && c.Low > 0 &&
+            return InRange(root, from, until);
+        }
+
+        Candle[] InRange(JsonElement root, long from, long until)
+        {
+            var inRange = DecodeExtendedCandles(m, root).Where(c => c.Time >= from && c.Time < until).ToArray();
+            var valid = inRange.Where(c => c.Low > 0 &&
                 double.IsFinite(c.High) && double.IsFinite(c.Open) && double.IsFinite(c.Close) &&
                 c.High >= Math.Max(c.Open, c.Close) && c.Low <= Math.Min(c.Open, c.Close))
                 .DistinctBy(c => c.Time).OrderBy(c => c.Time).ToArray();
+            if (inRange.Length != 0 && valid.Length == 0) throw new JsonException($"{m.Venue.Label()} · некорректные цены свечей");
+            return valid;
+        }
+
+        async Task<JsonElement> ReadWeex(string path)
+        {
+            await PaceHistory(Venue.Weex, ct);
+            using var response = await http.GetAsync(WeexMarket(m) + path, ct);
+            try
+            {
+                using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+                var root = json.RootElement;
+                if (root.ValueKind == JsonValueKind.Object && root.Optional("msg") is { Length: > 0 } message)
+                    throw new HttpRequestException($"WEEX · HTTP {(int)response.StatusCode} · {root.Optional("code")} {message}",
+                        null, response.StatusCode);
+                response.EnsureSuccessStatusCode();
+                return root.Clone();
+            }
+            catch (JsonException) when (!response.IsSuccessStatusCode)
+            {
+                response.EnsureSuccessStatusCode();
+                throw;
+            }
         }
     }
 

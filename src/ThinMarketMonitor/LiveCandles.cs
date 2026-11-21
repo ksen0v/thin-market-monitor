@@ -1,6 +1,6 @@
 namespace ThinMarketMonitor;
 
-internal sealed class LiveCandles(int frame)
+internal sealed class LiveCandles(int frame, long offset = 0)
 {
     public const int MaxBars = 12_000;
     private readonly long interval = frame * 1000L;
@@ -11,7 +11,7 @@ internal sealed class LiveCandles(int frame)
     public void Add(Trade trade)
     {
         if (trade.Time <= 0 || trade.Price <= 0 || !double.IsFinite(trade.Price)) return;
-        long time = trade.Time / interval * interval;
+        long time = ExchangeApi.CandleStart(trade.Time, interval, offset);
         var bar = GetBar(time);
         if (!bar.Closed) bar.Add(trade);
         Trim();

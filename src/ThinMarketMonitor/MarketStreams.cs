@@ -259,13 +259,13 @@ internal sealed class MarketStreams : IDisposable
                 }
                 catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
-                    string detail = ex switch
+                    string detail = ExchangeApi.ConnectionProblem(ex) ?? (ex switch
                     {
                         WebSocketException => "WebSocket недоступен",
                         HttpRequestException h when h.StatusCode.HasValue => $"HTTP {(int)h.StatusCode.Value}",
                         OperationCanceledException => "тайм-аут",
                         _ => ex.Message
-                    };
+                    });
                     feeds[id] = new(source, markets.Length, false, detail);
                 }
                 finally

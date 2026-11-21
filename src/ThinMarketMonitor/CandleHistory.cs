@@ -53,9 +53,17 @@ internal sealed partial class ExchangeApi
 
     public static bool NativeSeconds(Market m) => m.Venue is Venue.Alpha or Venue.Okx || (m.Venue == Venue.Binance && m.Contract == null);
 
-    public async Task<Candle[]> CandlePage(Market m, int frame, long before, int count, CancellationToken ct)
+    // HTX daily candles open at midnight UTC+8.
+    internal static long CandleOffset(Market m, int frame) =>
+        m.Venue == Venue.Htx && frame == 86400 ? 16 * 3_600_000L : 0;
+
+    internal static long CandleStart(long time, long interval, long offset = 0) =>
+        time - ((time - offset) % interval + interval) % interval;
+
+    public async Task<Candle[]> CandlePage(Market m, int frame, long before, int count, CancellationToken ct,
+        Action<Candle[]>? onBatch = null)
     {
-        if (m.Venue.Extended()) return await ExtendedCandlePage(m, frame, before, count, ct);
+        if (m.Venue.Extended()) return await ExtendedCandlePage(m, frame, before, count, ct, onBatch);
         int sourceFrame = frame < 60 ? 1 : frame;
         long low = Math.Max(0, before - (long)frame * count * 1000);
         var bars = new List<Candle>();

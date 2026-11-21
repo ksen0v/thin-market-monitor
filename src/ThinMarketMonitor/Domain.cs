@@ -62,7 +62,7 @@ internal record ChartGesture(Key Key, MouseButton? Mouse = null)
     public static bool Bindable(Key key) => key is >= Key.A and <= Key.Z or >= Key.D0 and <= Key.D9
         or >= Key.F1 and <= Key.F24 or >= Key.NumPad0 and <= Key.NumPad9 or Key.Space;
 }
-internal record Catalog(IReadOnlyList<Market> Markets, string? Error = null);
+internal record Catalog(IReadOnlyList<Market> Markets, string? Error = null, bool ConnectionFailed = false);
 internal record CellChoice(string Key, bool Pinned, long Order = 0, int Frame = 60);
 internal record FilterResult(IReadOnlyList<Market> Markets, IReadOnlyList<MarketSource> Missing);
 internal static class Frames
