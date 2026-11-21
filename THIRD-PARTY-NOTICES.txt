@@ -23,6 +23,15 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+Additional exchange marks
+HTX: https://square.htx.com/
+Kraken: https://www.kraken.com/press
+WEEX: https://www.weex.com/Media-kit
+Lighter: https://lighter.xyz/brand-kit
+Hyperliquid™: https://hyperliquid.gitbook.io/hyperliquid-docs/brand-kit
+
+The marks identify their respective exchanges. The Hyperliquid™ mark is owned by Hyper Foundation.
+
 Interface icons adapted from Lucide
 https://lucide.dev/
 

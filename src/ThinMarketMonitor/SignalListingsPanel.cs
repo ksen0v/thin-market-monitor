@@ -71,7 +71,7 @@ internal sealed class SignalListingsPanel : Border
             logo.Margin = new Thickness(0, 0, 0, 14);
             content.Children.Add(new TextBlock
             {
-                Text = venue == Venue.Alpha ? "Alpha" : venue.Extended() ? $"{venue.Label()} · {source.Segment}" : source.Segment.ToString(), FontSize = 10,
+                Text = venue == Venue.Alpha ? "Alpha" : source.Segment.ToString(), FontSize = 10,
                 HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Bottom,
                 Margin = new Thickness(0, 0, 0, 3)
             });
