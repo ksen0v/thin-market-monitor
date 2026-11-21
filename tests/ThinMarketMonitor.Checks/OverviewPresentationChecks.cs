@@ -20,8 +20,9 @@ internal static class OverviewPresentationChecks
         CompactMetrics();
         await ColumnsAndBookmarks();
         await DrawerAndSettings();
+        await QuoteFilterKeepsPosition();
         await LeveragedPairs();
-        Console.WriteLine("Overview compact metrics, column fitting, drawer resizing, bookmark grouping and fixed settings size passed.");
+        Console.WriteLine("Overview quote filters preserve position and selection. Compact metrics, column fitting, bookmarks and settings size passed.");
     }
 
     private static void CompactMetrics()
@@ -298,6 +299,95 @@ internal static class OverviewPresentationChecks
             }
         }
         finally { window.Close(); }
+    }
+
+    private static async Task QuoteFilterKeepsPosition()
+    {
+        var source = new MarketSource(Venue.Kraken);
+        var turnover = new OverviewColumn(MetricKind.Turnover, 1440);
+        var settings = new Settings
+        {
+            Overview = true, OverviewSource = source, OverviewColumns = [turnover], OverviewSort = 0, OverviewDescending = true
+        };
+        var markets = Enumerable.Range(0, 60).SelectMany(i => new[] { "USDC", "USDT" }.Select(quote =>
+            new Market(source.Venue, $"M{i:00}/{quote}", $"M{i:00}", quote))).ToArray();
+        using var http = new HttpClient(new PendingMetrics());
+        using var window = new MainWindow(false, settings, testHttp: http) { Width = 1060, Height = 680 };
+        Field<Dictionary<MarketSource, Catalog>>(window, "catalogs")[source] = new(markets);
+        typeof(MainWindow).GetMethod("RefreshOverview", Instance)!.Invoke(window, null);
+        var panel = Field<OverviewPanel>(window, "overviewPanel");
+        var grid = Field<DataGrid>(panel, "table");
+        window.Show();
+        try
+        {
+            await Layout(window);
+            var scroll = (ScrollViewer)grid.Template.FindName("DG_ScrollViewer", grid)!;
+            var rows = grid.Items.Cast<OverviewPanel.Row>().ToArray();
+            for (int i = 0; i < rows.Length; i++) rows[i].Set([100_000 - i], settings.OverviewColumns);
+            var selection = rows[53];
+            grid.SelectedItem = selection;
+            grid.CurrentCell = new DataGridCellInfo(selection, grid.Columns[1]);
+            var chart = Field<ChartCell>(window, "overviewChart");
+            int navigations = 0;
+            panel.UserSelected += _ => navigations++;
+            var settingsButton = (Button)window.FindName("SettingsButton");
+            settingsButton.Focus();
+            settingsButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            var dialog = Field<SettingsPanel>(window, "settingsPanel");
+            var quotes = Field<WrapPanel>(dialog, "overviewQuotes");
+            await ScrollTo(37);
+            var anchor = TopRow();
+            Check(anchor == rows[37] && anchor.Market.Quote == "USDT", "a USDT row is at the top of a scrolled mixed list");
+
+            ToggleUsdc(false);
+            await Layout(window);
+            Check(TopRow() == anchor && grid.Items.Count == 60 && grid.Items.Cast<OverviewPanel.Row>().All(r => r.Market.Quote == "USDT"),
+                $"removing USDC keeps the same USDT row at the top (offset {scroll.VerticalOffset})");
+            ToggleUsdc(true);
+            await Layout(window);
+            Check(TopRow() == anchor && grid.Items.Count == 120 && grid.Items[0] == rows[0] && rows[0].Number(0) == 100_000,
+                "adding USDC back keeps the viewport and the already sorted turnover values");
+
+            await ScrollTo(42);
+            Check(TopRow() == rows[42] && TopRow().Market.Quote == "USDC", "an excluded USDC row is now the first visible row");
+            ToggleUsdc(false);
+            await Layout(window);
+            Check(TopRow() == rows[43], "when the top row is hidden, the next nearest USDT row becomes the anchor");
+            ToggleUsdc(true);
+            ToggleUsdc(false);
+            await Layout(window);
+            Check(TopRow() == rows[43] && grid.Items.Count == 60, "rapid changes use the pending viewport for the next filter change");
+            Descendants(dialog).OfType<Button>().Single(b => Equals(b.Content, "Готово")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await Layout(window);
+            Check(TopRow() == rows[43] && grid.SelectedItem == selection && ReferenceEquals(grid.CurrentCell.Item, selection) &&
+                chart.Choice?.Key == selection.Market.Key && navigations == 0,
+                "closing settings keeps the viewport, current cell, chart and exact selection without Colibri navigation");
+
+            async Task ScrollTo(int index)
+            {
+                scroll.ScrollToVerticalOffset(index);
+                await Until(() => scroll.VerticalOffset == index);
+            }
+
+            OverviewPanel.Row TopRow() => (OverviewPanel.Row)grid.Items[(int)scroll.VerticalOffset];
+
+            void ToggleUsdc(bool enabled)
+            {
+                var button = quotes.Children.OfType<ToggleButton>().Single(b => Equals(b.Content, "USDC"));
+                button.IsChecked = enabled;
+                button.RaiseEvent(new RoutedEventArgs(ToggleButton.ClickEvent));
+            }
+        }
+        finally { window.Close(); }
+    }
+
+    private sealed class PendingMetrics : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            await Task.Delay(Timeout.Infinite, ct);
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+        }
     }
 
     private sealed class NoUpdates : HttpMessageHandler

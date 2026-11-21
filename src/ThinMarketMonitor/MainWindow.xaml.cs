@@ -320,8 +320,6 @@ public partial class MainWindow : Window, IDisposable
         OverviewDrawerHost.Visibility = settings.OverviewDrawer ? Visibility.Visible : Visibility.Collapsed;
         UpdateOverviewDrawerWidth();
         var result = ListingFilter.Apply(catalogs, settings.OverviewRule, settings.OverviewSource);
-        var shown = settings.OverviewQuotes == null && !settings.HideOverviewLeveragedTokens
-            ? result.Markets : result.Markets.Where(settings.ShowsOverviewMarket).ToArray();
         int unavailable = result.Missing.Count(source => catalogs.GetValueOrDefault(source)?.Error != null);
         string? pending = result.Missing.Count == 0 ? null : unavailable > 0
             ? $"Недоступно каталогов: {unavailable} · фильтр ожидает данные"
@@ -329,9 +327,9 @@ public partial class MainWindow : Window, IDisposable
         string? details = result.Missing.Count == 0 ? null : string.Join("\n", result.Missing.Select(source =>
             $"{source.Label} · {catalogs.GetValueOrDefault(source)?.Error ?? "загрузка"}"));
         if (overviewChart.Choice?.Key != settings.OverviewChoice?.Key) overviewChart.Choice = settings.OverviewChoice;
-        overviewChart.Resolve(shown.FirstOrDefault(m => m.Key == settings.OverviewChoice?.Key));
+        overviewChart.Resolve(result.Markets.FirstOrDefault(m => m.Key == settings.OverviewChoice?.Key && settings.ShowsOverviewMarket(m)));
         overviewChart.Activate(settings.Overview);
-        overviewPanel.SetSource(shown, settings.Overview && settings.OverviewDrawer, pending, details);
+        overviewPanel.SetSource(result.Markets, settings.Overview && settings.OverviewDrawer, pending, details);
         settingsPanel?.UpdateQuoteChoices(OverviewSourceQuotes());
     }
 

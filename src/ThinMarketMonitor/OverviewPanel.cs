@@ -101,9 +101,12 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
         BorderThickness = new Thickness(0)
     };
     private readonly TextBlock status = new() { TextTrimming = TextTrimming.CharacterEllipsis };
+    private readonly Dictionary<string, Row> catalogRows = new(StringComparer.Ordinal);
     private Row[] rows = [];
     private ListCollectionView view;
-    private DispatcherOperation? headerScrollReset;
+    private sealed record Viewport(Row? TopRow, int Offset, double? HorizontalOffset = null);
+    private DispatcherOperation? viewportUpdate;
+    private Viewport? pendingViewport;
     private CancellationTokenSource? worker;
     private OverviewSpreadSampler? spreadQuotes;
     private readonly TimeSpan spreadInterval;
@@ -422,34 +425,66 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
     {
         shown = visible;
         catalogDetails = details;
-        if (!loadedCatalog || boundSource != settings.OverviewSource || markets.Length != next.Count ||
-            !markets.ToHashSet().SetEquals(next))
+        bool sameSource = loadedCatalog && boundSource == settings.OverviewSource;
+        var matching = settings.OverviewQuotes == null && !settings.HideOverviewLeveragedTokens
+            ? next : next.Where(settings.ShowsOverviewMarket).ToArray();
+        if (!sameSource) catalogRows.Clear();
+        else if (catalogRows.Count != 0)
         {
-            CancelHeaderScroll();
+            var keys = next.Select(m => m.Key).ToHashSet(StringComparer.Ordinal);
+            foreach (var key in catalogRows.Keys.Where(key => !keys.Contains(key)).ToArray()) catalogRows.Remove(key);
+        }
+        if (!sameSource || markets.Length != matching.Count || !markets.ToHashSet().SetEquals(matching))
+        {
+            var previouslyVisible = rows.ToHashSet();
+            markets = matching.ToArray();
+            var replacement = markets.OrderBy(m => m.Symbol, StringComparer.Ordinal).ThenBy(m => m.Contract?.Product)
+                .Select(market => GetCatalogRow(market, previouslyVisible)).ToArray();
+            var nextRows = replacement.ToDictionary(row => row.Market.Key, StringComparer.Ordinal);
+            Viewport viewport = sameSource ? CaptureViewport(nextRows) : new(null, 0);
+            CancelViewportUpdate();
+            var current = sameSource ? table.CurrentCell : default;
+            string? selectedKey = settings.OverviewChoice?.Key ??
+                (sameSource ? (table.SelectedItem as Row)?.Market.Key : null);
             loadedCatalog = true;
             boundSource = settings.OverviewSource;
-            markets = next.ToArray();
-            loadingSelection = true;
-            rows = next.OrderBy(m => m.Symbol, StringComparer.Ordinal).ThenBy(m => m.Contract?.Product)
-                .Select(market => new Row(market, columns, BookmarkFor(market))).ToArray();
+            rows = replacement;
             tickerFit = 0;
-            Array.Clear(metricFits);
+            if (!sameSource) Array.Clear(metricFits);
             QueueColumnFit();
             bookmarkMenu?.SetCurrentValue(ContextMenu.IsOpenProperty, false);
-            view = new ListCollectionView(rows);
-            table.ItemsSource = view;
-            Sort();
-            var selected = rows.FirstOrDefault(r => r.Market.Key == settings.OverviewChoice?.Key);
-            if (selected == null) table.CurrentCell = default;
-            table.SelectedItem = selected;
-            TableScroll?.ScrollToTop();
-            loadingSelection = false;
+            loadingSelection = true;
+            try
+            {
+                view = new ListCollectionView(rows) { CustomSort = CurrentComparer() };
+                table.ItemsSource = view;
+                table.SelectedItem = selectedKey == null ? null : nextRows.GetValueOrDefault(selectedKey);
+                if (current.IsValid && current.Item is Row old && table.Columns.Contains(current.Column) &&
+                    nextRows.TryGetValue(old.Market.Key, out var currentRow))
+                    table.CurrentCell = new DataGridCellInfo(currentRow, current.Column);
+                else if (table.SelectedItem == null) table.CurrentCell = default;
+            }
+            finally { loadingSelection = false; }
+            if (sameSource) QueueViewportUpdate(viewport);
+            ApplyViewport(viewport);
             Restart();
         }
         else if (visible && worker == null && rows.Length > 0 && columns.Length > 0) Restart();
         else if (!visible) Cancel();
-        if (next.Count == 0) status.Text = pending ?? "Нет инструментов по этим условиям";
+        if (matching.Count == 0) status.Text = pending ?? "Нет инструментов по этим условиям";
         UpdateStatusTip();
+    }
+
+    private Row GetCatalogRow(Market market, HashSet<Row> previouslyVisible)
+    {
+        if (!catalogRows.TryGetValue(market.Key, out var row) || row.Market != market)
+            return catalogRows[market.Key] = new Row(market, columns, BookmarkFor(market));
+        if (!previouslyVisible.Contains(row))
+        {
+            row.UpdateColumns(columns);
+            if (row.SetSpread(null).StateChanged) row.NotifySpread();
+        }
+        return row;
     }
 
     private bool SortingSpread => settings.OverviewSort >= 0 && settings.OverviewSort < columns.Length &&
@@ -459,27 +494,65 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
 
     private void SortFromHeader()
     {
-        CancelHeaderScroll();
-        // A metric refresh in the same layout pass must use the header's new viewport.
-        headerScrollReset = Dispatcher.InvokeAsync(() =>
-        {
-            TableScroll?.ScrollToTop();
-            table.UpdateLayout();
-            headerScrollReset = null;
-        }, DispatcherPriority.Loaded);
+        var top = new Viewport(null, 0);
+        QueueViewportUpdate(top);
         Sort();
-        TableScroll?.ScrollToTop();
+        ApplyViewport(top);
     }
 
-    private void CancelHeaderScroll()
+    private Viewport CaptureViewport(IReadOnlyDictionary<string, Row> nextRows)
     {
-        headerScrollReset?.Abort();
-        headerScrollReset = null;
+        var scroll = TableScroll;
+        int position = pendingViewport?.TopRow is { } pendingRow ? table.Items.IndexOf(pendingRow) : -1;
+        int offset = position >= 0 ? position : pendingViewport?.Offset ?? (int)(scroll?.VerticalOffset ?? 0);
+        double horizontal = pendingViewport?.HorizontalOffset ?? scroll?.HorizontalOffset ?? 0;
+        if (offset == 0 || nextRows.Count == 0) return new(null, offset, horizontal);
+        int count = table.Items.Count;
+        int top = Math.Clamp(offset, 0, Math.Max(0, count - 1));
+        // When a quote is hidden, prefer the next surviving row at the same distance.
+        for (int distance = 0; distance < count; distance++)
+        {
+            if (top + distance < count && nextRows.TryGetValue(((Row)table.Items[top + distance]).Market.Key, out var after))
+                return new(after, offset, horizontal);
+            if (distance > 0 && top - distance >= 0 && nextRows.TryGetValue(((Row)table.Items[top - distance]).Market.Key, out var before))
+                return new(before, offset, horizontal);
+        }
+        return new(null, offset, horizontal);
     }
+
+    private void QueueViewportUpdate(Viewport viewport)
+    {
+        CancelViewportUpdate();
+        pendingViewport = viewport;
+        viewportUpdate = Dispatcher.InvokeAsync(() =>
+        {
+            ApplyViewport(viewport);
+            table.UpdateLayout();
+            pendingViewport = null;
+            viewportUpdate = null;
+        }, DispatcherPriority.Loaded);
+    }
+
+    private void CancelViewportUpdate()
+    {
+        viewportUpdate?.Abort();
+        viewportUpdate = null;
+        pendingViewport = null;
+    }
+
+    private void ApplyViewport(Viewport viewport)
+    {
+        if (TableScroll is not { } scroll) return;
+        int index = viewport.TopRow == null ? -1 : table.Items.IndexOf(viewport.TopRow);
+        scroll.ScrollToVerticalOffset(index >= 0 ? index : viewport.Offset);
+        if (viewport.HorizontalOffset is { } horizontal) scroll.ScrollToHorizontalOffset(horizontal);
+    }
+
+    private RowComparer CurrentComparer() => new(settings.OverviewSort, settings.OverviewDescending, settings.OverviewBookmarkPriority);
 
     private void Sort()
     {
-        SortRows(new RowComparer(settings.OverviewSort, settings.OverviewDescending, settings.OverviewBookmarkPriority));
+        SortRows(CurrentComparer());
         for (int i = 0; i < table.Columns.Count; i++)
             table.Columns[i].SortDirection = i - 1 == settings.OverviewSort
                 ? settings.OverviewDescending ? ListSortDirection.Descending : ListSortDirection.Ascending : null;
@@ -640,7 +713,7 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
 
     private void SortRows(IComparer? sort = null)
     {
-        var scroll = headerScrollReset == null ? TableScroll : null;
+        var scroll = pendingViewport == null ? TableScroll : null;
         int top = (int)(scroll?.VerticalOffset ?? 0);
         var anchor = top < table.Items.Count ? table.Items[top] : null;
         double horizontal = scroll?.HorizontalOffset ?? 0;
@@ -698,7 +771,7 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
     {
         fitTimer.Stop();
         if (bookmarkMenu != null) bookmarkMenu.IsOpen = false;
-        CancelHeaderScroll();
+        CancelViewportUpdate();
         sourceMenu.IsOpen = false;
         Cancel();
     }
