@@ -14,7 +14,10 @@ internal sealed partial class ExchangeApi
     private readonly ConcurrentDictionary<string, TickerCache> tickers = new(StringComparer.Ordinal);
 
     // Shared by volume/overview tickers and spread batches. The original receipt time is preserved.
-    private async Task<(JsonElement Root, long Time)> TickerBatch(string url, CancellationToken ct)
+    private Task<(JsonElement Root, long Time)> TickerBatch(string url, CancellationToken ct) =>
+        CachedTicker(url, token => Get(url, token), ct);
+
+    private async Task<(JsonElement Root, long Time)> CachedTicker(string url, Func<CancellationToken, Task<JsonElement>> fetch, CancellationToken ct)
     {
         var cache = tickers.GetOrAdd(url, _ => new());
         await cache.Gate.WaitAsync(ct);
@@ -23,7 +26,7 @@ internal sealed partial class ExchangeApi
             long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             if (cache.Time == 0 || now - cache.Time >= 2000)
             {
-                cache.Root = await Get(url, ct);
+                cache.Root = await fetch(ct);
                 cache.Time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             }
             return (cache.Root, cache.Time);
@@ -54,10 +57,14 @@ internal sealed partial class ExchangeApi
     {
         null => Enum.IsDefined(m.Venue),
         "usdm" or "coinm" => m.Venue == Venue.Binance,
-        "linear" or "inverse" => m.Venue == Venue.Bybit,
+        "linear" => m.Venue is Venue.Bybit or Venue.Htx or Venue.Weex,
+        "inverse" => m.Venue is Venue.Bybit or Venue.Htx,
         "SWAP" or "FUTURES" => m.Venue == Venue.Okx,
         "USDT-FUTURES" or "USDC-FUTURES" or "COIN-FUTURES" => m.Venue == Venue.Bitget,
         "contract" => m.Venue is Venue.Mexc or Venue.KuCoin,
+        "delivery" => m.Venue == Venue.Htx,
+        "derivatives" => m.Venue == Venue.Kraken,
+        "perp" => m.Venue is Venue.Lighter or Venue.Hyperliquid,
         "futures/usdt" or "futures/btc" or "futures/usd1" or "delivery/usdt" or "delivery/btc" => m.Venue == Venue.Gate,
         _ => false
     };
@@ -83,10 +90,15 @@ internal sealed partial class ExchangeApi
     public async Task<Dictionary<string, SpreadQuote>> BestQuotes(Market[] markets, CancellationToken ct)
     {
         var output = new Dictionary<string, SpreadQuote>(StringComparer.Ordinal);
-        foreach (var group in markets.Where(SpreadSupported).Where(m => m.Venue != Venue.Alpha)
+        foreach (var group in markets.Where(SpreadSupported).Where(m => !StreamedBook(m.Venue))
                      .GroupBy(m => (m.Source, m.Contract?.Product)))
         {
             var first = group.First();
+            if (first.Venue.Extended())
+            {
+                await AddExtendedQuotes(group.ToArray(), output, ct);
+                continue;
+            }
             var (root, time) = await TickerBatch(TickerUrl(first, book: true)!, ct);
             // Generation times belong to the snapshot, not the last trade (KuCoin futures ts).
             if (first.Venue == Venue.Bybit) time = SnapshotTime(root.Number("time"), time);

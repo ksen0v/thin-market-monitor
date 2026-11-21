@@ -67,6 +67,15 @@ internal static class Terminal
 
     public static FrameworkElement VenueLogo(Venue venue, double size)
     {
+        if (venue.Extended())
+        {
+            var mark = new TextBlock { Text = venue switch
+            {
+                Venue.Htx => "HTX", Venue.Kraken => "K", Venue.Weex => "W", Venue.Lighter => "L", _ => "HL"
+            }, Foreground = Brush("Accent"), FontWeight = FontWeights.SemiBold,
+                HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center, FontSize = 11 };
+            return new Viewbox { Child = mark, Width = size, Height = size, Stretch = Stretch.Uniform, StretchDirection = StretchDirection.DownOnly };
+        }
         string asset = (venue == Venue.Alpha ? Venue.Binance : venue).ToString().ToLowerInvariant();
         return AssetLogo(asset, size);
     }

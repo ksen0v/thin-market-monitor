@@ -7,6 +7,7 @@ internal sealed partial class ExchangeApi
 {
     public async Task<Trade[]> RecentTrades(Market m, CancellationToken ct)
     {
+        if (m.Venue.Extended()) return await ExtendedRecentTrades(m, ct);
         string s = Uri.EscapeDataString(m.Symbol);
         string? p = m.Contract?.Product;
         string? url = m.Venue switch
@@ -54,6 +55,7 @@ internal sealed partial class ExchangeApi
 
     public async Task<Candle[]> CandlePage(Market m, int frame, long before, int count, CancellationToken ct)
     {
+        if (m.Venue.Extended()) return await ExtendedCandlePage(m, frame, before, count, ct);
         int sourceFrame = frame < 60 ? 1 : frame;
         long low = Math.Max(0, before - (long)frame * count * 1000);
         var bars = new List<Candle>();
@@ -126,7 +128,11 @@ internal sealed partial class ExchangeApi
         {
             long wait = nextHistory[i] - Environment.TickCount64;
             if (wait > 0) await Task.Delay((int)wait, ct);
-            nextHistory[i] = Environment.TickCount64 + (venue is Venue.Mexc or Venue.Alpha ? 480 : 230);
+            nextHistory[i] = Environment.TickCount64 + (venue switch
+            {
+                Venue.Hyperliquid => 1700, Venue.Kraken => 1050, Venue.Lighter => 650,
+                Venue.Mexc or Venue.Alpha => 480, _ => 230
+            });
         }
         finally { gate.Release(); }
     }

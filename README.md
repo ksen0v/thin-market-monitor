@@ -14,9 +14,9 @@ Windows-приложение для фильтрации спотовых и ф�
 - ✓ — активный листинг обязателен. Несколько ✓ дают пересечение.
 - × — активного листинга быть не должно. Любая из бирж с × исключает совпадение.
 - — — сегмент игнорируется при сравнении. Если ✓ нет, исходный список берётся из доступных спотовых каталогов, включая Binance Alpha, без отметок.
-- У Binance, Bybit, OKX, Bitget, MEXC, KuCoin и Gate правила Spot и Futures задаются независимо. Binance Alpha настраивается отдельно. Правила прошлых версий переносятся в Spot.
+- У Binance, Bybit, OKX, Bitget, MEXC, KuCoin, Gate, HTX, Kraken, WEEX, Lighter и Hyperliquid правила Spot и Futures задаются независимо. Binance Alpha настраивается отдельно. Новые источники изначально нейтральны.
 - Кнопка сегмента переключает состояния —, ✓ и ×. Каталоги обновляются при запуске и каждые пять минут. При ошибке любого каталога с ✓ или × список и сигналы приостанавливаются. Состояние каталога видно на главном экране, подробности — в подсказке.
-- Активные пары сопоставляются по базовой валюте. Например, `AKE-USDT`, `AKEUSDT` и `AKEUSDTM` соответствуют `AKE`. Binance Alpha берёт тикер из списка токенов по Alpha ID. Фьючерсные псевдонимы заданы явно для конкретных бирж. Совпадения тикеров могут объединить разные активы, если они используют одно имя.
+- Активные пары сопоставляются по базовому активу. Например, `AKE-USDT`, `AKEUSDT` и `AKEUSDTM` соответствуют `AKE`. При выборе рынка пары с USD, USDT и USDC сохраняются отдельно там, где они существуют. Где биржа сообщает отдельные идентификаторы одноимённых токенов и рынков, они используются при сравнении листингов. В остальных случаях сравнение использует тикер с подтверждёнными биржевыми псевдонимами.
 - При наличии ✓ исходный рынок выбирается среди отмеченных сегментов. При наличии публичного потока сделки доступны для сигналов. Срочные контракты Gate Delivery доступны в каталоге и на графике, без потока сигналов. USD-оборот для расчётов по сделкам требует подтверждённого размера контракта.
 
 ## Графики и обзор
@@ -27,6 +27,18 @@ Windows-приложение для фильтрации спотовых и ф�
 - При открытии график показывает окно на 220 интервалов и оставляет 20% ширины справа от последней свечи. Колесом можно отдалиться до 6000 интервалов. Доступная история зависит от биржи, инструмента и таймфрейма.
 - «Обзор» открывает отдельный график и таблицу активных инструментов выбранного сегмента. Таблица сворачивается значком у правого края. Клик по строке открывает график. В меню бирж над таблицей клик по названию переключает условие по кругу: «—», «✓», «×». Меню остаётся открытым. Кнопка «Сменить источник» включает выбор биржи для таблицы. Сравнение идёт по базовой валюте. Без отметок виден весь выбранный сегмент. Для сигналов есть отдельная кнопка «Листинги» в верхней панели режима «Сигналы».
 - По умолчанию таблица отсортирована по тикеру и показывает оборот в USD и изменение цены за 24 часа. В «Настройки → Обзор» можно настроить периоды и добавить ATR %. Он рассчитывается как средний True Range за период, делённый на последнюю закрытую цену. Сигналы продолжают работать в фоне.
+
+### Площадки, добавленные в 0.8.0
+
+| Площадка | Spot | Futures |
+| --- | --- | --- |
+| HTX | Активные пары, включая USDT и USDC | Линейные USDT, инверсные бессрочные и срочные USD |
+| Kraken | Активные пары, включая USD, USDT и USDC | Бессрочные и срочные контракты из публичного каталога деривативов |
+| WEEX | Активные пары, включая USDT и USDC | Линейные бессрочные контракты. В проверенном каталоге котировка USDT |
+| Lighter | Активные пары по числовому ID рынка, включая USDC | Бессрочные контракты по числовому ID рынка |
+| Hyperliquid | Пары с подтверждённой торговой активностью по `PURR/USDC` и `@index` | Основные бессрочные контракты и HIP-3 с биржевым префиксом |
+
+На пяти площадках сделки и история берутся из публичных API. Секундная история до запуска ограничена последней выборкой сделок. У Hyperliquid и линейных Kraken Futures точный исторический оборот за короткие периоды из свечей недоступен. Для них доступен оборот за 24 часа из тикера и накопление оборота по живым сделкам. У Hyperliquid валюта расчёта основных контрактов хранится отдельно от валюты цены оракула и спотовой котировки.
 
 ## Фильтры объёма
 
@@ -78,8 +90,10 @@ Windows-приложение для фильтрации спотовых и ф�
 | KuCoin Spot, Futures | [Spot allTickers](https://www.kucoin.com/docs-new/rest/spot-trading/market-data/get-all-tickers/) и Futures `api/v1/allTickers` |
 | Gate Spot, perpetual USDT/BTC/USD1, delivery USDT/BTC | [Пакетные tickers](https://www.gate.com/docs/developers/apiv4/en/futures/), `highest_bid`, `lowest_ask` |
 | Binance Alpha | [WebSocket bookTicker](https://developers.binance.com/en/docs/catalog/advanced-trading-alpha-trading/api/ws-streams/~), до 100 символов на соединение |
+| HTX, Kraken, WEEX | Публичные REST-тикеры и лучшие bid/ask. У срочных контрактов HTX используется точный код с датой |
+| Lighter, Hyperliquid | Публичные WebSocket-каналы `ticker` и `bbo` соответственно |
 
-REST обновляется раз в пять секунд на биржу/продукт, без отдельных запросов к каждой монете. Общие пакетные тикеры переиспользуются с оборотом и обзором через двухсекундный кэш. При HTTP 429 пауза увеличивается до 90 секунд. Alpha использует подписки с постепенным подключением и повторными попытками с задержкой до минуты. Обновления таблицы и допуска сигналов проверяются раз в секунду.
+REST обновляется раз в пять секунд на биржу и продукт. Общие тикеры переиспользуются с оборотом и обзором через двухсекундный кэш. При HTTP 429 пауза увеличивается до 90 секунд. WebSocket-подписки подключаются постепенно, с повторными попытками. Обновления таблицы и допуска сигналов проверяются раз в секунду.
 
 Котировки старше 15 секунд, без одной из сторон, с нулевой ценой/известным нулевым размером или пересечёнными ценами считаются неизвестными. Где API передаёт время снимка/котировки, оно проверяется; иначе срок считается от получения успешного снимка REST. Время последней сделки KuCoin Futures не выдаётся за время bid/ask. Ошибка REST или разрыв WebSocket сразу сбрасывает данные соответствующей группы. В Alpha требуется первое обновление bookTicker каждой пары; малоподвижные пары могут ждать свежих данных. Счётчики ожидания и подробное покрытие по источникам доступны в статусе фильтра и подсказке таблицы. Все имеющиеся в каталоге типы рынков перечисленных источников поддержаны; неизвестные типы контрактов не допускаются с включённым фильтром.
 
@@ -101,6 +115,7 @@ REST обновляется раз в пять секунд на биржу/пр
 dotnet run --project tests/ThinMarketMonitor.Checks -c Release
 dotnet run --project tests/ThinMarketMonitor.Checks -c Release -- --live
 dotnet run --project tests/ThinMarketMonitor.Checks -c Release -- --segments
+dotnet run --project tests/ThinMarketMonitor.Checks -c Release -- --new-venues
 dotnet publish src/ThinMarketMonitor -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o artifacts/publish
 ```
 
@@ -111,3 +126,5 @@ dotnet publish src/ThinMarketMonitor -c Release -r win-x64 --self-contained -p:P
 ## Официальные API
 
 [Binance Spot](https://github.com/binance/binance-spot-api-docs) · [Bybit](https://bybit-exchange.github.io/docs/v5/intro) · [OKX](https://www.okx.com/docs-v5/en/) · [Bitget](https://www.bitget.com/legacy-docs/classic/quickStart/intro) · [MEXC](https://www.mexc.com/api-docs/spot-v3/websocket-market-streams) · [KuCoin](https://www.kucoin.com/docs-new) · [Gate](https://www.gate.com/docs/developers/apiv4/en/spot/) · [Binance Alpha REST](https://developers.binance.com/en/docs/catalog/advanced-trading-alpha-trading/api/rest-api/market-data) · [Binance Alpha WebSocket](https://developers.binance.com/en/docs/catalog/advanced-trading-alpha-trading/api/ws-streams/~)
+
+[HTX Spot](https://huobiapi.github.io/docs/spot/v1/en/) · [HTX USDT Futures](https://huobiapi.github.io/docs/usdt_swap/v1/en/) · [HTX Coin-M Futures](https://huobiapi.github.io/docs/coin_margined_swap/v1/en/) · [HTX Delivery](https://huobiapi.github.io/docs/dm/v1/en/) · [Kraken](https://docs.kraken.com/exchange/) · [WEEX](https://www.weex.com/api-doc/) · [Lighter](https://github.com/elliottech/lighter-python) · [Hyperliquid](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint)

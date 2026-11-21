@@ -417,6 +417,13 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
                 {
                     try { snapshots = await api.Snapshots(entries.Select(r => r.Market).ToArray(), ct); }
                     catch (Exception) when (!ct.IsCancellationRequested) { }
+                    foreach (var row in entries)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        if (!snapshots.TryGetValue(row.Market.Key, out var snapshot)) continue;
+                        row.Set(metrics.Select((metric, i) => SnapshotValue(metric, snapshot) ?? row.Number(i)).ToArray(), metrics);
+                    }
+                    if (snapshots.Count != 0 && settings.OverviewSort >= 0) RefreshSort();
                 }
                 int done = 0;
                 foreach (var row in entries)
@@ -433,9 +440,9 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
                         {
                             var m = metrics[i];
                             if (m.Kind == MetricKind.Spread) continue;
-                            if (m.Minutes == 1440 && m.Kind != MetricKind.Atr)
-                                values[i] = m.Kind == MetricKind.Turnover ? snapshot?.Turnover : snapshot?.Change;
-                            if (values[i] == null && (m.Kind != MetricKind.Turnover || UsdQuotes.Supported(row.Market))) history.Add(i);
+                            values[i] = SnapshotValue(m, snapshot);
+                            if (values[i] == null && (m.Kind != MetricKind.Turnover ||
+                                UsdQuotes.Supported(row.Market) && ExchangeApi.HasHistoricalQuoteVolume(row.Market))) history.Add(i);
                         }
                         if (history.Count > 0)
                         {
@@ -451,9 +458,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
                     }
                     catch (Exception) when (!ct.IsCancellationRequested)
                     {
-                        var fallback = metrics.Select(m => m.Minutes == 1440
-                            ? m.Kind == MetricKind.Turnover ? snapshot?.Turnover : m.Kind == MetricKind.Change ? snapshot?.Change : null
-                            : null).ToArray();
+                        var fallback = metrics.Select(m => SnapshotValue(m, snapshot)).ToArray();
                         row.Set(fallback, metrics);
                     }
                     done++;
@@ -470,6 +475,14 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         catch (Exception) when (ct.IsCancellationRequested) { }
         finally { if (ReferenceEquals(worker, run)) worker = null; run.Dispose(); }
     }
+
+    private static double? SnapshotValue(OverviewColumn metric, MarketSnapshot? snapshot) =>
+        metric.Minutes != 1440 ? null : metric.Kind switch
+        {
+            MetricKind.Turnover => snapshot?.Turnover,
+            MetricKind.Change => snapshot?.Change,
+            _ => null
+        };
 
     private void RefreshSort()
     {

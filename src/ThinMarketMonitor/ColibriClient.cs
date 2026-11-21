@@ -94,6 +94,13 @@ internal sealed class ColibriClient : IDisposable
             throw new IOException("Тип этого контракта MEXC не подтверждён для Colibri.");
         bool delivery = contract.Product == "FUTURES" || contract.Product.StartsWith("delivery/", StringComparison.Ordinal);
         bool perpetual = contract.Product == "SWAP" || contract.Product.StartsWith("futures/", StringComparison.Ordinal);
+        if (market.Venue.Extended())
+        {
+            delivery = market.Venue == Venue.Htx && contract.Product == "delivery" ||
+                market.Venue == Venue.Kraken && (market.Symbol.StartsWith("FF_", StringComparison.Ordinal) ||
+                                                market.Symbol.StartsWith("FI_", StringComparison.Ordinal));
+            perpetual = !delivery;
+        }
         string family = inverse ? "Inverse" : "Linear";
         if (delivery) return [family + "Futures"];
         if (perpetual) return [family + "Perpetual"];

@@ -467,7 +467,7 @@ public partial class MainWindow : Window, IDisposable
               (settings.VolumePercentMigrationPending ? " · объём теперь в %: проверьте настройки модуля" : "") +
               (settings.SignalBlacklist.Length > 0 ? $" · чёрный список: {settings.SignalBlacklist.Length:N0}" : "") +
               (filtered is { Pending: > 0 } pending ? $" · объём ожидается: {pending.Pending:N0}" : "") +
-              (filtered is { Unsupported: > 0 } unsupported ? $" · без котировки USD: {unsupported.Unsupported:N0}" : "") +
+              (filtered is { Unsupported: > 0 } unsupported ? $" · оборот USD недоступен: {unsupported.Unsupported:N0}" : "") +
               (spread is { Pending: > 0 } waiting ? $" · спред ожидается: {waiting.Pending:N0}" : "") +
               (spread is { Unsupported: > 0 } unavailable ? $" · спред недоступен: {unavailable.Unsupported:N0}" : "") +
               (errors.Length > 0 ? $" · недоступно источников: {errors.Length}" : "");

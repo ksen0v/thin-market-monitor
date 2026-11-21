@@ -74,8 +74,10 @@ internal sealed partial class ExchangeApi
         if (periods.Length == 0) return new();
         // Leave a full minute for the exchange to finalize the last included bar.
         long end = (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 60_000 - 1) * 60_000;
-        if (market.Contract != null)
+        if (!HasHistoricalQuoteVolume(market)) return new();
+        if (market.Contract != null || market.Venue.Extended())
         {
+            if (market.Venue.Extended()) await pace(ct);
             var results = await CandlePage(market, 60, end, periods.Max() / 60, ct);
             return CompleteVolumes(results.Where(c => c.QuoteVolume.HasValue).ToDictionary(c => c.Time, c => c.QuoteVolume!.Value),
                 periods, end, market.Venue == Venue.KuCoin);

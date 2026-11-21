@@ -208,7 +208,7 @@ internal sealed class ChartCell : Border
         {
             label.Inlines.Add($"{market.Base}/{market.Quote}");
             label.Inlines.Add(new System.Windows.Documents.Run(" " + market.Venue.Label() +
-                (market.Venue == Venue.Alpha || market.Contract != null ? $" · {market.Symbol}" : ""))
+                (market.Venue == Venue.Alpha || market.Contract != null ? $" · {market.Ticker}" : ""))
             {
                 Foreground = Terminal.Brush("Muted"), FontWeight = FontWeights.Normal, FontSize = 11
             });
@@ -422,7 +422,7 @@ internal sealed class ChartCell : Border
                         long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                         if (!ct.IsCancellationRequested && t.Symbol.Equals(selected.Symbol, StringComparison.OrdinalIgnoreCase) &&
                             t.Time >= now - 5000 && t.Time <= now + 3000) publish(t);
-                    });
+                    }, chart: true);
                 }
                 catch (Exception) when (!ct.IsCancellationRequested) { }
                 await Task.Delay(5000, ct);

@@ -5,7 +5,7 @@ using System.Windows.Input;
 
 namespace ThinMarketMonitor;
 
-internal enum Venue { Binance, Bybit, Okx, Bitget, Mexc, KuCoin, Gate, Alpha }
+internal enum Venue { Binance, Bybit, Okx, Bitget, Mexc, KuCoin, Gate, Alpha, Htx, Kraken, Weex, Lighter, Hyperliquid }
 internal enum Segment { Spot, Futures }
 internal readonly record struct MarketSource(Venue Venue, Segment Segment = Segment.Spot)
 {
@@ -22,15 +22,22 @@ internal static class Venues
     public static string Label(this Venue venue) => venue switch
     {
         Venue.Okx => "OKX", Venue.Bitget => "Bitget", Venue.Mexc => "MEXC",
-        Venue.Alpha => "Binance Alpha", _ => venue.ToString()
+        Venue.Alpha => "Binance Alpha", Venue.Htx => "HTX", Venue.Weex => "WEEX", _ => venue.ToString()
     };
+    public static bool Extended(this Venue venue) => venue is Venue.Htx or Venue.Kraken or Venue.Weex or Venue.Lighter or Venue.Hyperliquid;
 }
 
-internal record Market(Venue Venue, string Symbol, string Base, string Quote, Contract? Contract = null)
+internal sealed record MarketIdentifiers(string? Rest = null, string? Stream = null, string? ListingAsset = null,
+    string? Collateral = null, string? Display = null, bool TrustedUsdQuote = true);
+
+internal record Market(Venue Venue, string Symbol, string Base, string Quote, Contract? Contract = null, MarketIdentifiers? Identifiers = null)
 {
     public MarketSource Source => new(Venue, Contract == null ? Segment.Spot : Segment.Futures);
     public string Key => Contract == null ? $"{Venue}:{Symbol}" : $"{Venue}:Futures:{Contract.Product}:{Symbol}";
-    public string Ticker => Contract == null ? $"{Base}/{Quote}" : Symbol;
+    public string Ticker => Identifiers?.Display ?? (Contract == null ? $"{Base}/{Quote}" : Symbol);
+    public string ListingAsset => Identifiers?.ListingAsset ?? Base;
+    public string RestSymbol => Identifiers?.Rest ?? Symbol;
+    public string StreamSymbol => Identifiers?.Stream ?? Symbol;
     public string Label => $"{Ticker} · {Source.Label}" + (Venue == Venue.Alpha ? $" · {Symbol}" : "");
     public bool Streaming => Contract?.Streaming != false;
     public double Turnover(double quantity, double price) => Contract?.Unit == QuantityUnit.Quote
@@ -230,16 +237,21 @@ internal static class ListingFilter
         var excluded = marked.Where(v => EffectiveRule(v) == ListingRule.Exclude).ToArray();
         var sources = source is { } selected ? [selected] : required.Length > 0 ? required :
             catalogs.Keys.Where(v => v.Segment == Segment.Spot && !excluded.Contains(v)).ToArray();
-        var bases = marked.ToDictionary(v => v, v => catalogs[v].Markets.Select(m => m.Base).ToHashSet());
+        var bases = marked.ToDictionary(v => v, v => catalogs[v].Markets.Select(m => m.ListingAsset).ToHashSet(StringComparer.Ordinal));
         var matching = sources.Where(v => catalogs[v].Error == null).SelectMany(v => catalogs[v].Markets)
-            .Where(m => required.All(v => bases[v].Contains(m.Base)) && excluded.All(v => !bases[v].Contains(m.Base)));
+            .Where(m => required.All(v => bases[v].Contains(m.ListingAsset)) && excluded.All(v => !bases[v].Contains(m.ListingAsset)));
         if (source.HasValue) return new(matching.ToArray(), []);
         return new(matching
-            .GroupBy(m => m.Base)
-            .Select(g => g.OrderByDescending(m => m.Streaming)
-                .ThenBy(m => QuoteRank(m.Quote)).ThenBy(m => m.Source.Segment).ThenBy(m => m.Venue)
-                .ThenBy(m => m.Symbol, StringComparer.Ordinal).First())
-            .OrderBy(m => m.Base, StringComparer.Ordinal).ToArray(), []);
+            .GroupBy(m => (m.ListingAsset, m.Source.Segment))
+            .SelectMany(group =>
+            {
+                var ranked = group.OrderByDescending(m => m.Streaming).ThenBy(m => QuoteRank(m.Quote))
+                    .ThenBy(m => m.Venue).ThenBy(m => m.Symbol, StringComparer.Ordinal).ToArray();
+                var stablePairs = ranked.Where(m => m.Quote is "USDT" or "USDC" or "USD").DistinctBy(m => m.Quote).ToArray();
+                return stablePairs.Length == 0 ? ranked.Take(1) : stablePairs;
+            })
+            .OrderBy(m => m.Base, StringComparer.Ordinal).ThenBy(m => m.Source.Segment)
+            .ThenBy(m => QuoteRank(m.Quote)).ThenBy(m => m.Symbol, StringComparer.Ordinal).ToArray(), []);
     }
 
     private static int QuoteRank(string quote) => quote switch

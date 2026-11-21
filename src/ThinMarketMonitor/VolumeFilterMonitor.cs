@@ -32,7 +32,8 @@ internal sealed class VolumeFilterMonitor : IDisposable
             if (bulk.Length > 0 && rules.Any(r => r.Seconds == 86400))
                 tasks.Add(Task.Run(() => RefreshDay(api, bulk, stop.Token)));
             int[] periods = rules.Select(r => r.Seconds).Distinct().ToArray();
-            var historical = group.Where(m => periods.Any(s => s != 86400 || !ExchangeApi.HasBulkDay(m))).ToArray();
+            var historical = group.Where(m => ExchangeApi.HasHistoricalQuoteVolume(m) &&
+                periods.Any(s => s != 86400 || !ExchangeApi.HasBulkDay(m))).ToArray();
             if (historical.Length > 0) tasks.Add(Task.Run(() => RefreshHistory(api, historical, periods, stop.Token)));
         }
         completion = Task.WhenAll(tasks);
@@ -57,7 +58,8 @@ internal sealed class VolumeFilterMonitor : IDisposable
         int pending = 0, unsupported = 0;
         foreach (var market in markets)
         {
-            if (!UsdQuotes.Supported(market)) { unsupported++; continue; }
+            if (!UsdQuotes.Supported(market) || !ExchangeApi.HasHistoricalQuoteVolume(market) &&
+                rules.Any(rule => rule.Seconds != 86400 || !ExchangeApi.HasBulkDay(market))) { unsupported++; continue; }
             bool unknown = false, rejected = false;
             foreach (var rule in rules)
             {

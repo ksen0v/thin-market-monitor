@@ -14,7 +14,7 @@ internal sealed class SpreadFilterMonitor : IDisposable
     private readonly CancellationTokenSource stop = new();
     private readonly Market[] candidates;
     private readonly ConcurrentDictionary<string, IReadOnlyDictionary<string, SpreadQuote>> batches = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, SpreadQuote> alpha = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, SpreadQuote> live = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> errors = new(StringComparer.Ordinal);
     private readonly Task completion;
 
@@ -24,7 +24,7 @@ internal sealed class SpreadFilterMonitor : IDisposable
     {
         this.candidates = candidates.ToArray();
         var tasks = new List<Task>();
-        foreach (var group in candidates.Where(ExchangeApi.SpreadSupported).Where(m => m.Venue != Venue.Alpha)
+        foreach (var group in candidates.Where(ExchangeApi.SpreadSupported).Where(m => !ExchangeApi.StreamedBook(m.Venue))
                      .GroupBy(BatchKey))
         {
             var markets = group.ToArray();
@@ -41,11 +41,21 @@ internal sealed class SpreadFilterMonitor : IDisposable
                 catch (Exception) when (stop.IsCancellationRequested) { }
             }));
         }
+        foreach (var venue in candidates.Where(m => m.Venue is Venue.Hyperliquid or Venue.Lighter).GroupBy(m => m.Venue))
+        {
+            int delay = 0;
+            foreach (var group in venue.Chunk(ExtendedStreams.ChunkSize(venue.Key)))
+            {
+                int stagger = delay;
+                tasks.Add(Task.Run(() => StreamExtended(api, group, stagger, stop.Token)));
+                delay += 550;
+            }
+        }
         completion = Task.WhenAll(tasks);
     }
 
-    public SpreadQuote? Quote(Market market) => market.Venue == Venue.Alpha
-        ? alpha.TryGetValue(market.Key, out var value) ? value : null
+    public SpreadQuote? Quote(Market market) => ExchangeApi.StreamedBook(market.Venue)
+        ? live.TryGetValue(market.Key, out var value) ? value : null
         : batches.TryGetValue(BatchKey(market), out var batch) && batch.TryGetValue(market.Key, out var quote) ? quote : null;
 
     public SpreadFilterResult Evaluate(IEnumerable<Market> markets, SpreadRule rule, long now) => Apply(markets, rule, Quote, now);
@@ -142,14 +152,14 @@ internal sealed class SpreadFilterMonitor : IDisposable
                                 lookup.TryGetValue(row.Optional("s"), out var market))
                             {
                                 var quote = DecodeAlpha(market, row);
-                                alpha.AddOrUpdate(market.Key, quote, (_, old) => quote.Time >= old.Time ? quote : old);
+                                PutQuote(market, quote);
                             }
                         }
                         message.SetLength(0);
                     }
                 }
                 catch (Exception ex) when (!ct.IsCancellationRequested) { errors[key] = Error(ex); }
-                finally { foreach (var market in markets) alpha.TryRemove(market.Key, out _); }
+                finally { foreach (var market in markets) live.TryRemove(market.Key, out _); }
                 if (Environment.TickCount64 - started > 120_000) backoff = 3;
                 await Task.Delay(backoff * 1000 + Random.Shared.Next(1000), ct);
                 backoff = Math.Min(60, backoff * 2);
@@ -157,6 +167,38 @@ internal sealed class SpreadFilterMonitor : IDisposable
         }
         catch (Exception) when (ct.IsCancellationRequested) { }
     }
+
+    private async Task StreamExtended(ExchangeApi api, Market[] markets, int delay, CancellationToken ct)
+    {
+        var first = markets[0];
+        string key = BatchKey(first) + ":" + first.Symbol;
+        int backoff = 3;
+        try
+        {
+            await Task.Delay(delay, ct);
+            while (true)
+            {
+                long started = Environment.TickCount64;
+                try
+                {
+                    void Connected() => errors.TryRemove(key, out _);
+                    if (first.Venue == Venue.Hyperliquid)
+                        await api.HyperStream.Listen(markets, true, Connected, null, PutQuote, ct);
+                    else
+                        await ExtendedStreams.Open(markets, true, false, Connected, null, PutQuote, ct);
+                }
+                catch (Exception ex) when (!ct.IsCancellationRequested) { errors[key] = ex is IOException ? ex.Message : Error(ex); }
+                finally { foreach (var market in markets) live.TryRemove(market.Key, out _); }
+                if (Environment.TickCount64 - started > 120_000) backoff = 3;
+                await Task.Delay(backoff * 1000 + Random.Shared.Next(1000), ct);
+                backoff = Math.Min(60, backoff * 2);
+            }
+        }
+        catch (Exception) when (ct.IsCancellationRequested) { }
+    }
+
+    private void PutQuote(Market market, SpreadQuote quote) =>
+        live.AddOrUpdate(market.Key, quote, (_, old) => quote.Time >= old.Time ? quote : old);
 
     internal static SpreadQuote DecodeAlpha(Market market, JsonElement row) =>
         ExchangeApi.DecodeBestQuote(market, row,

@@ -109,7 +109,8 @@ internal sealed class MarketStreams : IDisposable
         foreach (var venue in markets.Where(m => m.Streaming && !subscribed.Contains(m.Key)).GroupBy(m => (m.Source, m.Contract?.Product)))
         {
             int index = 0;
-            foreach (var group in venue.Chunk(venue.Key.Source.Venue is Venue.Mexc or Venue.KuCoin && venue.Key.Product != null ? 30 :
+            foreach (var group in venue.Chunk(venue.Key.Source.Venue.Extended() ? ExtendedStreams.ChunkSize(venue.Key.Source.Venue) :
+                venue.Key.Source.Venue is Venue.Mexc or Venue.KuCoin && venue.Key.Product != null ? 30 :
                 venue.Key.Source.Venue == Venue.Mexc ? 30 : 100))
             {
                 int id = nextId++;
@@ -281,9 +282,15 @@ internal sealed class MarketStreams : IDisposable
     }
 
     internal static async Task Open(ExchangeApi api, Market[] markets, CancellationToken ct,
-        Action subscribed, Action<Trade> publish)
+        Action subscribed, Action<Trade> publish, bool chart = false)
     {
         var venue = markets[0].Venue;
+        if (venue.Extended())
+        {
+            if (venue == Venue.Hyperliquid) await api.HyperStream.Listen(markets, false, subscribed, publish, null, ct);
+            else await ExtendedStreams.Open(markets, false, chart, subscribed, publish, null, ct);
+            return;
+        }
         string? product = markets[0].Contract?.Product;
         var symbols = markets.Select(m => m.Symbol).ToArray();
         int heartbeat = venue == Venue.Bitget ? 25_000 : venue == Venue.KuCoin && product != null ? 12_000 : 18_000;

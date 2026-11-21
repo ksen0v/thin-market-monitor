@@ -3,7 +3,8 @@ namespace ThinMarketMonitor;
 internal static class UsdQuotes
 {
     public static bool Supported(string quote) => quote is "USD" or "USDT" or "USDC" or "FDUSD" or "TUSD" or "USDP" or "PYUSD" or "USD1";
-    public static bool Supported(Market market) => Supported(market.Quote) && (market.Contract?.Multiplier ?? 1) > 0;
+    public static bool Supported(Market market) => Supported(market.Quote) &&
+        market.Identifiers?.TrustedUsdQuote != false && (market.Contract?.Multiplier ?? 1) > 0;
 }
 
 internal enum VolumePhase { Waiting, ZeroBaseline, Ready }

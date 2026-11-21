@@ -10,6 +10,11 @@ internal sealed partial class ExchangeApi
         var output = new Dictionary<string, MarketSnapshot>();
         foreach (var group in markets.GroupBy(m => m.Source).SelectMany(source => source.GroupBy(m => m.Contract?.Product)))
         {
+            if (group.First().Venue.Extended())
+            {
+                await AddExtendedSnapshots(group.ToArray(), output, ct);
+                continue;
+            }
             string? url = TickerUrl(group.First());
             if (url == null) continue;
             var (root, _) = await TickerBatch(url, ct);

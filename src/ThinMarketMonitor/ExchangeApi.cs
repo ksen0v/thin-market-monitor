@@ -19,7 +19,8 @@ internal sealed partial class ExchangeApi(HttpClient http)
     {
         try
         {
-            return new(source.Segment == Segment.Spot ? await GetMarkets(source.Venue, ct) : await FuturesMarkets(source.Venue, ct));
+            return new(source.Venue.Extended() ? await ExtendedMarkets(source, ct) :
+                source.Segment == Segment.Spot ? await GetMarkets(source.Venue, ct) : await FuturesMarkets(source.Venue, ct));
         }
         catch (Exception ex) when (!ct.IsCancellationRequested && ex is HttpRequestException or JsonException
                                    or FormatException or InvalidOperationException or KeyNotFoundException or OperationCanceledException)
@@ -121,6 +122,11 @@ internal sealed partial class ExchangeApi(HttpClient http)
 
     public async Task<Candle[]> Candles(Market market, bool recent, CancellationToken ct)
     {
+        if (market.Venue.Extended())
+        {
+            long before = (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 60000 + 1) * 60000;
+            return await CandlePage(market, 60, before, recent ? 5 : 240, ct);
+        }
         string symbol = Uri.EscapeDataString(market.Symbol);
         int count = recent ? 5 : 240;
         long start = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - count * 60L;

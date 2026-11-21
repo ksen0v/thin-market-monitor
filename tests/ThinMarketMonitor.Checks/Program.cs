@@ -6,6 +6,7 @@ try
 {
 if (args is ["--spread"]) return await SpreadChecks.Live();
 if (args is ["--volume-live"]) return await VolumeGrowthChecks.Live();
+if (args is ["--new-venues"]) return await ExtendedVenueChecks.Live();
 
 if (args is ["--segments"])
 {
@@ -62,7 +63,7 @@ if (args is ["--live"])
     using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
     var api = new ExchangeApi(http);
     using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(65));
-    var catalogs = await Task.WhenAll(Enum.GetValues<Venue>().Select(async v => (Venue: v, Catalog: await api.LoadCatalog(v, timeout.Token))));
+    var catalogs = await Task.WhenAll(Enum.GetValues<Venue>().Where(v => !v.Extended()).Select(async v => (Venue: v, Catalog: await api.LoadCatalog(v, timeout.Token))));
     var probes = new List<Market>();
     bool pass = true;
     foreach (var (venue, catalog) in catalogs)
@@ -365,6 +366,7 @@ foreach (string malformed in new[] { release.RootElement.GetRawText().Replace(Up
     Require(rejected, "installed update fails closed on missing or invalid Setup");
 }
 BlacklistChecks.Run();
+ExtendedVenueChecks.Run();
 await SpreadChecks.Run();
 await ColibriChecks.Run();
 Console.WriteLine("Listings, volume conditions, chart placement, migration, price and volume windows, eight trade adapters and update metadata passed.");
