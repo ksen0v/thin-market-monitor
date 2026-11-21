@@ -66,6 +66,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
     private readonly TextBlock status = new() { TextTrimming = TextTrimming.CharacterEllipsis };
     private Row[] rows = [];
     private ListCollectionView view;
+    private DispatcherOperation? headerScrollReset;
     private CancellationTokenSource? worker;
     private OverviewSpreadSampler? spreadQuotes;
     private readonly TimeSpan spreadInterval;
@@ -141,7 +142,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
             int key = table.Columns.IndexOf(e.Column) - 1;
             settings.OverviewDescending = settings.OverviewSort == key ? !settings.OverviewDescending : key >= 0;
             settings.OverviewSort = key;
-            Sort();
+            SortFromHeader();
             changed();
         };
         Children.Add(table);
@@ -363,6 +364,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         if (!loadedCatalog || boundSource != settings.OverviewSource || markets.Length != next.Count ||
             !markets.ToHashSet().SetEquals(next))
         {
+            CancelHeaderScroll();
             loadedCatalog = true;
             boundSource = settings.OverviewSource;
             markets = next.ToArray();
@@ -375,7 +377,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
             var selected = rows.FirstOrDefault(r => r.Market.Key == settings.OverviewChoice?.Key);
             if (selected == null) table.CurrentCell = default;
             table.SelectedItem = selected;
-            (table.Template?.FindName("DG_ScrollViewer", table) as ScrollViewer)?.ScrollToTop();
+            TableScroll?.ScrollToTop();
             loadingSelection = false;
             Restart();
         }
@@ -388,9 +390,31 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
     private bool SortingSpread => settings.OverviewSort >= 0 && settings.OverviewSort < columns.Length &&
         columns[settings.OverviewSort].Kind == MetricKind.Spread;
 
+    private ScrollViewer? TableScroll => table.Template?.FindName("DG_ScrollViewer", table) as ScrollViewer;
+
+    private void SortFromHeader()
+    {
+        CancelHeaderScroll();
+        // A metric refresh in the same layout pass must use the header's new viewport.
+        headerScrollReset = Dispatcher.InvokeAsync(() =>
+        {
+            TableScroll?.ScrollToTop();
+            table.UpdateLayout();
+            headerScrollReset = null;
+        }, DispatcherPriority.Loaded);
+        Sort();
+        TableScroll?.ScrollToTop();
+    }
+
+    private void CancelHeaderScroll()
+    {
+        headerScrollReset?.Abort();
+        headerScrollReset = null;
+    }
+
     private void Sort()
     {
-        SortKeepingViewport(new RowComparer(settings.OverviewSort, settings.OverviewDescending));
+        SortRows(new RowComparer(settings.OverviewSort, settings.OverviewDescending));
         for (int i = 0; i < table.Columns.Count; i++)
             table.Columns[i].SortDirection = i - 1 == settings.OverviewSort
                 ? settings.OverviewDescending ? ListSortDirection.Descending : ListSortDirection.Ascending : null;
@@ -541,14 +565,14 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         for (int i = 1; i < view.Count; i++)
         {
             if (view.CustomSort.Compare(view.GetItemAt(i - 1), view.GetItemAt(i)) <= 0) continue;
-            SortKeepingViewport();
+            SortRows();
             return;
         }
     }
 
-    private void SortKeepingViewport(IComparer? sort = null)
+    private void SortRows(IComparer? sort = null)
     {
-        var scroll = table.Template?.FindName("DG_ScrollViewer", table) as ScrollViewer;
+        var scroll = headerScrollReset == null ? TableScroll : null;
         int top = (int)(scroll?.VerticalOffset ?? 0);
         var anchor = top < table.Items.Count ? table.Items[top] : null;
         double horizontal = scroll?.HorizontalOffset ?? 0;
@@ -604,6 +628,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
 
     public void Dispose()
     {
+        CancelHeaderScroll();
         sourceMenu.IsOpen = false;
         Cancel();
     }

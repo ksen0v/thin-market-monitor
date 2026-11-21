@@ -5,13 +5,19 @@ using System.Reflection;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Threading;
 using ThinMarketMonitor;
 
 internal static class OverviewSpreadChecks
 {
+    private const BindingFlags InstanceMembers = BindingFlags.Instance | BindingFlags.NonPublic;
+
     public static async Task Run()
     {
+        await HeaderSorting();
         const int count = 30;
         var linear = Enumerable.Range(0, count).Select(i =>
             new Market(Venue.Binance, $"M{i:00}USDT", $"M{i:00}", "USDT", new("usdm"))).ToArray();
@@ -107,6 +113,111 @@ internal static class OverviewSpreadChecks
         }
         finally { window.Close(); }
         Console.WriteLine("Overview spread snapshots, deadline, stale values, stable viewport, source cancellation and independent UI passed.");
+    }
+
+    private static async Task HeaderSorting()
+    {
+        var markets = Enumerable.Range(0, 60).Select(i => new Market(Venue.Binance, $"M{i:00}USDT", $"M{i:00}", "USDT")).ToArray();
+        var metrics = new[] { new OverviewColumn(MetricKind.Turnover, 1440), new(MetricKind.Change, 1440), new(MetricKind.Spread, 0) };
+        var settings = new Settings { OverviewSource = markets[0].Source, OverviewColumns = metrics };
+        int chartSelections = 0, colibriSelections = 0;
+        using var http = new HttpClient();
+        using var panel = new OverviewPanel(new(http), settings, () => { }, _ => chartSelections++) { Width = 510 };
+        panel.UserSelected += _ => colibriSelections++;
+        var window = new Window { Content = panel, Width = 525, Height = 340, ShowInTaskbar = false };
+        window.Show();
+        try
+        {
+            var grid = (DataGrid)typeof(OverviewPanel).GetField("table", InstanceMembers)!.GetValue(panel)!;
+            panel.SetSource(markets, visible: false);
+            await Layout();
+            var scroll = (ScrollViewer)grid.Template.FindName("DG_ScrollViewer", grid)!;
+            var entries = grid.Items.Cast<OverviewPanel.Row>().ToArray();
+            for (int i = 0; i < entries.Length; i++)
+            {
+                entries[i].Set([100 + i, -i, null], metrics);
+                entries[i].SetSpread(new(i / 100.0, 1));
+            }
+            var selected = entries[17];
+            grid.SelectedItem = selected;
+            grid.CurrentCell = new DataGridCellInfo(selected, grid.Columns[1]);
+            grid.Focus();
+            int selectionsBefore = chartSelections;
+
+            await ScrollTo(15);
+            ClickHeader(1);
+            await AtTop(entries[^1], "$ 24 ч descending from the middle");
+            ClickHeader(1);
+            await AtTop(entries[0], "$ 24 ч ascending from the top");
+            await ScrollTo(22);
+            ClickHeader(1);
+            entries[^1].Set([0, -59, null], metrics);
+            RefreshValues();
+            await AtTop(entries[^2], "$ 24 ч descending with new values before layout");
+
+            grid.Focus();
+            bool hasFocus = grid.IsKeyboardFocusWithin;
+            await ScrollTo(12);
+            var anchor = grid.Items[12];
+            var rowToMove = (OverviewPanel.Row)grid.Items[20];
+            rowToMove.Set([1000, rowToMove.Number(1), null], metrics);
+            RefreshValues();
+            await Layout();
+            Check(grid.Items[0] == rowToMove && scroll.VerticalOffset == 13 && grid.Items[13] == anchor &&
+                (!hasFocus || grid.IsKeyboardFocusWithin), "a later turnover refresh keeps the top row and focus");
+
+            ClickHeader(2);
+            await AtTop(entries[0], "% 24 ч");
+            ClickHeader(3);
+            await AtTop(entries[^1], "spread");
+            ClickHeader(0);
+            await AtTop(entries[0], "ticker ascending");
+            ClickHeader(0);
+            await AtTop(entries[^1], "ticker descending");
+            Check(ReferenceEquals(grid.CurrentCell.Item, selected), "header sorts retain the current market cell");
+
+            async Task Layout()
+            {
+                window.UpdateLayout();
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                window.UpdateLayout();
+            }
+
+            async Task ScrollTo(int row)
+            {
+                scroll.ScrollToVerticalOffset(row);
+                await Layout();
+                Check(scroll.VerticalOffset == row, $"test viewport reached row {row}");
+            }
+
+            async Task AtTop(OverviewPanel.Row first, string label)
+            {
+                await Layout();
+                Check(scroll.VerticalOffset == 0 && grid.Items[0] == first &&
+                    grid.ItemContainerGenerator.ContainerFromIndex(0) is DataGridRow { IsVisible: true },
+                    $"{label} shows the first row after layout (offset {scroll.VerticalOffset})");
+                Check(ReferenceEquals(grid.SelectedItem, selected) && chartSelections == selectionsBefore && colibriSelections == 0,
+                    $"{label} preserves the selected instrument without chart or Colibri navigation");
+            }
+
+            void ClickHeader(int column)
+            {
+                var header = Header(grid, grid.Columns[column]) ?? throw new InvalidOperationException("Missing column header");
+                typeof(DataGridColumnHeader).GetMethod("OnClick", InstanceMembers)!.Invoke(header, null);
+            }
+
+            void RefreshValues() => typeof(OverviewPanel).GetMethod("RefreshSort", InstanceMembers)!.Invoke(panel, null);
+        }
+        finally { window.Close(); }
+        Console.WriteLine("Overview header sorting starts at the first row, survives a concurrent metric refresh and preserves selection.");
+    }
+
+    private static DataGridColumnHeader? Header(DependencyObject root, DataGridColumn column)
+    {
+        if (root is DataGridColumnHeader header && header.Column == column) return header;
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+            if (Header(VisualTreeHelper.GetChild(root, i), column) is { } child) return child;
+        return null;
     }
 
     private static void Check(bool condition, string detail)
