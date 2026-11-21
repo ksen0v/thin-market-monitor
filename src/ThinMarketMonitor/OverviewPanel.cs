@@ -14,9 +14,46 @@ namespace ThinMarketMonitor;
 
 internal static class OverviewMetrics
 {
+    private static readonly CultureInfo Russian = CultureInfo.GetCultureInfo("ru-RU");
+
     public static string Label(OverviewColumn c) =>
         c.Kind == MetricKind.Spread ? "Спред %" : (c.Kind switch { MetricKind.Turnover => "Оборот $", MetricKind.Change => "Изм. %", _ => "ATR %" }) +
         $" · {MainWindow.WindowName(c.Minutes * 60)}";
+
+    public static string Display(MetricKind kind, double number)
+    {
+        if (!double.IsFinite(number)) return "—";
+        if (kind == MetricKind.Turnover) return CompactTurnover(number);
+        if (kind == MetricKind.Change)
+        {
+            double rounded = Math.Round(number, MidpointRounding.AwayFromZero);
+            return rounded == 0 ? "0%" : rounded.ToString("0", Russian) + "%";
+        }
+        if (number is > 0 and < 0.01) return "<0,01%";
+        return number.ToString("0.##", Russian) + "%";
+    }
+
+    public static string Detail(MetricKind kind, double? value)
+    {
+        if (value is not { } number || !double.IsFinite(number)) return "—";
+        if (kind == MetricKind.Turnover) return number.ToString("N2", Russian) + " USD";
+        string format = Math.Abs(number) is > 0 and < 0.0000000001 ? "G10" : "0.##########";
+        return number.ToString(format, Russian) + "%";
+    }
+
+    private static string CompactTurnover(double amount)
+    {
+        if (amount is > 0 and < 1) return "<1";
+        var (unit, suffix) = amount switch
+        {
+            >= 1e12 => (1e12, "T"),
+            >= 1e9 => (1e9, "B"),
+            >= 1e6 => (1e6, "M"),
+            >= 1e3 => (1e3, "K"),
+            _ => (1d, "")
+        };
+        return Math.Floor(amount / unit).ToString("0", Russian) + suffix;
+    }
 
     public static double? Calculate(Market m, Candle[] bars, int frame, long end, OverviewColumn metric)
     {
@@ -351,8 +388,9 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
         style.Setters.Add(new Setter(TextBlock.TextAlignmentProperty, TextAlignment.Right));
         style.Setters.Add(new Setter(TextBlock.ForegroundProperty, new Binding($"Values[{index}]")
             { Converter = new MetricBrush(kind) }));
-        style.Setters.Add(new Setter(ToolTipService.ToolTipProperty,
-            new Binding(kind == MetricKind.Spread ? nameof(Row.SpreadDisplayToolTip) : $"[{index}]")));
+        style.Setters.Add(new Setter(ToolTipService.ToolTipProperty, kind == MetricKind.Spread
+            ? new Binding(nameof(Row.SpreadDisplayToolTip))
+            : new Binding($"Values[{index}]") { Converter = new MetricDetail(kind) }));
         return style;
     }
 
@@ -366,6 +404,15 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
                 double => "Text",
                 _ => "Muted"
             });
+
+        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) =>
+            throw new NotSupportedException();
+    }
+
+    private sealed class MetricDetail(MetricKind kind) : IValueConverter
+    {
+        public object Convert(object value, Type targetType, object parameter, CultureInfo culture) =>
+            OverviewMetrics.Detail(kind, value as double?);
 
         public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) =>
             throw new NotSupportedException();
@@ -684,13 +731,20 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
             get
             {
                 int index = Array.FindIndex(columns, column => column.Kind == MetricKind.Spread);
-                return SpreadToolTip is { } details ? $"{this[index]}\n{details}" : this[index];
+                string value = OverviewMetrics.Detail(MetricKind.Spread, Number(index));
+                return SpreadToolTip is { } details ? $"{value}\n{details}" : value;
             }
         }
-        public string this[int i] => Number(i) is { } number
-            ? number.ToString(columns[i].Kind == MetricKind.Turnover ? "N0" : columns[i].Kind == MetricKind.Spread ? "0.######" : "+0.00;-0.00;0.00", CultureInfo.CurrentCulture) +
-                (columns[i].Kind == MetricKind.Spread && SpreadStale ? "*" : "")
-            : "—";
+        public string this[int i]
+        {
+            get
+            {
+                if (Number(i) is not { } number) return "—";
+                var kind = columns[i].Kind;
+                string text = OverviewMetrics.Display(kind, number);
+                return kind == MetricKind.Spread && SpreadStale ? text + "*" : text;
+            }
+        }
         public double? Number(int i) => i >= 0 && i < values.Length ? values[i] : null;
         public event PropertyChangedEventHandler? PropertyChanged;
 

@@ -34,7 +34,69 @@ internal sealed partial class SettingsPanel
         price.Margin = new Thickness(0, 7, 0, 5);
         panel.Children.Add(price);
         panel.Children.Add(volume);
+        panel.Children.Add(SignalCooldownOptions());
         return panel;
+    }
+
+    private Border SignalCooldownOptions()
+    {
+        const string label = "Пауза между сигналами по монете";
+        var section = Terminal.Rule(new Thickness(0, 1, 0, 0));
+        section.Margin = new Thickness(0, 16, 0, 0);
+        section.Padding = new Thickness(0, 12, 0, 0);
+        var panel = new StackPanel();
+        section.Child = panel;
+        var heading = Terminal.Copy(label, muted: false);
+        heading.FontWeight = FontWeights.SemiBold;
+        panel.Children.Add(heading);
+        panel.Children.Add(Terminal.Copy("Для импульсов цены и объёма на всех биржах. 0 — выключено."));
+        var row = new WrapPanel { Margin = new Thickness(0, 7, 0, 0) };
+        panel.Children.Add(row);
+        var entry = new TextBox
+        {
+            Width = 68, Text = settings.SignalCooldownMinutes.ToString(CultureInfo.InvariantCulture),
+            TextAlignment = TextAlignment.Right
+        };
+        AutomationProperties.SetName(entry, $"{label}, минуты");
+        row.Children.Add(entry);
+        row.Children.Add(new TextBlock
+        {
+            Text = "мин", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(6, 0, 10, 0)
+        });
+        var apply = new Button { Content = "Применить", MinHeight = 26, IsEnabled = false };
+        AutomationProperties.SetName(apply, "Применить паузу между сигналами");
+        row.Children.Add(apply);
+        var validation = Terminal.Copy("");
+        validation.Foreground = Terminal.Brush("Excluded");
+        panel.Children.Add(validation);
+        entry.TextChanged += (_, _) => Validate();
+        entry.LostKeyboardFocus += (_, _) => Commit();
+        entry.PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key != Key.Enter) return;
+            Commit();
+            e.Handled = true;
+        };
+        apply.Click += (_, _) => Commit();
+        return section;
+
+        bool TryMinutes(out int minutes) => int.TryParse(entry.Text, out minutes) &&
+            minutes is >= 0 and <= Settings.MaxSignalCooldownMinutes;
+
+        void Validate()
+        {
+            bool valid = TryMinutes(out int minutes);
+            validation.Text = valid ? "" : $"Введите от 0 до {Settings.MaxSignalCooldownMinutes} минут.";
+            apply.IsEnabled = valid && minutes != settings.SignalCooldownMinutes;
+        }
+
+        void Commit()
+        {
+            if (!TryMinutes(out int minutes) || settings.SignalCooldownMinutes == minutes) return;
+            settings.SignalCooldownMinutes = minutes;
+            savePreferences();
+            Validate();
+        }
     }
 
     private Button ModuleButton(string label, Func<bool> enabled, Action<bool> set)
@@ -190,6 +252,8 @@ internal sealed partial class SettingsPanel
             validation.Text = "";
             rows.Children.Clear();
             var current = GetRules();
+            if (!filter && current.Length == 0)
+                rows.Children.Add(Terminal.Copy("Добавьте период для расчёта импульса."));
             for (int i = 0; i < current.Length; i++)
             {
                 int index = i;
@@ -207,9 +271,7 @@ internal sealed partial class SettingsPanel
                     VerticalAlignment = VerticalAlignment.Center
                 };
                 AutomationProperties.SetName(entry, $"Порог за {interval}, {unit}");
-                bool removable = filter || !Settings.Defaults.Any(r => r.Seconds == rule.Seconds);
                 var remove = Terminal.IconButton("close", $"Удалить период {interval}");
-                remove.Visibility = removable ? Visibility.Visible : Visibility.Hidden;
                 remove.Margin = new Thickness(8, 0, 0, 0);
                 var right = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
                 right.Children.Add(entry);
@@ -247,7 +309,7 @@ internal sealed partial class SettingsPanel
                 void SetEnabled(bool value)
                 {
                     var values = GetRules();
-                    if (values[index].Enabled == value) return;
+                    if (values.Length <= index || values[index].Seconds != rule.Seconds || values[index].Enabled == value) return;
                     values[index] = values[index] with { Enabled = value };
                     Update(values);
                 }
@@ -256,7 +318,7 @@ internal sealed partial class SettingsPanel
                 {
                     if (!TryAmount(entry.Text, price, out double threshold)) return;
                     var values = GetRules();
-                    if (values.Length <= index || values[index].Usd == threshold) return;
+                    if (values.Length <= index || values[index].Seconds != rule.Seconds || values[index].Usd == threshold) return;
                     values[index] = values[index] with { Usd = threshold };
                     Update(values);
                 }

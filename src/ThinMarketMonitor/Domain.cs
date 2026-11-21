@@ -82,12 +82,15 @@ internal enum BookmarkColor { Gold, Green, Blue, Pink, Violet }
 
 internal sealed class Settings
 {
+    private const int EditableSignalPeriodsVersion = 1;
     internal const int MaxModuleSeconds = 3600;
     internal const int MaxFilterSeconds = 86400;
     internal const int MaxRules = 24;
     internal const int MaxVolumeReferenceSeconds = 3600;
+    internal const int MaxSignalCooldownMinutes = 1440;
     internal static readonly Threshold[] Defaults = [new(15, true, 4), new(60, true, 5), new(300, true, 12), new(900, true, 20)];
     internal static readonly Threshold[] DefaultVolumeGrowth = [new(15, true, 100), new(60, true, 100), new(300, true, 100), new(900, true, 100)];
+    public int SchemaVersion { get; set; } = EditableSignalPeriodsVersion;
     public Dictionary<Venue, ListingRule> Rules { get; set; } = new() { [Venue.KuCoin] = ListingRule.Require };
     public Dictionary<Venue, ListingRule> FuturesRules { get; set; } = [];
     public ListingRule Rule(MarketSource source) => ListingRules(source.Segment).GetValueOrDefault(source.Venue);
@@ -138,6 +141,7 @@ internal sealed class Settings
     }
     public bool PriceModule { get; set; } = true;
     public bool VolumeModule { get; set; }
+    public int SignalCooldownMinutes { get; set; }
     public bool SignalPopup { get; set; }
     public bool SignalSound { get; set; }
     public bool SignalVoice { get; set; }
@@ -196,6 +200,7 @@ internal sealed class Settings
         settings.OverviewFuturesRules ??= [];
         if (!Enum.IsDefined(settings.PriceSignalTone)) settings.PriceSignalTone = SignalTone.System;
         if (!Enum.IsDefined(settings.VolumeSignalTone)) settings.VolumeSignalTone = SignalTone.System;
+        if (settings.SignalCooldownMinutes is < 0 or > MaxSignalCooldownMinutes) settings.SignalCooldownMinutes = 0;
         settings.PriceSpeech = SpeechOptions(settings.PriceSpeech);
         settings.VolumeSpeech = SpeechOptions(settings.VolumeSpeech);
         settings.OverviewQuotes = settings.OverviewQuotes?.Where(x => !string.IsNullOrWhiteSpace(x))
@@ -219,27 +224,32 @@ internal sealed class Settings
             .Where(x => x != null && Enum.IsDefined(x.Kind) && (x.Kind == MetricKind.Spread || x.Minutes is >= 1 and <= 1440))
             .Distinct().Take(5).ToArray()!;
         if (settings.OverviewSort < -1 || settings.OverviewSort >= settings.OverviewColumns.Length) settings.OverviewSort = -1;
-        var price = (settings.Thresholds ?? []).Where(r => r is { Seconds: >= 1 and <= MaxModuleSeconds, Percent: > 0 and <= 10000 }).ToArray();
-        var defaults = Defaults.Select(r => r.Seconds == 300 && price.Length > 0 && price.All(p => !p.Enabled)
-            ? r with { Enabled = false } : r);
-        settings.Thresholds = defaults.Select(r => price.FirstOrDefault(p => p.Seconds == r.Seconds) ?? r)
-            .Concat(price).DistinctBy(r => r.Seconds).Take(MaxRules).OrderBy(r => r.Seconds).ToArray();
         using var document = JsonDocument.Parse(json);
-        bool percentSettings = document.RootElement.ValueKind == JsonValueKind.Object &&
-            document.RootElement.TryGetProperty(nameof(VolumeGrowthThresholds), out _);
+        var root = document.RootElement;
+        bool exactPeriods = root.ValueKind == JsonValueKind.Object && root.TryGetProperty(nameof(SchemaVersion), out _) &&
+            settings.SchemaVersion >= EditableSignalPeriodsVersion;
+        settings.SchemaVersion = Math.Max(settings.SchemaVersion, EditableSignalPeriodsVersion);
+        var price = ValidThresholds(settings.Thresholds ?? Defaults, 10_000).ToArray();
+        if (!exactPeriods)
+        {
+            bool allDisabled = price.Length > 0 && price.All(p => !p.Enabled);
+            var defaults = Defaults.Select(r => r.Seconds == 300 && allDisabled ? r with { Enabled = false } : r);
+            settings.Thresholds = OrderThresholds(defaults.Select(r => price.FirstOrDefault(p => p.Seconds == r.Seconds) ?? r)
+                .Concat(price));
+        }
+        else settings.Thresholds = OrderThresholds(price);
+        bool percentSettings = root.ValueKind == JsonValueKind.Object && root.TryGetProperty(nameof(VolumeGrowthThresholds), out _);
         if (!percentSettings && (settings.VolumeThresholds != null || settings.VolumeModule))
         {
             var legacy = (settings.VolumeThresholds ?? []).Where(r => r is { Seconds: >= 1 and <= MaxModuleSeconds })
                 .Select(r => new Threshold(r.Seconds, r.Enabled, 100)).ToArray();
-            settings.VolumeGrowthThresholds = legacy.Concat(DefaultVolumeGrowth)
-                .DistinctBy(r => r.Seconds).Take(MaxRules).OrderBy(r => r.Seconds).ToArray();
+            settings.VolumeGrowthThresholds = OrderThresholds(legacy.Concat(DefaultVolumeGrowth));
             settings.VolumeModule = false;
             settings.VolumePercentMigrationPending = true;
         }
         settings.VolumeThresholds = null;
-        var growth = (settings.VolumeGrowthThresholds ?? []).Where(r => r is { Seconds: >= 1 and <= MaxModuleSeconds, Percent: > 0 and <= 1e12 }).ToArray();
-        settings.VolumeGrowthThresholds = growth.Concat(DefaultVolumeGrowth)
-            .DistinctBy(r => r.Seconds).Take(MaxRules).OrderBy(r => r.Seconds).ToArray();
+        var growth = ValidThresholds(settings.VolumeGrowthThresholds ?? DefaultVolumeGrowth, 1e12);
+        settings.VolumeGrowthThresholds = OrderThresholds(exactPeriods ? growth : growth.Concat(DefaultVolumeGrowth));
         if (settings.VolumeReferenceSeconds is < 60 or > MaxVolumeReferenceSeconds || settings.VolumeReferenceSeconds % 60 != 0)
             settings.VolumeReferenceSeconds = 3600;
         settings.VolumeFilters = (settings.VolumeFilters ?? []).Where(r => r is { Seconds: >= 60 and <= MaxFilterSeconds, Usd: > 0 and <= 1e12 }
@@ -257,6 +267,12 @@ internal sealed class Settings
             settings.FrameDown = settings.FrameUp == Key.Down ? Key.Up : Key.Down;
         return settings;
     }
+
+    private static IEnumerable<Threshold> ValidThresholds(Threshold[] rules, double maxPercent) =>
+        rules.Where(r => r is { Seconds: >= 1 and <= MaxModuleSeconds, Percent: > 0 } && r.Percent <= maxPercent);
+
+    private static Threshold[] OrderThresholds(IEnumerable<Threshold> rules) =>
+        rules.DistinctBy(r => r.Seconds).Take(MaxRules).OrderBy(r => r.Seconds).ToArray();
 
     private static SignalSpeechOptions SpeechOptions(SignalSpeechOptions? options) =>
         options == null ? SignalSpeechOptions.Default :

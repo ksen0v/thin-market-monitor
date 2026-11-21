@@ -30,6 +30,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
     private readonly TextBlock colibriStatus = Terminal.Copy("");
     private readonly TextBlock voiceStatus = Terminal.Copy("");
     private readonly Action<bool> changed;
+    private readonly Action savePreferences;
     private readonly Action saveNotifications;
     private readonly Action saveOverview;
     private readonly Action<SignalTone> previewSound;
@@ -46,12 +47,13 @@ internal sealed partial class SettingsPanel : Border, IDisposable
     public SettingsPanel(Settings settings, Updater updater, ColibriBridge colibri,
         Action<bool> changed, Action close, Action restart, bool overview = false, Action? saveNotifications = null,
         Action? saveOverview = null, Action<SignalTone>? previewSound = null, RussianVoicePack? neuralVoice = null,
-        Action<string>? previewVoice = null)
+        Action<string>? previewVoice = null, Action? savePreferences = null)
     {
         this.settings = settings;
         this.updater = updater;
         this.colibri = colibri;
         this.changed = changed;
+        this.savePreferences = savePreferences ?? (() => changed(false));
         this.saveNotifications = saveNotifications ?? (() => changed(false));
         this.saveOverview = saveOverview ?? (() => changed(false));
         this.previewSound = previewSound ?? (_ => { });

@@ -20,6 +20,7 @@ public partial class MainWindow : Window, IDisposable
     private readonly bool persistSettings;
     private readonly ColibriBridge colibri;
     private readonly SignalNotifications notifications;
+    private readonly SignalCooldown signalCooldown;
     private readonly RussianVoicePack neuralVoice;
     private readonly Dictionary<MarketSource, Catalog> catalogs = new();
     private readonly ChartCell[] cells = new ChartCell[9];
@@ -55,7 +56,7 @@ public partial class MainWindow : Window, IDisposable
     public MainWindow() : this(startMonitoring: true) { }
 
     internal MainWindow(bool startMonitoring, Settings? testSettings = null, ColibriClient? colibriClient = null,
-        HttpClient? testHttp = null, SignalNotifications? testNotifications = null)
+        HttpClient? testHttp = null, SignalNotifications? testNotifications = null, TimeProvider? signalClock = null)
     {
         http = testHttp ?? new(new SocketsHttpHandler
         {
@@ -68,6 +69,7 @@ public partial class MainWindow : Window, IDisposable
         Overlay.SizeChanged += (_, _) => FitSettingsDialog();
         neuralVoice = new(http, stop.Token);
         notifications = testNotifications ?? new(settings, Dispatcher, speak: neuralVoice.Speak);
+        signalCooldown = new(signalClock ?? TimeProvider.System);
         api = new(http);
         colibri = new(settings, colibriClient);
         colibri.StatusChanged += ShowIntegrationStatus;
@@ -649,7 +651,7 @@ public partial class MainWindow : Window, IDisposable
     private void Place(Signal signal)
     {
         var market = signal.Market;
-        if (!settings.ShowsSignalMarket(market)) return;
+        if (!settings.ShowsSignalMarket(market) || !signalCooldown.TryAccept(market, settings.SignalCooldownMinutes)) return;
         notifications.Publish(signal);
         var visible = cells.Take(settings.Grid * settings.Grid).ToArray();
         if (visible.FirstOrDefault(c => c.Choice?.Key == market.Key) is { } existing)
@@ -680,7 +682,7 @@ public partial class MainWindow : Window, IDisposable
     {
         settingsPanel = new SettingsPanel(settings, new Updater(http), colibri, SettingsChanged, CloseDialog, Close, settings.Overview,
             () => { notifications.SettingsChanged(); Save(); }, () => { RefreshOverview(); Save(); }, notifications.PreviewSound,
-            neuralVoice, notifications.PreviewVoice);
+            neuralVoice, notifications.PreviewVoice, Save);
         settingsPanel.UpdateQuoteChoices(OverviewSourceQuotes());
         settingsPanel.UpdateFilter(CatalogStatus.Text);
         ShowDialog(settingsPanel);

@@ -3,6 +3,7 @@ using System.Net;
 using System.Reflection;
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
@@ -16,10 +17,42 @@ internal static class OverviewPresentationChecks
 
     public static async Task Run()
     {
+        CompactMetrics();
         await ColumnsAndBookmarks();
         await DrawerAndSettings();
         await LeveragedPairs();
-        Console.WriteLine("Overview column fitting, manual widths, drawer resizing, bookmark grouping and fixed settings size passed.");
+        Console.WriteLine("Overview compact metrics, column fitting, drawer resizing, bookmark grouping and fixed settings size passed.");
+    }
+
+    private static void CompactMetrics()
+    {
+        var columns = new OverviewColumn[]
+        {
+            new(MetricKind.Turnover, 1440), new(MetricKind.Change, 1440), new(MetricKind.Atr, 60), new(MetricKind.Spread, 0)
+        };
+        var market = new Market(Venue.Gate, "BTC_USDT", "BTC", "USDT");
+        var row = new OverviewPanel.Row(market, columns);
+        row.Set([296_801.23, 64.09, 1.507, null], columns);
+        row.SetSpread(new(0.00001234, 1000));
+        Check(row[0] == "296K" && row[1] == "64%" && row[2] == "1,51%" && row[3] == "<0,01%" &&
+            row.SpreadDisplayToolTip == "0,00001234%", "table cells abbreviate turnover, show whole changes and retain small spread values in the tooltip");
+        row.SetSpread(null);
+        Check(row[3] == "<0,01%*" && row.SpreadDisplayToolTip.Contains("Свежих bid/ask нет"),
+            "the compact spread keeps its stale marker and explanation");
+        Check(OverviewMetrics.Display(MetricKind.Turnover, 4_900) == "4K" &&
+            OverviewMetrics.Display(MetricKind.Turnover, 107.99) == "107" &&
+            OverviewMetrics.Display(MetricKind.Turnover, 1_000) == "1K" &&
+            OverviewMetrics.Display(MetricKind.Turnover, 1_000_000) == "1M" &&
+            OverviewMetrics.Display(MetricKind.Turnover, 1_000_000_000) == "1B" &&
+            OverviewMetrics.Display(MetricKind.Change, -64.09) == "-64%" &&
+            OverviewMetrics.Display(MetricKind.Change, -0.1) == "0%" &&
+            OverviewMetrics.Display(MetricKind.Spread, 0) == "0%" &&
+            OverviewMetrics.Display(MetricKind.Atr, double.NaN) == "—", "compact metrics cover boundaries, zero and unavailable values");
+        var other = new OverviewPanel.Row(market with { Symbol = "ADA_USDT", Base = "ADA" }, columns);
+        other.Set([296_800.99, 64.08, null, null], columns);
+        Check(row[0] == other[0] && row[1] == other[1] &&
+            new OverviewPanel.RowComparer(0, true).Compare(row, other) < 0 &&
+            new OverviewPanel.RowComparer(1, true).Compare(row, other) < 0, "equal compact text still sorts by the underlying numbers");
     }
 
     private static async Task LeveragedPairs()
@@ -61,7 +94,12 @@ internal static class OverviewPresentationChecks
         var metrics = new[] { turnover, spread };
         var market = new Market(Venue.Binance, "M00USDT", "M00", "USDT");
         var all = Enumerable.Range(0, 45).Select(i => market with { Symbol = $"M{i:00}USDT", Base = $"M{i:00}" }).ToArray();
-        all[^1] = market with { Symbol = "LONGUSDT", Base = "LONG", Identifiers = new(Display: "Z-LONG-TICKER-ALTERNATIVE-MARKET-LABEL/USDT") };
+        all[^1] = market with
+        {
+            Symbol = "LONGUSDT", Base = "LONG",
+            Identifiers = new(Display: "Z-LONG-TICKER-ALTERNATIVE-MARKET-LABEL-WITH-DESCRIPTION/USDT")
+        };
+        const double wideTurnover = 1.23456789e23;
         var settings = new Settings { OverviewSource = market.Source, OverviewColumns = metrics };
         int saved = 0, selected = 0, colibri = 0, listingChanges = 0;
         using var http = new HttpClient();
@@ -80,10 +118,12 @@ internal static class OverviewPresentationChecks
                 rows[i].Set([100 + i, null], metrics);
                 rows[i].SetSpread(new(0.000001 + i / 100.0, 1));
             }
-            rows[^1].Set([1234567890123456, null], metrics);
+            rows[^1].Set([wideTurnover, null], metrics);
             await Until(() => grid.Columns[0].Width.Value > initial[0] && grid.Columns[1].Width.Value > initial[1]);
             await Layout(window);
-            Check(rows[0][1].Length >= 8 && rows[^1][0].Length > 15, "small spread and large turnover fixtures are displayed");
+            Check(rows[0][1] == "<0,01%" && rows[^1][0].EndsWith('T'), "small spread and large turnover fixtures are displayed");
+            var firstValue = (TextBlock)grid.Columns[1].GetCellContent(FindRow(grid, rows[0]))!;
+            Check(firstValue.Text == "100" && Equals(firstValue.ToolTip, "100,00 USD"), "turnover cells expose the full value on hover");
             Check(grid.ItemContainerGenerator.ContainerFromIndex(rows.Length - 1) == null, "column fitting retains vertical virtualization");
             var scroll = (ScrollViewer)grid.Template.FindName("DG_ScrollViewer", grid)!;
             Check(scroll.ScrollableWidth > 0, "large values and ticker enable horizontal scrolling");
@@ -106,7 +146,7 @@ internal static class OverviewPresentationChecks
                 Settings.Deserialize(JsonSerializer.Serialize(settings)).OverviewColumnWidths[turnover.WidthKey] == manual,
                 "remove/re-add and settings serialization preserve manual width");
             for (int i = 0; i < rows.Length; i++) rows[i].Set([100 + i, null], metrics);
-            rows[^1].Set([1234567890123456, null], metrics);
+            rows[^1].Set([wideTurnover, null], metrics);
             grip = HeaderGrip(grid, 1);
             Press(grip, clicks: 2);
             await Layout(window);
@@ -203,6 +243,19 @@ internal static class OverviewPresentationChecks
                 await Select(page);
                 Check(DialogBounds() == standard, $"settings page {page} keeps the size and position of Filters (expected {standard}, actual {DialogBounds()})");
             }
+            await Select(1);
+            var minutes = Descendants(dialog).OfType<TextBox>().Single(b =>
+                AutomationProperties.GetName(b) == "Пауза между сигналами по монете, минуты");
+            var apply = Descendants(dialog).OfType<Button>().Single(b =>
+                AutomationProperties.GetName(b) == "Применить паузу между сигналами");
+            Check(minutes.Text == "0" && !apply.IsEnabled, "the repeat cooldown is off by default in Modules");
+            minutes.Text = "-5";
+            Check(!apply.IsEnabled && settings.SignalCooldownMinutes == 0, "invalid minutes cannot change the saved setting");
+            minutes.Text = "5";
+            Check(apply.IsEnabled, "five minutes can be saved");
+            apply.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Check(Settings.Deserialize(JsonSerializer.Serialize(settings)).SignalCooldownMinutes == 5 && !apply.IsEnabled,
+                "applying the pause persists its duration through the normal settings dialog");
             await Select(5);
             var quotes = Field<WrapPanel>(dialog, "overviewQuotes");
             var grid = Field<DataGrid>(Field<OverviewPanel>(window, "overviewPanel"), "table");

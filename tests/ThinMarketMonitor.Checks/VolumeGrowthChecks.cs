@@ -139,6 +139,9 @@ internal static class VolumeGrowthChecks
         Check(Settings.Deserialize("{}").VolumeReferenceSeconds == 3600 &&
             Settings.Deserialize("{\"VolumeReferenceSeconds\":0}").VolumeReferenceSeconds == 3600 &&
             Settings.Deserialize("{\"VolumeReferenceSeconds\":60}").VolumeReferenceSeconds == 60, "reference defaults and validation");
+        var fresh = Settings.Deserialize("{}");
+        Check(fresh.Thresholds.SequenceEqual(Settings.Defaults) && fresh.VolumeGrowthThresholds.SequenceEqual(Settings.DefaultVolumeGrowth),
+            "a fresh profile still gets all four starting periods for each module");
     }
 
     private static void SubscriptionContinuity()
@@ -244,7 +247,42 @@ internal static class VolumeGrowthChecks
         string tooltip = Field<TextBlock>(cell, "label").ToolTip.ToString()!;
         Check(tooltip.Contains("100") && tooltip.Contains("50") && tooltip.Contains("25") && tooltip.Contains("без текущего окна"),
             "signal tooltip exposes percentage, current and average turnover");
+
+        RemoveDefaults(2, Settings.Defaults);
+        Check(settings.Thresholds.Length == 0 && settings.VolumeGrowthThresholds.Length == 5,
+            "price defaults are removable without touching volume periods");
+        RemoveDefaults(3, Settings.DefaultVolumeGrowth);
+        var withoutDefaults = Settings.Deserialize(JsonSerializer.Serialize(settings));
+        Check(withoutDefaults.Thresholds.Length == 0 && withoutDefaults.VolumeGrowthThresholds is [{ Seconds: 120, Percent: 599900 }],
+            "removed defaults do not return after loading, and a custom volume period survives");
+        Find<Button>("Удалить период 2 мин").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        var withoutPeriods = Settings.Deserialize(JsonSerializer.Serialize(settings));
+        Check(withoutPeriods.Thresholds.Length == 0 && withoutPeriods.VolumeGrowthThresholds.Length == 0 &&
+            withoutPeriods.PriceModule && withoutPeriods.VolumeModule, "a saved empty list stays empty for both enabled modules");
+        AddPeriod(3, "60");
+        AddPeriod(2, "15");
+        var restored = Settings.Deserialize(JsonSerializer.Serialize(settings));
+        Check(restored.Thresholds is [{ Seconds: 15, Enabled: true }] &&
+            restored.VolumeGrowthThresholds is [{ Seconds: 60, Enabled: true }], "a previously removed default period can be re-added to either module");
         window.Close();
+
+        void RemoveDefaults(int page, IEnumerable<Threshold> defaults)
+        {
+            Page(page);
+            foreach (var rule in defaults)
+            {
+                Find<Button>($"Удалить период {MainWindow.WindowName(rule.Seconds)}").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                window.UpdateLayout();
+            }
+        }
+
+        void AddPeriod(int page, string seconds)
+        {
+            Page(page);
+            Find<TextBox>("Период в секундах").Text = seconds;
+            Descendants(panel).OfType<Button>().Single(button => button.IsVisible && Equals(button.Content, "Добавить период"))
+                .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        }
     }
 
     private static T Field<T>(object owner, string name) => (T)owner.GetType().GetField(name, Flags)!.GetValue(owner)!;

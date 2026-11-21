@@ -42,6 +42,7 @@ internal static class SignalNotificationChecks
             !volumeNotice.Speech.Contains('·'), "speech names the market and summarizes the event without interface labels");
         CheckSpeechTemplates(price, volume);
         CheckSpeechEditor();
+        await CheckSignalCooldown();
 
         var sounds = new ConcurrentQueue<SignalTone>();
         var spoken = new ConcurrentQueue<string>();
@@ -140,7 +141,73 @@ internal static class SignalNotificationChecks
                 "a second notification of another kind reopens at the same position without taking focus");
             window.Close();
         }
-        Console.WriteLine("Signal templates, rounding, editor, notification channels, freshness, deduplication, and pinned/Overview routing passed.");
+        Console.WriteLine("Signal templates, rounding, repeat cooldown, notification channels, freshness and pinned/Overview routing passed.");
+    }
+
+    private static async Task CheckSignalCooldown()
+    {
+        var settings = Settings.Deserialize("""{"SignalCooldownMinutes":5}""");
+        Check(settings.SignalCooldownMinutes == 5 && Settings.Deserialize("{}").SignalCooldownMinutes == 0 &&
+            Settings.Deserialize("""{"SignalCooldownMinutes":1441}""").SignalCooldownMinutes == 0,
+            "repeat delay settings are persistent and opt-in");
+        settings.SignalSound = true;
+        settings.PriceSignalTone = SignalTone.Bell;
+        settings.VolumeSignalTone = SignalTone.Double;
+        var clock = new ManualSignalClock();
+        var sounds = new ConcurrentQueue<SignalTone>();
+        using var http = new HttpClient(new NoMarketData());
+        using var notifications = new SignalNotifications(settings, Dispatcher.CurrentDispatcher, _ => { }, sounds.Enqueue);
+        using var window = new MainWindow(false, settings, testHttp: http, testNotifications: notifications, signalClock: clock);
+        var cells = (ChartCell[])typeof(MainWindow).GetField("cells", Instance)!.GetValue(window)!;
+        var place = typeof(MainWindow).GetMethod("Place", Instance)!;
+        var spot = new Market(Venue.Gate, "PEPE_USDC", "PEPE", "USDC");
+        var future = new Market(Venue.Weex, "1000PEPEUSDT", "1000PEPE", "USDT", new("linear"), new(ListingAsset: "PEPE"));
+        var independent = new Market(Venue.Hyperliquid, "@148", "PEPE", "USDC", Identifiers: new(ListingAsset: "hyperliquid:distinct-pepe"));
+        var other = new Market(Venue.Gate, "BTC_USDC", "BTC", "USDC");
+        long eventTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        Route(spot);
+        Check(Placed(spot), "the first signal is placed immediately");
+        clock.Advance(TimeSpan.FromMinutes(2));
+        Route(future, SignalModule.Volume);
+        Check(!Placed(future), "the same confirmed coin is suppressed across venues, quotes, segments and modules");
+        Route(independent);
+        Route(other);
+        Check(Placed(independent) && Placed(other), "different coins and separate known identities are independent");
+        await Until(() => sounds.Count == 3);
+
+        clock.Advance(TimeSpan.FromMinutes(3) - TimeSpan.FromTicks(1));
+        Route(future, SignalModule.Volume);
+        Check(!Placed(future), "the entire selected delay is enforced");
+        clock.Advance(TimeSpan.FromTicks(1));
+        Route(future, SignalModule.Volume);
+        Check(Placed(future), "the next impulse passes at the boundary and dropped signals do not extend the pause");
+        await Until(() => sounds.Count == 4);
+        Check(sounds.SequenceEqual(new[] { SignalTone.Bell, SignalTone.Bell, SignalTone.Bell, SignalTone.Double }),
+            "suppressed impulses do not notify");
+
+        settings.SignalCooldownMinutes = 0;
+        Route(future, SignalModule.Volume);
+        await Until(() => sounds.Count == 5);
+        Check(sounds.Last() == SignalTone.Double, "turning off the delay takes effect without recreating signal feeds");
+
+        void Route(Market market, SignalModule module = SignalModule.Price) =>
+            place.Invoke(window, [new Signal(market, eventTime++, 30, 7, module)]);
+        bool Placed(Market market) => cells.Any(cell => cell.Choice?.Key == market.Key);
+    }
+
+    private sealed class ManualSignalClock : TimeProvider
+    {
+        private long ticks;
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+        public override long GetTimestamp() => ticks;
+        public void Advance(TimeSpan amount) => ticks += amount.Ticks;
+    }
+
+    private sealed class NoMarketData : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) =>
+            Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.NotFound));
     }
 
     private static void CheckSpeechTemplates(Signal price, Signal volume)
