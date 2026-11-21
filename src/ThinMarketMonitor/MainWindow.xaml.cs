@@ -677,7 +677,7 @@ public partial class MainWindow : Window, IDisposable
     private void OpenSettings(object sender, RoutedEventArgs e)
     {
         settingsPanel = new SettingsPanel(settings, new Updater(http), colibri, SettingsChanged, CloseDialog, Close, settings.Overview,
-            () => { notifications.SettingsChanged(); Save(); }, () => { RefreshOverview(); Save(); });
+            () => { notifications.SettingsChanged(); Save(); }, () => { RefreshOverview(); Save(); }, notifications.PreviewSound);
         settingsPanel.UpdateQuoteChoices(OverviewSourceQuotes());
         settingsPanel.UpdateFilter(CatalogStatus.Text);
         ShowDialog(settingsPanel);

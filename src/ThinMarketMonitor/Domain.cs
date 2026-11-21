@@ -51,6 +51,7 @@ internal record Trade(string Symbol, long Time, double Price, double Size = 0, s
 internal record Threshold(int Seconds, bool Enabled, double Percent);
 internal record VolumeRule(int Seconds, bool Enabled, double Usd);
 internal enum SignalModule { Price, Volume }
+internal enum SignalTone { System, Bell, Double, Soft }
 internal record Signal(Market Market, long Time, int Seconds, double Value, SignalModule Module = SignalModule.Price,
     double? CurrentTurnover = null, double? AverageTurnover = null, int? ReferenceSeconds = null, double? LastPrice = null);
 internal record ChartGesture(Key Key, MouseButton? Mouse = null)
@@ -137,6 +138,8 @@ internal sealed class Settings
     public bool SignalPopup { get; set; }
     public bool SignalSound { get; set; }
     public bool SignalVoice { get; set; }
+    public SignalTone PriceSignalTone { get; set; }
+    public SignalTone VolumeSignalTone { get; set; }
     public bool ColibriEnabled { get; set; }
     public bool ColibriOverviewSync { get; set; }
     public string ColibriSlot { get; set; } = "";
@@ -178,6 +181,8 @@ internal sealed class Settings
         settings.FuturesRules ??= [];
         settings.OverviewSpotRules ??= [];
         settings.OverviewFuturesRules ??= [];
+        if (!Enum.IsDefined(settings.PriceSignalTone)) settings.PriceSignalTone = SignalTone.System;
+        if (!Enum.IsDefined(settings.VolumeSignalTone)) settings.VolumeSignalTone = SignalTone.System;
         settings.OverviewQuotes = settings.OverviewQuotes?.Where(x => !string.IsNullOrWhiteSpace(x))
             .Select(CoinKey).Distinct(StringComparer.Ordinal).ToArray();
         settings.ColibriSlot = settings.ColibriSlot?.Trim() ?? "";

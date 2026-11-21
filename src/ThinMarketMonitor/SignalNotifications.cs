@@ -1,22 +1,22 @@
 using System.Globalization;
-using System.Media;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Threading;
 
 namespace ThinMarketMonitor;
 
-internal sealed record SignalNotice(string Title, string Details, string Speech, long Time)
+internal sealed record SignalNotice(string Ticker, string Kind, string Details, string Speech, long Time, SignalModule Module)
 {
     private static readonly CultureInfo Russian = CultureInfo.GetCultureInfo("ru-RU");
+    public string Title => $"{Ticker} · {Kind}";
 
     public static SignalNotice From(Signal signal)
     {
         bool volume = signal.Module == SignalModule.Volume;
         string type = volume ? "Импульс объёма" : "Импульс цены";
-        string title = $"{signal.Market.Ticker} · {type}";
         string window = MainWindow.WindowName(signal.Seconds);
         string percent = signal.Value.ToString("+0.00;-0.00;0.00", Russian);
         string change = volume ? $"{percent}% к среднему за {window}" : $"{percent}% за {window}";
@@ -31,7 +31,7 @@ internal sealed record SignalNotice(string Title, string Details, string Speech,
         }
         if (!volume && signal.LastPrice is { } price && double.IsFinite(price))
             details += $"\nЦена {price.ToString("G12", Russian)} {signal.Market.Quote}";
-        return new(title, details, speech, signal.Time);
+        return new(signal.Market.Ticker, type, details, speech, signal.Time, signal.Module);
     }
 
     private static string Money(double value) => value.ToString("N2", Russian);
@@ -55,7 +55,7 @@ internal sealed class SignalNotifications : IDisposable
     private readonly TimeProvider clock;
     private readonly DispatcherTimer popupTimer;
     private readonly Action<SignalNotice?> showPopup;
-    private readonly Action playSound;
+    private readonly Action<SignalTone> playSound;
     private readonly Action<string, CancellationToken> speak;
     private readonly SignalPopupWindow? popup;
     private readonly CancellationTokenSource stop = new();
@@ -64,14 +64,15 @@ internal sealed class SignalNotifications : IDisposable
     private long pruneAt;
     private Task? audioWorker;
     private CancellationTokenSource? activeVoice;
+    private SignalTone? preview;
     private bool disposed;
 
     public SignalNotifications(Settings settings, Dispatcher dispatcher, Action<SignalNotice?>? showPopup = null,
-        Action? playSound = null, Action<string, CancellationToken>? speak = null, TimeProvider? clock = null)
+        Action<SignalTone>? playSound = null, Action<string, CancellationToken>? speak = null, TimeProvider? clock = null)
     {
         this.settings = settings;
         this.clock = clock ?? TimeProvider.System;
-        this.playSound = playSound ?? SystemSounds.Asterisk.Play;
+        this.playSound = playSound ?? SignalSound.Play;
         this.speak = speak ?? WindowsSignalVoice.Speak;
         popup = showPopup == null ? new SignalPopupWindow() : null;
         this.showPopup = showPopup ?? popup!.Show;
@@ -102,8 +103,20 @@ internal sealed class SignalNotifications : IDisposable
         if (settings.SignalSound || settings.SignalVoice)
         {
             Enqueue(audio, notice);
-            if (audioWorker is not { IsCompleted: false }) audioWorker = PlayPending();
+            StartAudio();
         }
+    }
+
+    public void PreviewSound(SignalTone tone)
+    {
+        if (disposed) return;
+        preview = tone;
+        StartAudio();
+    }
+
+    private void StartAudio()
+    {
+        if (audioWorker is not { IsCompleted: false }) audioWorker = PlayPending();
     }
 
     public void SettingsChanged()
@@ -142,10 +155,22 @@ internal sealed class SignalNotifications : IDisposable
 
     private async Task PlayPending()
     {
-        while (!disposed && audio.TryDequeue(out var notice))
+        while (!disposed)
         {
+            if (preview is { } audition)
+            {
+                preview = null;
+                var token = stop.Token;
+                await Task.Run(() =>
+                {
+                    if (!token.IsCancellationRequested) TryPlay(() => playSound(audition));
+                });
+                continue;
+            }
+            if (!audio.TryDequeue(out var notice)) return;
             bool sound = settings.SignalSound, voice = settings.SignalVoice;
             if ((!sound && !voice) || !Fresh(notice.Time, Now)) continue;
+            SignalTone tone = notice.Module == SignalModule.Volume ? settings.VolumeSignalTone : settings.PriceSignalTone;
             var ct = stop.Token;
             using var voiceStop = voice ? CancellationTokenSource.CreateLinkedTokenSource(ct) : null;
             activeVoice = voiceStop;
@@ -154,7 +179,7 @@ internal sealed class SignalNotifications : IDisposable
                 if (ct.IsCancellationRequested) return;
                 if (sound)
                 {
-                    TryPlay(playSound);
+                    TryPlay(() => playSound(tone));
                     try { await Task.Delay(450, ct); }
                     catch (OperationCanceledException) { return; }
                 }
@@ -234,8 +259,10 @@ internal static class WindowsSignalVoice
 
 internal sealed class SignalPopupWindow : IDisposable
 {
+    private const double Inset = 16;
     private Window? window;
-    private TextBlock? title, details;
+    private TextBlock? ticker, kind, details;
+    private Border? badge;
 
     public void Show(SignalNotice? notice)
     {
@@ -245,33 +272,56 @@ internal sealed class SignalPopupWindow : IDisposable
             return;
         }
         window ??= CreateWindow();
-        title!.Text = notice.Title;
+        ticker!.Text = notice.Ticker;
+        kind!.Text = notice.Kind;
         details!.Text = notice.Details;
-        window.Opacity = 0;
-        window.Show();
-        window.UpdateLayout();
+        bool volume = notice.Module == SignalModule.Volume;
+        kind.Foreground = Terminal.Brush(volume ? "Rising" : "Accent");
+        badge!.Background = Terminal.Brush(volume ? "RequiredSurface" : "AccentSurface");
+        badge.Child = Terminal.Icon(volume ? "volume" : "activity");
+        System.Windows.Documents.TextElement.SetForeground(badge.Child, kind.Foreground);
+
         var workArea = SystemParameters.WorkArea;
-        window.Left = workArea.Right - window.ActualWidth - 16;
-        window.Top = workArea.Bottom - window.ActualHeight - 16;
-        window.Opacity = 1;
+        window.Width = Math.Clamp(workArea.Width - Inset * 2, 1, 380);
+        window.Left = workArea.Right - window.Width - Inset;
+        window.Top = workArea.Top + Inset;
+        if (!window.IsVisible) window.Show();
     }
 
     private Window CreateWindow()
     {
-        title = Terminal.Heading("");
-        title.TextWrapping = TextWrapping.Wrap;
-        title.Foreground = Terminal.Brush("Accent");
+        ticker = new TextBlock { FontSize = 16, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap };
+        kind = Terminal.Copy("");
         details = Terminal.Copy("", muted: false);
+        var caption = new StackPanel { Margin = new Thickness(10, 0, 5, 0) };
+        caption.Children.Add(ticker);
+        caption.Children.Add(kind);
+
+        var close = Terminal.IconButton("close", "Закрыть уведомление");
+        close.Width = close.Height = 25;
+        close.Focusable = false;
+        close.VerticalAlignment = VerticalAlignment.Top;
+        close.Click += (_, _) => window?.Hide();
+        badge = new Border { Width = 32, Height = 32, CornerRadius = new CornerRadius(6), VerticalAlignment = VerticalAlignment.Top };
+        var header = new DockPanel();
+        DockPanel.SetDock(close, Dock.Right);
+        DockPanel.SetDock(badge, Dock.Left);
+        header.Children.Add(close);
+        header.Children.Add(badge);
+        header.Children.Add(caption);
         var content = new StackPanel();
-        content.Children.Add(title);
+        content.Children.Add(header);
+        var separator = Terminal.Rule(new Thickness(0, 1, 0, 0));
+        separator.Margin = new Thickness(0, 9, 0, 8);
+        content.Children.Add(separator);
         content.Children.Add(details);
         var view = new Window
         {
             Title = "Thin Market Monitor · Сигнал", WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize,
-            ShowActivated = false, ShowInTaskbar = false, Topmost = true, Focusable = false,
-            Width = 378, SizeToContent = SizeToContent.Height, WindowStartupLocation = WindowStartupLocation.Manual,
-            Content = new Border { Child = content, Background = Terminal.Brush("Surface"), BorderBrush = Terminal.Brush("Accent"),
-                BorderThickness = new Thickness(3, 1, 1, 1), Padding = new Thickness(13, 10, 13, 10) }
+            ShowActivated = false, ShowInTaskbar = false, Topmost = true, Focusable = false, AllowsTransparency = true,
+            Background = Brushes.Transparent, SizeToContent = SizeToContent.Height, WindowStartupLocation = WindowStartupLocation.Manual,
+            Content = new Border { Child = content, Background = Terminal.Brush("Surface"), BorderBrush = Terminal.Brush("Outline"),
+                BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(8), Padding = new Thickness(14, 11, 13, 12) }
         };
         view.SourceInitialized += (_, _) => ((HwndSource)PresentationSource.FromVisual(view)).AddHook(NoActivation);
         return view;

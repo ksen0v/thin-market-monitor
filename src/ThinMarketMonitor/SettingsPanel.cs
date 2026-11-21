@@ -1,3 +1,5 @@
+using System.ComponentModel;
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -30,6 +32,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
     private readonly Action<bool> changed;
     private readonly Action saveNotifications;
     private readonly Action saveOverview;
+    private readonly Action<SignalTone> previewSound;
     private readonly Action close;
     private readonly Action restart;
     private Release? update;
@@ -38,7 +41,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
 
     public SettingsPanel(Settings settings, Updater updater, ColibriBridge colibri,
         Action<bool> changed, Action close, Action restart, bool overview = false, Action? saveNotifications = null,
-        Action? saveOverview = null)
+        Action? saveOverview = null, Action<SignalTone>? previewSound = null)
     {
         this.settings = settings;
         this.updater = updater;
@@ -46,6 +49,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         this.changed = changed;
         this.saveNotifications = saveNotifications ?? (() => changed(false));
         this.saveOverview = saveOverview ?? (() => changed(false));
+        this.previewSound = previewSound ?? (_ => { });
         this.close = close;
         this.restart = restart;
         Width = 664;
@@ -166,10 +170,23 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         var panel = new StackPanel();
         panel.Children.Add(Terminal.Heading("Уведомления о сигналах"));
         panel.Children.Add(Option("Всплывающее окно на рабочем столе", settings.SignalPopup, value => settings.SignalPopup = value));
-        panel.Children.Add(Option("Короткий системный звук", settings.SignalSound, value => settings.SignalSound = value));
+        panel.Children.Add(Option("Звук сигнала", settings.SignalSound, value => settings.SignalSound = value));
+        panel.Children.Add(SoundOption("Звук импульса цены", settings.PriceSignalTone, value => settings.PriceSignalTone = value));
+        panel.Children.Add(SoundOption("Звук импульса объёма", settings.VolumeSignalTone, value => settings.VolumeSignalTone = value));
         panel.Children.Add(Option("Озвучка на русском языке", settings.SignalVoice, value => settings.SignalVoice = value));
         voiceStatus.Margin = new Thickness(0, 8, 0, 0);
         panel.Children.Add(voiceStatus);
+        var speechSettings = new Button { Content = "Открыть параметры речи Windows", Margin = new Thickness(0, 6, 0, 0),
+            HorizontalAlignment = HorizontalAlignment.Left };
+        speechSettings.Click += (_, _) =>
+        {
+            try { using var process = Process.Start(new ProcessStartInfo("ms-settings:speech") { UseShellExecute = true }); }
+            catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
+            {
+                voiceStatus.Text = "Нажмите Win + R, введите ms-settings:speech и нажмите Enter.";
+            }
+        };
+        panel.Children.Add(speechSettings);
         return panel;
 
         CheckBox Option(string name, bool enabled, Action<bool> set)
@@ -182,6 +199,33 @@ internal sealed partial class SettingsPanel : Border, IDisposable
             };
             return check;
         }
+
+        FrameworkElement SoundOption(string name, SignalTone tone, Action<SignalTone> set)
+        {
+            var option = new StackPanel { Margin = new Thickness(20, 6, 0, 0) };
+            option.Children.Add(Terminal.Copy(name));
+            var row = new WrapPanel();
+            option.Children.Add(row);
+            var list = new ComboBox { Width = 145, MinHeight = 26, Margin = new Thickness(0, 0, 6, 0),
+                ItemsSource = SignalSound.Options, DisplayMemberPath = nameof(SignalToneOption.Label),
+                SelectedValuePath = nameof(SignalToneOption.Tone), SelectedValue = tone };
+            AutomationProperties.SetName(list, name);
+            list.SelectionChanged += (_, _) =>
+            {
+                if (list.SelectedValue is not SignalTone selected) return;
+                set(selected);
+                saveNotifications();
+            };
+            row.Children.Add(list);
+            var preview = new Button { Content = "Прослушать", MinHeight = 26 };
+            AutomationProperties.SetName(preview, $"Прослушать · {name.ToLowerInvariant()}");
+            preview.Click += (_, _) =>
+            {
+                if (list.SelectedValue is SignalTone selected) previewSound(selected);
+            };
+            row.Children.Add(preview);
+            return option;
+        }
     }
 
     private async Task CheckVoice()
@@ -191,7 +235,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         if (stop.IsCancellationRequested) return;
         voiceStatus.Text = available
             ? "Русский голос Windows доступен. Озвучка работает без сети."
-            : "Русский голос для настольных приложений не найден. Добавьте его в параметрах речи Windows, затем снова откройте этот раздел.";
+            : "Русский голос не найден. Откройте параметры речи, выберите «Добавление голосов» и добавьте русский. Затем снова откройте этот раздел.";
     }
 
     private StackPanel About()
