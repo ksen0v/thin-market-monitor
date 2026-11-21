@@ -143,6 +143,16 @@ internal sealed class Settings
     public bool SignalVoice { get; set; }
     public SignalTone PriceSignalTone { get; set; }
     public SignalTone VolumeSignalTone { get; set; }
+    public SignalSpeechOptions PriceSpeech { get; set; } = SignalSpeechOptions.Default;
+    public SignalSpeechOptions VolumeSpeech { get; set; } = SignalSpeechOptions.Default;
+    internal SignalSpeechOptions SpeechFor(SignalModule module) => module == SignalModule.Volume ? VolumeSpeech : PriceSpeech;
+
+    internal void SetSpeech(SignalModule module, SignalSpeechOptions options)
+    {
+        if (module == SignalModule.Volume) VolumeSpeech = options;
+        else PriceSpeech = options;
+    }
+
     public bool ColibriEnabled { get; set; }
     public bool ColibriOverviewSync { get; set; }
     public string ColibriSlot { get; set; } = "";
@@ -186,6 +196,8 @@ internal sealed class Settings
         settings.OverviewFuturesRules ??= [];
         if (!Enum.IsDefined(settings.PriceSignalTone)) settings.PriceSignalTone = SignalTone.System;
         if (!Enum.IsDefined(settings.VolumeSignalTone)) settings.VolumeSignalTone = SignalTone.System;
+        settings.PriceSpeech = SpeechOptions(settings.PriceSpeech);
+        settings.VolumeSpeech = SpeechOptions(settings.VolumeSpeech);
         settings.OverviewQuotes = settings.OverviewQuotes?.Where(x => !string.IsNullOrWhiteSpace(x))
             .Select(CoinKey).Distinct(StringComparer.Ordinal).ToArray();
         settings.ColibriSlot = settings.ColibriSlot?.Trim() ?? "";
@@ -245,6 +257,10 @@ internal sealed class Settings
             settings.FrameDown = settings.FrameUp == Key.Down ? Key.Up : Key.Down;
         return settings;
     }
+
+    private static SignalSpeechOptions SpeechOptions(SignalSpeechOptions? options) =>
+        options == null ? SignalSpeechOptions.Default :
+        options with { PercentDecimals = Math.Clamp(options.PercentDecimals, 0, SignalSpeech.MaxPercentDecimals) };
 
     public void Save()
     {

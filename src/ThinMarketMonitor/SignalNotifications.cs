@@ -13,7 +13,7 @@ internal sealed record SignalNotice(string Ticker, string Kind, string Details, 
     private static readonly CultureInfo Russian = CultureInfo.GetCultureInfo("ru-RU");
     public string Title => $"{Ticker} · {Kind}";
 
-    public static SignalNotice From(Signal signal)
+    public static SignalNotice From(Signal signal, SignalSpeechOptions? speech = null)
     {
         bool volume = signal.Module == SignalModule.Volume;
         string type = volume ? "Импульс объёма" : "Импульс цены";
@@ -28,7 +28,7 @@ internal sealed record SignalNotice(string Ticker, string Kind, string Details, 
         }
         if (!volume && signal.LastPrice is { } price && double.IsFinite(price))
             details += $"\nЦена {price.ToString("G12", Russian)} {signal.Market.Quote}";
-        return new(signal.Market.Ticker, type, details, SignalSpeech.Format(signal), signal.Time, signal.Module);
+        return new(signal.Market.Ticker, type, details, SignalSpeech.Format(signal, speech), signal.Time, signal.Module);
     }
 
     private static string Money(double value) => value.ToString("N2", Russian);
@@ -83,7 +83,7 @@ internal sealed class SignalNotifications : IDisposable
         if (last.TryGetValue(key, out long previous) && signal.Time <= previous) return;
         last[key] = signal.Time;
 
-        var notice = SignalNotice.From(signal);
+        var notice = SignalNotice.From(signal, settings.SpeechFor(signal.Module));
         if (settings.SignalPopup)
         {
             Enqueue(visual, notice);
@@ -103,10 +103,10 @@ internal sealed class SignalNotifications : IDisposable
         StartAudio();
     }
 
-    public void PreviewVoice()
+    public void PreviewVoice(string phrase)
     {
-        if (disposed) return;
-        voicePreview = RussianVoicePack.Preview;
+        if (disposed || string.IsNullOrWhiteSpace(phrase)) return;
+        voicePreview = phrase;
         StartAudio();
     }
 
