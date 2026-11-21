@@ -49,6 +49,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         this.close = close;
         this.restart = restart;
         Width = 664;
+        Height = StandardHeight;
         VerticalAlignment = VerticalAlignment.Center;
         Background = Terminal.Brush("Shell");
         BorderBrush = Terminal.Brush("Outline");
@@ -143,7 +144,6 @@ internal sealed partial class SettingsPanel : Border, IDisposable
     private void SelectPage(int index)
     {
         EndCapture();
-        Height = index is BlacklistPage or ModulesPage ? double.NaN : StandardHeight;
         for (int i = 0; i < pages.Length; i++)
         {
             bool selected = i == index;

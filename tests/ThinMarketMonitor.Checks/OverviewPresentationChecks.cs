@@ -155,7 +155,7 @@ internal static class OverviewPresentationChecks
     {
         var kraken = new MarketSource(Venue.Kraken);
         var settings = new Settings { Overview = true, OverviewSource = kraken, OverviewColumns = [] };
-        using var http = new HttpClient();
+        using var http = new HttpClient(new NoUpdates());
         using var window = new MainWindow(false, settings, testHttp: http) { Width = 1160, Height = 740 };
         Field<Dictionary<MarketSource, Catalog>>(window, "catalogs")[kraken] = new(new[] { "USD", "USDT", "USDC", "EUR", "GBP" }
             .Select(quote => new Market(Venue.Kraken, "BTC" + quote, "BTC", quote)).ToArray());
@@ -189,17 +189,14 @@ internal static class OverviewPresentationChecks
 
             ((Button)window.FindName("SettingsButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             var dialog = Field<SettingsPanel>(window, "settingsPanel");
+            var navigation = Field<Button[]>(dialog, "navigation");
+            int[] sections = [1, 2, 8, 3, 9, 4, 5, 6, 7, 1, 8, 0];
             await Select(0);
-            double standard = dialog.ActualHeight;
-            foreach (int page in new[] { 2, 4, 3, 5, 6, 9 })
+            var standard = DialogBounds();
+            foreach (int page in sections)
             {
                 await Select(page);
-                Check(dialog.ActualHeight == standard, $"ordinary settings page {page} uses the same height as Filters");
-            }
-            foreach (int page in new[] { 1, 8 })
-            {
-                await Select(page);
-                Check(double.IsNaN(dialog.Height), $"compact page {page} sizes to content");
+                Check(DialogBounds() == standard, $"settings page {page} keeps the size and position of Filters (expected {standard}, actual {DialogBounds()})");
             }
             await Select(5);
             var quotes = Field<WrapPanel>(dialog, "overviewQuotes");
@@ -214,16 +211,24 @@ internal static class OverviewPresentationChecks
                 "the overview list and saved settings reflect the checked quotes");
             Toggle("Все", true);
             Check(grid.Items.Count == 5 && settings.OverviewQuotes == null, "all quotes can be restored");
+            window.Width = window.MinWidth;
             window.Height = window.MinHeight;
             await Select(0);
-            double clamped = dialog.ActualHeight;
-            await Select(3);
-            Check(clamped < standard && dialog.ActualHeight == clamped && clamped < dialog.MaxHeight + 1.1,
-                "normal pages share the available height in a small window");
+            var clamped = DialogBounds();
+            Check(clamped.Height < standard.Height && clamped.Height < dialog.MaxHeight + 1.1,
+                "settings fit the available height in a small window");
+            foreach (int page in sections)
+            {
+                await Select(page);
+                Check(DialogBounds() == clamped, $"settings page {page} keeps the same size and position in a small window");
+            }
+
+            Rect DialogBounds() => new(dialog.TranslatePoint(new Point(), window), dialog.RenderSize);
 
             async Task Select(int page)
             {
-                typeof(SettingsPanel).GetMethod("SelectPage", Instance)!.Invoke(dialog, [page]);
+                navigation[page].Focus();
+                navigation[page].RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 await Layout(window);
             }
 
@@ -235,6 +240,12 @@ internal static class OverviewPresentationChecks
             }
         }
         finally { window.Close(); }
+    }
+
+    private sealed class NoUpdates : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
     }
 
     private static DataGridRow FindRow(DataGrid table, OverviewPanel.Row row) =>
