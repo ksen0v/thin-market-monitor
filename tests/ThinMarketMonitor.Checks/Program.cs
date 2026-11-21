@@ -367,6 +367,7 @@ foreach (string malformed in new[] { release.RootElement.GetRawText().Replace(Up
     Require(rejected, "installed update fails closed on missing or invalid Setup");
 }
 BlacklistChecks.Run();
+ListingAssetChecks.Run();
 ExtendedVenueChecks.Run();
 await SpreadChecks.Run();
 await ColibriChecks.Run();

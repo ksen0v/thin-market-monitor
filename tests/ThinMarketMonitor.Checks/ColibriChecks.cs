@@ -18,8 +18,12 @@ internal static class ColibriChecks
     private const string Slot = "91f1c08302a14ced8e452631843f3075";
     private static readonly Market Btc = new(Venue.Binance, "BTCUSDT", "BTC", "USDT");
     private static readonly Market Eth = new(Venue.Binance, "ETHUSDT", "ETH", "USDT");
-    private static readonly Market[] WeexContracts = new[] { "HYUNDAI", "AMD", "CRV", "BTC", "AMDL", "PAXG", "WXT" }
-        .Select(asset => new Market(Venue.Weex, asset + "USDT", asset, "USDT", new("linear"))).ToArray();
+    private static readonly Market[] WeexContracts = [
+        .. new[] { "HYUNDAI", "AMD", "CRV", "BTC", "AMDL", "PAXG", "WXT" }
+            .Select(asset => new Market(Venue.Weex, asset + "USDT", asset, "USDT", new("linear"))),
+        new(Venue.Weex, "1000PEPEUSDT", "1000PEPE", "USDT", new("linear"), new(ListingAsset: "PEPE")),
+        new(Venue.Weex, "1000FLOKIUSDT", "1000FLOKI", "USDT", new("linear"), new(ListingAsset: "FLOKI"))
+    ];
     private static readonly Market WeexAmdSpot = new(Venue.Weex, "AMDUSDT", "AMD", "USDT");
     private static readonly Market WeexUsdcSpot = new(Venue.Weex, "BTCUSDC", "BTC", "USDC");
 

@@ -62,6 +62,7 @@ internal sealed partial class ExchangeApi
     {
         string symbol = row.Optional(venue == Venue.Okx ? "instId" : venue == Venue.Gate ? "name" : "symbol");
         string baseCoin, quote;
+        string? listingAsset = null;
         double multiplier = 1;
         var unit = QuantityUnit.Base;
         bool stream = true;
@@ -71,17 +72,24 @@ internal sealed partial class ExchangeApi
                 if (row.Str(product == "coinm" ? "contractStatus" : "status") != "TRADING") return null;
                 baseCoin = row.Str("baseAsset"); quote = row.Str("quoteAsset");
                 if (product == "coinm") { unit = QuantityUnit.Quote; multiplier = row.Number("contractSize"); }
+                if (product == "usdm" && row.Optional("contractType") == "TRADIFI_PERPETUAL" &&
+                    row.Optional("underlyingType") == "EQUITY") listingAsset = UsStockListingAsset(baseCoin);
                 break;
             case Venue.Bybit:
                 if (row.Str("status") != "Trading" || row.Optional("isPreListing") == "True") return null;
                 baseCoin = row.Str("baseCoin"); quote = row.Str("quoteCoin");
                 if (product == "inverse") unit = QuantityUnit.Quote;
+                if (product == "linear" && row.Optional("contractType") == "LinearPerpetual" &&
+                    row.Optional("symbolType") == "stock" && row.Optional("marketRegion") == "US")
+                    listingAsset = UsStockListingAsset(row.Optional("underlyingTicker"));
                 break;
             case Venue.Okx:
                 if (row.Str("state") != "live" || row.Optional("ruleType") == "pre_market") return null;
                 var underlying = row.Str("uly").Split('-');
                 if (underlying.Length < 2) return null;
                 baseCoin = underlying[0]; quote = underlying[1];
+                if ((product is "SWAP" or "FUTURES") && row.Optional("instCategory") == "3" &&
+                    row.Optional("ctType") == "linear") listingAsset = UsStockListingAsset(baseCoin);
                 multiplier = row.Number("ctVal");
                 if (row.Number("ctMult") is > 0 and < double.PositiveInfinity) multiplier *= row.Number("ctMult");
                 unit = row.Str("ctValCcy") == quote ? QuantityUnit.Quote : QuantityUnit.Base;
@@ -118,9 +126,24 @@ internal sealed partial class ExchangeApi
             default: return null;
         }
         if (symbol.Length == 0 || baseCoin.Length == 0 || quote.Length == 0) throw new JsonException("Пустой контракт");
+        listingAsset ??= DenominatedListingAsset(venue, baseCoin);
         return new(venue, symbol, Underlying(venue, baseCoin), quote, new(product,
-            double.IsFinite(multiplier) && multiplier > 0 ? multiplier : 0, unit, stream));
+            double.IsFinite(multiplier) && multiplier > 0 ? multiplier : 0, unit, stream),
+            listingAsset == null ? null : new(ListingAsset: listingAsset));
     }
+
+    private static string? UsStockListingAsset(string ticker) =>
+        ticker is "AAPL" or "AMD" ? "equity:US:" + ticker : null;
+
+    // These aliases are for listing comparisons. Keep the exchange's price units and symbol.
+    private static string? DenominatedListingAsset(Venue venue, string asset) => (venue, asset) switch
+    {
+        (Venue.Weex or Venue.Lighter, "1000PEPE") or (Venue.Hyperliquid, "kPEPE") => "PEPE",
+        (Venue.Weex or Venue.Lighter, "1000FLOKI") or (Venue.Hyperliquid, "kFLOKI") => "FLOKI",
+        (Venue.Weex or Venue.Lighter, "1000SHIB") or (Venue.Hyperliquid, "kSHIB") => "SHIB",
+        (Venue.Weex or Venue.Lighter or Venue.KuCoin or Venue.Mexc, "1000BONK") or (Venue.Hyperliquid, "kBONK") => "BONK",
+        _ => null
+    };
 
     internal static string Underlying(Venue venue, string asset)
     {

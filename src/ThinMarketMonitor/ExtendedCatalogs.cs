@@ -73,9 +73,12 @@ internal sealed partial class ExchangeApi
                         row.Optional("status") is not ("" or "TRADING") || !IsTrue(row, "forwardContractFlag")) continue;
                     string asset = Asset(row.Str("baseAsset")), quote = Asset(row.Str("quoteAsset"));
                     bool tradFi = row.Optional("contractType") == "TRADIFI_PERPETUAL";
+                    string? listingAsset = tradFi
+                        ? (row.Optional("underlyingType") == "Stocks" ? UsStockListingAsset(asset) : null) ?? "weex:" + asset
+                        : DenominatedListingAsset(Venue.Weex, asset);
                     // The public trade q and candle volume are already base units, independent of order lot size.
                     yield return new(Venue.Weex, row.Str("symbol"), asset, quote, spot ? null : new("linear"),
-                        spot ? null : new(ListingAsset: tradFi ? "weex:" + asset : null, Collateral: row.Optional("marginAsset")));
+                        spot ? null : new(ListingAsset: listingAsset, Collateral: row.Optional("marginAsset")));
                 }
                 break;
             case Venue.Kraken when spot:
@@ -138,10 +141,16 @@ internal sealed partial class ExchangeApi
             string asset = Asset(row.Str("symbol")), quote = "USD";
             if (spot && (!tokens.TryGetValue(row.Str("base_asset_id"), out asset!) ||
                          !tokens.TryGetValue(row.Str("quote_asset_id"), out quote!))) continue;
-            bool external = !spot && row.Optional("market_deployer") is not ("" or "lighter");
+            string deployer = row.Optional("market_deployer");
+            string? listingAsset = spot ? null : deployer switch
+            {
+                "lighter" => DenominatedListingAsset(Venue.Lighter, asset),
+                "" => null,
+                _ => "lighter:" + id
+            };
             bool unitSize = spot || row.Number("multiplier") == 1;
             yield return new(Venue.Lighter, id, asset, quote, spot ? null : new("perp", unitSize ? 1 : 0),
-                new(ListingAsset: external ? "lighter:" + id : null, Collateral: spot ? null : tokens.GetValueOrDefault("3"),
+                new(ListingAsset: listingAsset, Collateral: spot ? null : tokens.GetValueOrDefault("3"),
                     Display: spot ? $"{asset}/{quote}" : $"{asset}/USD · {id}"));
         }
     }
@@ -189,7 +198,7 @@ internal sealed partial class ExchangeApi
                 // Hyperliquid specifies the oracle denomination for its core perps separately from margin.
                 string quote = dex.Length != 0 ? "USD" : asset is "PURR" or "HYPE" ? "USDC" : "USDT";
                 yield return new(Venue.Hyperliquid, symbol, asset, quote, new("perp"),
-                    new(ListingAsset: dex.Length == 0 ? null : "hyperliquid:" + symbol,
+                    new(ListingAsset: dex.Length == 0 ? DenominatedListingAsset(Venue.Hyperliquid, symbol) : "hyperliquid:" + symbol,
                         Collateral: collateral, Display: $"{symbol}/{quote}"));
             }
         }
