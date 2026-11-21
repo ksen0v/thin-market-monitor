@@ -90,7 +90,7 @@ if (args is ["--live"])
             int count = (await api.Candles(market, false, timeout.Token)).Length;
             Console.WriteLine($"{market.Venue}: {count} minute candles");
             int[] periods = [300, 3600];
-            var history = await api.HistoricalVolumes(market, periods, _ => Task.CompletedTask, timeout.Token);
+            var history = (await api.HistoricalVolumes(market, periods, timeout.Token))?.Amounts ?? new Dictionary<int, double>();
             var daily = ExchangeApi.HasBulkDay(market.Venue)
                 ? (await api.DayVolumes(market.Venue, timeout.Token)).GetValueOrDefault(market.Symbol, -1)
                 : await api.AlphaDayVolume(market, timeout.Token) ?? -1;
@@ -191,6 +191,7 @@ Require(ExchangeApi.Underlying(Venue.Binance, "1000SHIB") == "SHIB" &&
 Require(new Market(Venue.Binance, "BTCUSD_PERP", "BTC", "USD", new("coinm", 100, QuantityUnit.Quote))
     .Turnover(2, 65000) == 200, "inverse quote notional");
 await CandleHistoryChecks.Run();
+await HistoricalVolumeFilterChecks.Run();
 var secondsCandles = new LiveCandles(15);
 foreach (var trade in new Trade[] { new("AKE", 120000, 2), new("AKE", 122000, 4), new("AKE", 151000, 3) })
     secondsCandles.Add(trade);

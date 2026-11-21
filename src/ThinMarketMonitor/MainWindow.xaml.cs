@@ -20,6 +20,7 @@ public partial class MainWindow : Window, IDisposable
     private readonly bool persistSettings;
     private readonly ColibriBridge colibri;
     private readonly SignalNotifications notifications;
+    private readonly RussianVoicePack neuralVoice;
     private readonly Dictionary<MarketSource, Catalog> catalogs = new();
     private readonly ChartCell[] cells = new ChartCell[9];
     private readonly ChartCell overviewChart;
@@ -65,7 +66,8 @@ public partial class MainWindow : Window, IDisposable
         persistSettings = testSettings == null;
         InitializeComponent();
         Overlay.SizeChanged += (_, _) => FitSettingsDialog();
-        notifications = testNotifications ?? new(settings, Dispatcher);
+        neuralVoice = new(http, stop.Token);
+        notifications = testNotifications ?? new(settings, Dispatcher, speak: neuralVoice.Speak);
         api = new(http);
         colibri = new(settings, colibriClient);
         colibri.StatusChanged += ShowIntegrationStatus;
@@ -495,7 +497,7 @@ public partial class MainWindow : Window, IDisposable
     {
         var result = ListingFilter.Apply(catalogs, settings.Rule);
         missing = result.Missing.ToArray();
-        var allowed = result.Markets.Where(m => !settings.SignalBlocked(m)).ToArray();
+        var allowed = result.Markets.Where(settings.ShowsSignalMarket).ToArray();
         bool candidatesChanged = !candidates.SequenceEqual(allowed);
         if (candidatesChanged) candidates = allowed;
         var nextRules = settings.VolumeFilters.Where(r => r.Enabled).ToArray();
@@ -647,7 +649,7 @@ public partial class MainWindow : Window, IDisposable
     private void Place(Signal signal)
     {
         var market = signal.Market;
-        if (settings.SignalBlocked(market)) return;
+        if (!settings.ShowsSignalMarket(market)) return;
         notifications.Publish(signal);
         var visible = cells.Take(settings.Grid * settings.Grid).ToArray();
         if (visible.FirstOrDefault(c => c.Choice?.Key == market.Key) is { } existing)
@@ -677,7 +679,8 @@ public partial class MainWindow : Window, IDisposable
     private void OpenSettings(object sender, RoutedEventArgs e)
     {
         settingsPanel = new SettingsPanel(settings, new Updater(http), colibri, SettingsChanged, CloseDialog, Close, settings.Overview,
-            () => { notifications.SettingsChanged(); Save(); }, () => { RefreshOverview(); Save(); }, notifications.PreviewSound);
+            () => { notifications.SettingsChanged(); Save(); }, () => { RefreshOverview(); Save(); }, notifications.PreviewSound,
+            neuralVoice, notifications.PreviewVoice);
         settingsPanel.UpdateQuoteChoices(OverviewSourceQuotes());
         settingsPanel.UpdateFilter(CatalogStatus.Text);
         ShowDialog(settingsPanel);
@@ -771,6 +774,7 @@ public partial class MainWindow : Window, IDisposable
         if (watchingNetwork) NetworkChange.NetworkAddressChanged -= NetworkAddressChanged;
         colibri.Dispose();
         notifications.Dispose();
+        neuralVoice.Dispose();
         timer.Stop();
         settingsPanel?.Dispose();
         streams?.Dispose();

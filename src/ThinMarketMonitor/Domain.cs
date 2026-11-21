@@ -104,6 +104,7 @@ internal sealed class Settings
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string[]? OverviewQuotes { get; set; }
     public bool HideOverviewLeveragedTokens { get; set; }
+    public bool HideSignalLeveragedTokens { get; set; }
     public bool ShowsOverviewQuote(string quote) => OverviewQuotes == null || OverviewQuotes.Contains(quote, StringComparer.Ordinal);
     public bool ShowsOverviewMarket(Market market) => ShowsOverviewQuote(market.Quote) &&
         (!HideOverviewLeveragedTokens || !market.IsLeveragedToken);
@@ -125,6 +126,8 @@ internal sealed class Settings
     public SpreadRule SpreadFilter { get; set; } = new();
     public string[] SignalBlacklist { get; set; } = [];
     public bool SignalBlocked(Market market) => SignalBlacklist.Contains(CoinKey(market.Base), StringComparer.Ordinal);
+    public bool ShowsSignalMarket(Market market) => !SignalBlocked(market) &&
+        (!HideSignalLeveragedTokens || !market.IsLeveragedToken);
     internal static string CoinKey(string coin) => coin.Trim().ToUpperInvariant();
     public bool BlockSignals(Market market)
     {

@@ -105,3 +105,11 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+Optional Russian neural speech
+The application can download the Piper runtime (rhasspy/piper, MIT; its archive
+includes eSpeak NG and other components under their own licenses) and the
+ru_RU-dmitri-medium Piper voice from their upstream releases on request.
+Runtime and component sources: https://github.com/rhasspy/piper/tree/2023.11.14-2
+Voice and model card: https://huggingface.co/rhasspy/piper-voices/tree/2f8dbe0/ru/ru_RU/dmitri/medium
+The model card credits the Nabu Casa voice dataset (CC0).

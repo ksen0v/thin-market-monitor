@@ -35,6 +35,10 @@ internal static class SignalNotificationChecks
         var priceNotice = SignalNotice.From(price);
         Check(priceNotice.Title.Contains("цены") && priceNotice.Details.Contains("+5,13% за 15 с") &&
             priceNotice.Details.Contains("1,234E-05 USDT") && priceNotice.Speech.Contains("15 секунд"), "price contains real change, trade price and window");
+        Check(RussianVoicePack.Preview == "би ти си ю эс ди ти на Гейт спот. Импульс 5 процентов за 15 секунд." &&
+            SignalSpeech.Format(price with { Value = 1.56, Seconds = 1 }).Contains("1,56 процента за 1 секунду") &&
+            volumeNotice.Speech.EndsWith("Рост объёма 234,56 процента за 1 минуту.") &&
+            !volumeNotice.Speech.Contains('·'), "speech names the market and summarizes the event without interface labels");
 
         var sounds = new ConcurrentQueue<SignalTone>();
         var spoken = new ConcurrentQueue<string>();
@@ -70,7 +74,7 @@ internal static class SignalNotificationChecks
         notifications.Publish(volume);
         notifications.Publish(price with { Time = now + 1 });
         await Until(() => spoken.Count == 3);
-        Check(maxActive == 1 && spoken.ElementAt(1).Contains("объёма") && spoken.ElementAt(2).Contains("цены") &&
+        Check(maxActive == 1 && spoken.ElementAt(1).Contains("объёма") && spoken.ElementAt(2).Contains("Импульс") &&
             sounds.Count == 1, "volume and price queue in sequence, playback never overlaps");
         settings.SignalVoice = false;
         notifications.SettingsChanged();

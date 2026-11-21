@@ -33,15 +33,20 @@ internal sealed partial class SettingsPanel : Border, IDisposable
     private readonly Action saveNotifications;
     private readonly Action saveOverview;
     private readonly Action<SignalTone> previewSound;
+    private readonly RussianVoicePack? neuralVoice;
+    private readonly Action previewVoice;
     private readonly Action close;
     private readonly Action restart;
     private Release? update;
     private bool checkedOnOpen;
+    private bool downloadingVoice;
+    private Button? neuralVoicePreviewButton;
     public bool Installing { get; private set; }
 
     public SettingsPanel(Settings settings, Updater updater, ColibriBridge colibri,
         Action<bool> changed, Action close, Action restart, bool overview = false, Action? saveNotifications = null,
-        Action? saveOverview = null, Action<SignalTone>? previewSound = null)
+        Action? saveOverview = null, Action<SignalTone>? previewSound = null, RussianVoicePack? neuralVoice = null,
+        Action? previewVoice = null)
     {
         this.settings = settings;
         this.updater = updater;
@@ -50,6 +55,8 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         this.saveNotifications = saveNotifications ?? (() => changed(false));
         this.saveOverview = saveOverview ?? (() => changed(false));
         this.previewSound = previewSound ?? (_ => { });
+        this.neuralVoice = neuralVoice;
+        this.previewVoice = previewVoice ?? (() => { });
         this.close = close;
         this.restart = restart;
         Width = 664;
@@ -176,6 +183,43 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         panel.Children.Add(Option("Озвучка на русском языке", settings.SignalVoice, value => settings.SignalVoice = value));
         voiceStatus.Margin = new Thickness(0, 8, 0, 0);
         panel.Children.Add(voiceStatus);
+        if (neuralVoice != null)
+        {
+            var actions = new WrapPanel { Margin = new Thickness(0, 6, 0, 0) };
+            var download = new Button { Content = "Загрузить нейроголос · 86 МБ", Margin = new Thickness(0, 0, 6, 4),
+                Visibility = neuralVoice.IsReady ? Visibility.Collapsed : Visibility.Visible };
+            var listen = new Button { Content = "Прослушать голос", Margin = new Thickness(0, 0, 0, 4), IsEnabled = neuralVoice.IsReady };
+            neuralVoicePreviewButton = listen;
+            listen.Click += (_, _) => this.previewVoice();
+            download.Click += async (_, _) =>
+            {
+                downloadingVoice = true;
+                download.IsEnabled = false;
+                voiceStatus.Text = "Загружается русский голос «Дмитрий»…";
+                try
+                {
+                    await neuralVoice.Install().WaitAsync(stop.Token);
+                    download.Visibility = Visibility.Collapsed;
+                    await CheckVoice();
+                }
+                catch (Exception ex) when (ex is not OutOfMemoryException)
+                {
+                    if (!stop.IsCancellationRequested)
+                    {
+                        voiceStatus.Text = "Не удалось загрузить нейроголос. Повторите попытку.";
+                        voiceStatus.ToolTip = ex.Message;
+                    }
+                }
+                finally
+                {
+                    downloadingVoice = false;
+                    if (!stop.IsCancellationRequested) download.IsEnabled = true;
+                }
+            };
+            actions.Children.Add(download);
+            actions.Children.Add(listen);
+            panel.Children.Add(actions);
+        }
         var speechSettings = new Button { Content = "Открыть параметры речи Windows", Margin = new Thickness(0, 6, 0, 0),
             HorizontalAlignment = HorizontalAlignment.Left };
         speechSettings.Click += (_, _) =>
@@ -230,12 +274,21 @@ internal sealed partial class SettingsPanel : Border, IDisposable
 
     private async Task CheckVoice()
     {
+        if (neuralVoice?.IsReady == true)
+        {
+            voiceStatus.Text = "Нейроголос «Дмитрий» готов. Озвучка работает без интернета.";
+            voiceStatus.ToolTip = null;
+            if (neuralVoicePreviewButton != null) neuralVoicePreviewButton.IsEnabled = true;
+            return;
+        }
+        if (downloadingVoice) return;
         voiceStatus.Text = "Проверка русского голоса Windows…";
         bool available = await Task.Run(WindowsSignalVoice.RussianVoiceAvailable);
-        if (stop.IsCancellationRequested) return;
+        if (stop.IsCancellationRequested || downloadingVoice) return;
+        if (neuralVoicePreviewButton != null) neuralVoicePreviewButton.IsEnabled = available;
         voiceStatus.Text = available
-            ? "Русский голос Windows доступен. Озвучка работает без сети."
-            : "Русский голос не найден. Откройте параметры речи, выберите «Добавление голосов» и добавьте русский. Затем снова откройте этот раздел.";
+            ? "Доступен русский голос Windows. Для нейроголоса нужна однократная загрузка."
+            : "Загрузите русский нейроголос или добавьте русский голос в параметрах речи Windows.";
     }
 
     private StackPanel About()

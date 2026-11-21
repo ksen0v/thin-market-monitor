@@ -34,6 +34,11 @@ internal static class OverviewPresentationChecks
         var future = catalog.Markets.Single(m => m.Base == "BTC3S") with { Contract = new("futures/usdt") };
         Check(settings.ShowsOverviewMarket(future) && Settings.Deserialize(JsonSerializer.Serialize(settings)).HideOverviewLeveragedTokens &&
             !Settings.Deserialize("{}").HideOverviewLeveragedTokens, "the switch is saved and does not affect futures");
+        Check(catalog.Markets.All(settings.ShowsSignalMarket), "the overview switch does not affect signal markets");
+        settings.HideSignalLeveragedTokens = true;
+        Check(catalog.Markets.Where(settings.ShowsSignalMarket).Select(m => m.Base).SequenceEqual(new[] { "XRP", "TEST3S", "BTC" }) &&
+            settings.ShowsSignalMarket(future) && Settings.Deserialize(JsonSerializer.Serialize(settings)).HideSignalLeveragedTokens,
+            "signals have an independent persistent switch that excludes only confirmed leveraged spot tokens");
     }
 
     private sealed class GatePairs : HttpMessageHandler

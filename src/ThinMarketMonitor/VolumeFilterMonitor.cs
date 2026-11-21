@@ -34,7 +34,11 @@ internal sealed class VolumeFilterMonitor : IDisposable
             int[] periods = rules.Select(r => r.Seconds).Distinct().ToArray();
             var historical = group.Where(m => ExchangeApi.HasHistoricalQuoteVolume(m) &&
                 periods.Any(s => s != 86400 || !ExchangeApi.HasBulkDay(m))).ToArray();
-            if (historical.Length > 0) tasks.Add(Task.Run(() => RefreshHistory(api, historical, periods, stop.Token)));
+            if (historical.Length == 0) continue;
+            foreach (var market in historical)
+                if (api.CachedHistoricalVolumes(market, CandlePeriods(market, periods)) is { } cached)
+                    history[market.Key] = cached;
+            tasks.Add(Task.Run(() => RefreshHistory(api, historical, periods, stop.Token)));
         }
         completion = Task.WhenAll(tasks);
     }
@@ -90,7 +94,6 @@ internal sealed class VolumeFilterMonitor : IDisposable
                 }
                 catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
-                    daily.TryRemove(source, out _);
                     if (ex is HttpRequestException { StatusCode: HttpStatusCode.TooManyRequests }) delay = 90_000;
                 }
                 await Task.Delay(delay, ct);
@@ -101,45 +104,50 @@ internal sealed class VolumeFilterMonitor : IDisposable
 
     private async Task RefreshHistory(ExchangeApi api, Market[] markets, int[] periods, CancellationToken ct)
     {
-        int interval = markets[0].Venue is Venue.Mexc or Venue.Alpha ? 600 : 350;
         bool alphaDay = markets[0].Venue == Venue.Alpha && periods.Contains(86400);
-        long next = 0;
-        async Task Pace(CancellationToken token)
-        {
-            long wait = next - Environment.TickCount64;
-            if (wait > 0) await Task.Delay((int)wait, token);
-            next = Environment.TickCount64 + interval;
-        }
+        long retryAt = 0;
+        var work = markets.Select(market => (Market: market, Periods: CandlePeriods(market, periods))).ToArray();
 
         try
         {
             while (true)
             {
-                foreach (var market in markets)
+                await Parallel.ForEachAsync(work, new ParallelOptions { CancellationToken = ct, MaxDegreeOfParallelism = 4 }, async (job, token) =>
                 {
+                    var market = job.Market;
+                    long delay = Volatile.Read(ref retryAt) - Environment.TickCount64;
+                    if (delay > 0) await Task.Delay((int)delay, token);
                     try
                     {
-                        int[] candlePeriods = periods.Where(s => s != 86400 || !alphaDay && !ExchangeApi.HasBulkDay(market)).ToArray();
-                        var amounts = await api.HistoricalVolumes(market, candlePeriods, Pace, ct);
+                        var snapshot = await api.HistoricalVolumes(market, job.Periods, token);
+                        long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                         if (alphaDay)
                         {
-                            await Pace(ct);
-                            if (await api.AlphaDayVolume(market, ct) is { } day) amounts[86400] = day;
+                            if (await api.AlphaDayVolume(market, token) is { } day)
+                            {
+                                var amounts = snapshot?.Amounts.ToDictionary() ?? new Dictionary<int, double>();
+                                amounts[86400] = day;
+                                snapshot = new(snapshot?.Time ?? now, amounts);
+                            }
                         }
-                        history[market.Key] = new(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), amounts);
+                        if (snapshot is { } fresh && (!history.TryGetValue(market.Key, out var previous) ||
+                            now - previous.Time > validFor || fresh.Amounts.Count >= previous.Amounts.Count))
+                            history[market.Key] = fresh;
                     }
-                    catch (Exception ex) when (!ct.IsCancellationRequested)
+                    catch (Exception ex) when (!token.IsCancellationRequested)
                     {
-                        history.TryRemove(market.Key, out _);
                         if (ex is HttpRequestException { StatusCode: HttpStatusCode.TooManyRequests })
-                            await Task.Delay(60_000, ct);
+                            Interlocked.Exchange(ref retryAt, Environment.TickCount64 + 60_000);
                     }
-                }
+                });
                 await Task.Delay(TimeSpan.FromMinutes(1), ct);
             }
         }
         catch (Exception) when (ct.IsCancellationRequested) { }
     }
+
+    private static int[] CandlePeriods(Market market, int[] periods) =>
+        periods.Where(s => s != 86400 || market.Venue != Venue.Alpha && !ExchangeApi.HasBulkDay(market)).ToArray();
 
     public void Dispose()
     {

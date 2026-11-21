@@ -1,9 +1,14 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 
 namespace ThinMarketMonitor;
 
 internal sealed partial class ExchangeApi
 {
+    private const long Minute = 60_000;
+    private readonly ConcurrentDictionary<Market, QuoteVolumeHistory> closedVolumes = new();
+    private long nextVolumePrune;
+
     internal static bool HasBulkDay(Venue venue) => venue != Venue.Alpha;
 
     internal static bool HasBulkDay(Market m) => m.Venue != Venue.Alpha &&
@@ -13,6 +18,7 @@ internal sealed partial class ExchangeApi
     public async Task<double?> AlphaDayVolume(Market market, CancellationToken ct)
     {
         string symbol = Uri.EscapeDataString(market.Symbol);
+        await PaceHistory(Venue.Alpha, ct);
         var row = Envelope(await Get(Alpha + $"alpha-trade/ticker?symbol={symbol}", ct), "000000");
         double amount = row.Number("quoteVolume");
         double closing = row.Number("closeTime");
@@ -68,21 +74,69 @@ internal sealed partial class ExchangeApi
         return output;
     }
 
-    public async Task<Dictionary<int, double>> HistoricalVolumes(Market market, int[] periods,
-        Func<CancellationToken, Task> pace, CancellationToken ct)
+    internal VolumeSnapshot? CachedHistoricalVolumes(Market market, int[] periods)
     {
-        if (periods.Length == 0) return new();
-        // Leave a full minute for the exchange to finalize the last included bar.
-        long end = (DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 60_000 - 1) * 60_000;
-        if (!HasHistoricalQuoteVolume(market)) return new();
+        if (periods.Length == 0 || !closedVolumes.TryGetValue(market, out var series)) return null;
+        long end = CandleNow / Minute * Minute;
+        return BestCompleteVolumes(market, series.Copy(end - periods.Max() * 1000L - Minute, end), periods, end);
+    }
+
+    public async Task<VolumeSnapshot?> HistoricalVolumes(Market market, int[] periods, CancellationToken ct)
+    {
+        if (periods.Length == 0 || !UsdQuotes.Supported(market) || !HasHistoricalQuoteVolume(market)) return null;
+        long end = CandleNow / Minute * Minute;
+        int lookback = periods.Max();
+        long start = end - lookback * 1000L - Minute;
+        long ticks = Environment.TickCount64, pruneAt = Volatile.Read(ref nextVolumePrune);
+        if (ticks >= pruneAt && Interlocked.CompareExchange(ref nextVolumePrune, ticks + 300_000, pruneAt) == pruneAt)
+            foreach (var entry in closedVolumes)
+                if (ticks - entry.Value.LastRead > 1_800_000) closedVolumes.TryRemove(entry);
+        var series = closedVolumes.GetOrAdd(market, _ => new());
+        var known = series.Copy(start, end);
+        var prior = BestCompleteVolumes(market, known, periods, end);
+        if (prior is { } cached && cached.Time == end && cached.Amounts.Count == periods.Length) return cached;
+
+        if (known.Count == 0)
+            await AddRange(start, end);
+        else
+        {
+            long earliest = known.Keys.Min(), latest = known.Keys.Max();
+            // Fetch the new edge first. Reuse exact, already settled minutes from the previous window.
+            if (latest + Minute < end) await AddRange(latest + Minute, end);
+            if (earliest > start && prior?.Amounts.Count != periods.Length) await AddRange(start, earliest);
+            if (earliest == start && latest + Minute == end && prior?.Amounts.Count != periods.Length)
+                await AddRange(start, end);
+        }
+        return BestCompleteVolumes(market, series.Copy(start, end), periods, end);
+
+        async Task AddRange(long from, long until)
+        {
+            var fresh = await ReadVolumeBars(market, from, until, ct);
+            ct.ThrowIfCancellationRequested();
+            series.Merge(fresh, end, lookback);
+        }
+    }
+
+    private static VolumeSnapshot? BestCompleteVolumes(Market market, Dictionary<long, double> bars, int[] periods, long end)
+    {
+        if (bars.Count == 0) return null;
+        bool gapsAreEmpty = market.Venue == Venue.KuCoin;
+        var latest = CompleteVolumes(bars, periods, end, gapsAreEmpty);
+        if (latest.Count == periods.Length) return new(end, latest);
+        // Some exchanges publish the last closed bar a few seconds into the next minute.
+        var previous = CompleteVolumes(bars, periods, end - Minute, gapsAreEmpty);
+        if (previous.Count > latest.Count) return new(end - Minute, previous);
+        return latest.Count == 0 ? null : new(end, latest);
+    }
+
+    private async Task<Dictionary<long, double>> ReadVolumeBars(Market market, long start, long end, CancellationToken ct)
+    {
         if (market.Contract != null || market.Venue.Extended())
         {
-            if (market.Venue.Extended()) await pace(ct);
-            var results = await CandlePage(market, 60, end, periods.Max() / 60, ct);
-            return CompleteVolumes(results.Where(c => c.QuoteVolume.HasValue).ToDictionary(c => c.Time, c => c.QuoteVolume!.Value),
-                periods, end, market.Venue == Venue.KuCoin);
+            var results = await CandlePage(market, 60, end, (int)((end - start) / Minute), ct);
+            return results.Where(c => c.QuoteVolume.HasValue && c.Time >= start && c.Time < end)
+                .ToDictionary(c => c.Time, c => c.QuoteVolume!.Value);
         }
-        long start = end - periods.Max() * 1000L;
         var bars = new Dictionary<long, double>();
         string symbol = Uri.EscapeDataString(market.Symbol);
         int pageMinutes = market.Venue == Venue.Okx ? 100 : 240;
@@ -102,7 +156,7 @@ internal sealed partial class ExchangeApi
                 Venue.Alpha => Alpha + $"alpha-trade/klines?symbol={symbol}&interval=1m&startTime={left}&endTime={right - 1}&limit={limit}",
                 _ => throw new ArgumentOutOfRangeException(nameof(market))
             };
-            await pace(ct);
+            await PaceHistory(market.Venue, ct);
             var root = await Get(url, ct);
             var rows = market.Venue switch
             {
@@ -118,7 +172,30 @@ internal sealed partial class ExchangeApi
                     bars[candle.Time] = candle.QuoteVolume;
         }
 
-        return CompleteVolumes(bars, periods, end, market.Venue == Venue.KuCoin);
+        return bars;
+    }
+
+    private sealed class QuoteVolumeHistory
+    {
+        private readonly Dictionary<long, double> bars = new();
+        private long lastRead = Environment.TickCount64;
+        public long LastRead => Volatile.Read(ref lastRead);
+
+        public Dictionary<long, double> Copy(long start, long end)
+        {
+            Volatile.Write(ref lastRead, Environment.TickCount64);
+            lock (bars) return bars.Where(x => x.Key >= start && x.Key < end).ToDictionary();
+        }
+
+        public void Merge(Dictionary<long, double> incoming, long end, int lookback)
+        {
+            lock (bars)
+            {
+                long oldest = end - Math.Max(3600, lookback) * 1000L - 2 * Minute;
+                foreach (long time in bars.Keys.Where(time => time < oldest).ToArray()) bars.Remove(time);
+                foreach (var (time, volume) in incoming) if (time >= oldest && time < end) bars[time] = volume;
+            }
+        }
     }
 
     internal static (long Time, double QuoteVolume)? DecodeVolumeBar(Venue venue, JsonElement row)

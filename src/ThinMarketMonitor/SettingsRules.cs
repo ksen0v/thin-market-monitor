@@ -86,7 +86,18 @@ internal sealed partial class SettingsPanel
             RuleKind.Volume => "Рост оборота исполненных сделок относительно среднего: +100% = вдвое среднего. Покупки и продажи суммируются.",
             _ => "Минимальный объём после фильтра листингов. Действуют все включённые условия. USD-стейблкоины ≈ $1."
         }));
-        if (filter) panel.Children.Add(Terminal.Copy("24 ч — данные тикера. Остальные периоды — завершённые минутные свечи."));
+        if (filter)
+        {
+            panel.Children.Add(Terminal.Copy("24 ч — данные тикера. Остальные периоды — завершённые минутные свечи."));
+            var leveraged = new CheckBox { Content = "Исключать из сигналов токены с плечом (3L, 3S, 5L, 5S)",
+                IsChecked = settings.HideSignalLeveragedTokens, Margin = new Thickness(0, 8, 0, 0) };
+            leveraged.Click += (_, _) =>
+            {
+                settings.HideSignalLeveragedTokens = leveraged.IsChecked == true;
+                changed(false);
+            };
+            panel.Children.Add(leveraged);
+        }
         if (kind == RuleKind.Volume) panel.Children.Add(VolumeBaselineOptions());
         var rows = new StackPanel { Margin = new Thickness(0, 12, 0, 6) };
         panel.Children.Add(rows);

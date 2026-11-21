@@ -21,30 +21,18 @@ internal sealed record SignalNotice(string Ticker, string Kind, string Details, 
         string percent = signal.Value.ToString("+0.00;-0.00;0.00", Russian);
         string change = volume ? $"{percent}% к среднему за {window}" : $"{percent}% за {window}";
         string details = $"{signal.Market.Source.Label}\n{change}";
-        string baseline = volume ? " к среднему" : "";
-        string speech = $"{type}. {signal.Market.Ticker}. {signal.Market.Source.Label}. Рост {signal.Value.ToString("0.00", Russian)} процента{baseline}. Окно {SpokenWindow(signal.Seconds)}.";
         if (volume && signal.CurrentTurnover is { } current && signal.AverageTurnover is { } average)
         {
             details += $"\nОборот {Money(current)} USD · средний {Money(average)} USD";
             if (signal.ReferenceSeconds is { } reference) details += $"\nБаза · предыдущие {MainWindow.WindowName(reference)}";
-            speech += $" Оборот {Money(current)} долларов.";
         }
         if (!volume && signal.LastPrice is { } price && double.IsFinite(price))
             details += $"\nЦена {price.ToString("G12", Russian)} {signal.Market.Quote}";
-        return new(signal.Market.Ticker, type, details, speech, signal.Time, signal.Module);
+        return new(signal.Market.Ticker, type, details, SignalSpeech.Format(signal), signal.Time, signal.Module);
     }
 
     private static string Money(double value) => value.ToString("N2", Russian);
 
-    private static string SpokenWindow(int seconds)
-    {
-        if (seconds % 3600 == 0) return Duration(seconds / 3600, "час", "часа", "часов");
-        if (seconds % 60 == 0) return Duration(seconds / 60, "минута", "минуты", "минут");
-        return Duration(seconds, "секунда", "секунды", "секунд");
-
-        static string Duration(int value, string one, string few, string many) =>
-            $"{value} {(value % 100 is >= 11 and <= 14 ? many : (value % 10) switch { 1 => one, >= 2 and <= 4 => few, _ => many })}";
-    }
 }
 
 internal sealed class SignalNotifications : IDisposable
@@ -65,6 +53,7 @@ internal sealed class SignalNotifications : IDisposable
     private Task? audioWorker;
     private CancellationTokenSource? activeVoice;
     private SignalTone? preview;
+    private string? voicePreview;
     private bool disposed;
 
     public SignalNotifications(Settings settings, Dispatcher dispatcher, Action<SignalNotice?>? showPopup = null,
@@ -111,6 +100,13 @@ internal sealed class SignalNotifications : IDisposable
     {
         if (disposed) return;
         preview = tone;
+        StartAudio();
+    }
+
+    public void PreviewVoice()
+    {
+        if (disposed) return;
+        voicePreview = RussianVoicePack.Preview;
         StartAudio();
     }
 
@@ -164,6 +160,16 @@ internal sealed class SignalNotifications : IDisposable
                 await Task.Run(() =>
                 {
                     if (!token.IsCancellationRequested) TryPlay(() => playSound(audition));
+                });
+                continue;
+            }
+            if (voicePreview is { } phrase)
+            {
+                voicePreview = null;
+                var token = stop.Token;
+                await Task.Run(() =>
+                {
+                    if (!token.IsCancellationRequested) TryPlay(() => speak(phrase, token));
                 });
                 continue;
             }
@@ -238,6 +244,7 @@ internal static class WindowsSignalVoice
             token = ((dynamic)voices).Item(0);
             dynamic speech = voice;
             speech.Voice = token;
+            speech.Rate = 2;
             const int asynchronous = 1, purge = 2, plainText = 16;
             speech.Speak(message, asynchronous | plainText);
             while (!speech.WaitUntilDone(100))
