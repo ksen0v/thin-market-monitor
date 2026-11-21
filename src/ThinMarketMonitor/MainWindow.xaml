@@ -52,9 +52,35 @@
                         <Button x:Name="DrawerSwitch" Style="{StaticResource IconButton}" Width="28" Height="30"
                                 VerticalAlignment="Top" Margin="1,7" Click="ChangeDrawer"/>
                     </Border>
-                    <ContentControl x:Name="OverviewDrawerHost" DockPanel.Dock="Right" HorizontalContentAlignment="Stretch"
-                                    VerticalContentAlignment="Stretch"/>
-                    <ContentControl x:Name="OverviewChartHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
+                    <Grid x:Name="OverviewBody" SizeChanged="OverviewBodySizeChanged">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" MinWidth="285"/>
+                            <ColumnDefinition x:Name="OverviewDividerColumn" Width="10"/>
+                            <ColumnDefinition x:Name="OverviewDrawerColumn" Width="0.55*"/>
+                        </Grid.ColumnDefinitions>
+                        <ContentControl x:Name="OverviewChartHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
+                        <GridSplitter x:Name="OverviewDivider" Grid.Column="1" Width="10" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                                      ResizeDirection="Columns" ResizeBehavior="PreviousAndNext" DragCompleted="OverviewDividerCompleted"
+                                      ShowsPreview="True" KeyboardIncrement="16" DragIncrement="1" Cursor="SizeWE"
+                                      AutomationProperties.Name="Ширина списка инструментов"
+                                      ToolTip="Перетащите, чтобы изменить ширину списка инструментов"
+                                      FocusVisualStyle="{StaticResource TerminalFocus}">
+                            <GridSplitter.Template>
+                                <ControlTemplate TargetType="GridSplitter">
+                                    <Grid Background="Transparent">
+                                        <Border x:Name="Grip" Width="3" Height="36" CornerRadius="1.5" Background="{StaticResource Outline}"/>
+                                    </Grid>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="Grip" Property="Background" Value="{StaticResource Accent}"/>
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </GridSplitter.Template>
+                        </GridSplitter>
+                        <ContentControl x:Name="OverviewDrawerHost" Grid.Column="2" HorizontalContentAlignment="Stretch"
+                                        VerticalContentAlignment="Stretch"/>
+                    </Grid>
                 </DockPanel>
             </Grid>
         </DockPanel>

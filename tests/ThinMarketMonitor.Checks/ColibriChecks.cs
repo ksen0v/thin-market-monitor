@@ -26,6 +26,39 @@ internal static class ColibriChecks
     ];
     private static readonly Market WeexAmdSpot = new(Venue.Weex, "AMDUSDT", "AMD", "USDT");
     private static readonly Market WeexUsdcSpot = new(Venue.Weex, "BTCUSDC", "BTC", "USDC");
+    private static readonly Market[] KrakenSpot = ReadKrakenSpot();
+    private static readonly Market GatePtb = new(Venue.Gate, "PTB_USDT", "PTB", "USDT", new("futures/usdt", 100));
+    private sealed record NativeExample(Market Market, string Exchange, string Wire, string Asset, string Quote);
+    private static readonly NativeExample[] NativeExamples =
+    [
+        new(new(Venue.Alpha, "ALPHA_373USDT", "ALEO", "USDT"), "BinanceAlpha", "ALPHA_373USDT", "ALEO", "USDT"),
+        new(new(Venue.Alpha, "ALPHA_373USDC", "ALEO", "USDC"), "BinanceAlpha", "ALPHA_373USDC", "ALEO", "USDC"),
+        new(new(Venue.Bybit, "BTCPERP", "BTC", "USDC", new("linear")), "BybitLinearPerpetual", "BTCPERP", "BTC", "USDC"),
+        new(new(Venue.Bitget, "BTCPERP", "BTC", "USDC", new("USDC-FUTURES")), "BitgetLinearPerpetualFutures", "BTCPERP", "BTC", "USDC"),
+        new(new(Venue.Htx, "BTC-USDT", "BTC", "USDT", new("linear")), "HtxLinearPerpetual", "BTC-USDT", "BTC", "USDT"),
+        new(new(Venue.Kraken, "PF_XBTUSD", "BTC", "USD", new("derivatives")), "KrakenLinearPerpetual", "PF_XBTUSD", "BTC", "USD"),
+        new(new(Venue.Okx, "BTC-USDT-SWAP", "BTC", "USDT", new("SWAP")), "OkxLinearPerpetualSwap", "BTC-USDT-SWAP", "BTC", "USDT"),
+        new(new(Venue.Mexc, "BTC_USDT", "BTC", "USDT", new("contract", 0.0001)), "MexcLinearFutures", "BTCUSDT", "BTC", "USDT"),
+        new(new(Venue.Lighter, "2048", "ETH", "USDC", Identifiers: new(ColibriSymbol: "ETH/USDC")), "LighterSpot", "ETH/USDC", "ETH/USDC", "USDC"),
+        new(new(Venue.Lighter, "1", "BTC", "USD", new("perp"), new(Collateral: "USDC", ColibriSymbol: "BTC")),
+            "LighterLinearPerpetual", "BTC", "BTC", "USDC"),
+        new(new(Venue.Hyperliquid, "xyz:NVDA", "NVDA", "USD", new("perp"), new(Collateral: "USDC")),
+            "HyperliquidLinearPerpetual", "xyz:NVDA", "NVDA", "USDC")
+    ];
+
+    private static Market[] ReadKrakenSpot()
+    {
+        using var payload = JsonDocument.Parse("""
+            {"error":[],"result":{
+              "XXBTZUSD":{"altname":"XBTUSD","wsname":"XBT/USD","status":"online"},
+              "VVVUSD":{"altname":"VVVUSD","wsname":"VVV/USD","status":"online"},
+              "VVVEUR":{"altname":"VVVEUR","wsname":"VVV/EUR","status":"online"},
+              "XBTUSDC":{"altname":"XBTUSDC","wsname":"XBT/USDC","status":"online"},
+              "XDGUSD":{"altname":"XDGUSD","wsname":"XDG/USD","status":"online"}
+            }}
+            """);
+        return ExchangeApi.DecodeExtendedCatalog(new(Venue.Kraken), payload.RootElement, 0).ToArray();
+    }
 
     public static async Task Run()
     {
@@ -78,6 +111,39 @@ internal static class ColibriChecks
         server.DuplicateWeexSymbol = true;
         await Fails(() => client.Resolve(port, hyundai, CancellationToken.None), "ambiguous WEEX futures matches are rejected");
         server.DuplicateWeexSymbol = false;
+        foreach (var market in KrakenSpot)
+            Ensure(await client.Resolve(port, market, CancellationToken.None) == new ColibriInstrument("KrakenSpot", market.StreamSymbol),
+                "Kraken matches the exact slash-separated wire symbol with its original quote");
+        var krakenUsd = KrakenSpot.Single(m => m.Symbol == "VVVUSD");
+        await Fails(() => client.Resolve(port, krakenUsd with { Quote = "USDT" }, CancellationToken.None),
+            "a USD Kraken pair is not substituted with a stablecoin pair");
+        await Fails(() => client.Resolve(port, krakenUsd with { Contract = new("derivatives") }, CancellationToken.None),
+            "a Kraken spot pair cannot resolve across segments");
+        server.DuplicateKrakenSymbol = true;
+        await Fails(() => client.Resolve(port, KrakenSpot[0], CancellationToken.None), "ambiguous Kraken spot identities are rejected");
+        server.DuplicateKrakenSymbol = false;
+        Ensure(await client.Resolve(port, GatePtb, CancellationToken.None) == new ColibriInstrument("GateLinearPerpetual", "PTB_USDT") &&
+            await client.Resolve(port, GatePtb with { Contract = null }, CancellationToken.None) == new ColibriInstrument("GateSpot", "PTB_USDT"),
+            "Gate's spot and USDT perpetual catalogs keep their native symbol and distinct IDs");
+        await Fails(() => client.Resolve(port, GatePtb with { Quote = "USD" }, CancellationToken.None),
+            "Gate does not substitute a different quote");
+        await Fails(() => client.Resolve(port, GatePtb with { Contract = new("delivery/usdt") }, CancellationToken.None),
+            "Gate dated contracts do not use the perpetual catalog");
+        await Fails(() => client.Resolve(port, GatePtb with { Contract = new("futures/btc", 1, QuantityUnit.Quote) }, CancellationToken.None),
+            "Gate inverse contracts do not use the linear perpetual catalog");
+        foreach (var entry in NativeExamples)
+            Ensure(await client.Resolve(port, entry.Market, CancellationToken.None) == new ColibriInstrument(entry.Exchange, entry.Wire),
+                $"{entry.Market.Label} resolves to its confirmed Colibri symbol and segment");
+        var hyper = NativeExamples[^1].Market;
+        await Fails(() => client.Resolve(port, hyper with { Symbol = "NVDA" }, CancellationToken.None),
+            "Hyperliquid namespaces cannot be dropped");
+        await Fails(() => client.Resolve(port, hyper with { Identifiers = new(Collateral: "USDH") }, CancellationToken.None),
+            "Hyperliquid cannot resolve against different declared collateral");
+        var lighter = NativeExamples[^2].Market;
+        await Fails(() => client.Resolve(port, lighter with { Identifiers = new(Collateral: "USDC") }, CancellationToken.None),
+            "Lighter rejects a market with no unambiguous native name");
+        await Fails(() => client.Resolve(port, NativeExamples[0].Market with { Symbol = "ALPHA_123USDT" }, CancellationToken.None),
+            "same ticker and quote alone do not identify a Binance Alpha token");
         await Fails(() => client.Check("../wrong-slot", CancellationToken.None), "slot IDs cannot become paths");
 
         server.PingVersion = 99;
@@ -175,7 +241,7 @@ internal static class ColibriChecks
             await Task.Delay(250);
             Ensure(events == 0 && server.Writes.Count == initial + 1, "programmatic selection sends no request");
             grid.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, Environment.TickCount, MouseButton.Left)
-                { RoutedEvent = UIElement.PreviewMouseLeftButtonDownEvent });
+                { RoutedEvent = Mouse.PreviewMouseDownEvent });
             grid.SelectedIndex = 1;
             await Until(() => server.CompletedWrites.Count == initial + 2);
             Ensure(events == 1 && server.Writes.Last() == "ETHUSDT", "user navigation triggers overview synchronization");
@@ -195,7 +261,7 @@ internal static class ColibriChecks
             settings.OverviewSource = amd.Source;
             panel.SetSource([amd], visible: false);
             grid.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, Environment.TickCount, MouseButton.Left)
-                { RoutedEvent = UIElement.PreviewMouseLeftButtonDownEvent });
+                { RoutedEvent = Mouse.PreviewMouseDownEvent });
             grid.SelectedIndex = 0;
             await Until(() => server.CompletedWrites.Count == initial + 4);
             CheckWeexWrite(server, "AMDUSDT");
@@ -216,6 +282,8 @@ internal static class ColibriChecks
             window.Close();
             await SpreadChecks.Ui();
             await OverviewSpreadChecks.Run();
+            await OverviewPresentationChecks.Run();
+            await SignalNotificationChecks.Run();
             await ConnectionChecks.Ui();
             await BlacklistChecks.Ui();
             VolumeGrowthChecks.Ui();
@@ -309,6 +377,7 @@ internal static class ColibriChecks
         public bool DelayWrite { get; set; }
         public bool WriteError { get; set; }
         public bool DuplicateWeexSymbol { get; set; }
+        public bool DuplicateKrakenSymbol { get; set; }
         public int MaxConcurrentWrites { get; private set; }
 
         public LocalApi()
@@ -363,7 +432,20 @@ internal static class ColibriChecks
                         {"id":"BinanceLinearFutures","name":"Binance","marketType":"LinearFutures","trading":true},
                         {"id":"BybitSpot","name":"Bybit","marketType":"Spot","trading":true},
                         {"id":"WeexSpot","name":"WEEX","marketType":"Spot"},
-                        {"id":"WeexLinearFutures","name":"WEEX Futures","marketType":"LinearFutures"}]}
+                        {"id":"WeexLinearFutures","name":"WEEX Futures","marketType":"LinearFutures"},
+                        {"id":"KrakenSpot","name":"Kraken Spot","marketType":"Spot"},
+                        {"id":"GateSpot","name":"Gate Spot","marketType":"Spot"},
+                        {"id":"GateLinearPerpetual","name":"Gate Perpetual","marketType":"LinearFutures"},
+                        {"id":"BinanceAlpha","name":"Binance Alpha","marketType":"Spot"},
+                        {"id":"BybitLinearPerpetual","marketType":"LinearFutures"},
+                        {"id":"BitgetLinearPerpetualFutures","marketType":"LinearFutures"},
+                        {"id":"HtxLinearPerpetual","marketType":"LinearFutures"},
+                        {"id":"KrakenLinearPerpetual","marketType":"LinearFutures"},
+                        {"id":"OkxLinearPerpetualSwap","marketType":"LinearFutures"},
+                        {"id":"MexcLinearFutures","marketType":"LinearFutures"},
+                        {"id":"LighterSpot","marketType":"Spot"},
+                        {"id":"LighterLinearPerpetual","marketType":"LinearFutures"},
+                        {"id":"HyperliquidLinearPerpetual","marketType":"LinearFutures"}]}
                         """;
                     else if (request.Path.EndsWith("/symbols", StringComparison.Ordinal))
                     {
@@ -372,10 +454,16 @@ internal static class ColibriChecks
                         {
                             "WeexSpot" => [WeexAmdSpot, WeexUsdcSpot],
                             "WeexLinearFutures" => DuplicateWeexSymbol ? [.. WeexContracts, WeexContracts[0]] : WeexContracts,
+                            "KrakenSpot" => DuplicateKrakenSymbol ? [.. KrakenSpot, KrakenSpot[0]] : KrakenSpot,
+                            "GateSpot" => [GatePtb with { Contract = null }],
+                            "GateLinearPerpetual" => [GatePtb],
                             _ => [Btc, Eth, new(Venue.Binance, "1000SHIBUSDT", "1000SHIB", "USDT")]
                         };
-                        payload = JsonSerializer.Serialize(new { exchange, symbols = instruments.Select(m =>
-                            new { symbol = m.Symbol, baseAsset = m.Base, quoteAsset = m.Quote }) });
+                        var fixtures = NativeExamples.Where(entry => entry.Exchange == exchange).ToArray();
+                        var rows = fixtures.Length == 0 ?
+                            instruments.Select(m => new { symbol = m.StreamSymbol, baseAsset = m.Base, quoteAsset = m.Quote }) :
+                            fixtures.Select(m => new { symbol = m.Wire, baseAsset = m.Asset, quoteAsset = m.Quote });
+                        payload = JsonSerializer.Serialize(new { exchange, symbols = rows });
                     }
                     else if (request.Path == "/app/slots/" + Slot && SlotMissing)
                     { code = 404; payload = """{"code":"unknown_slot","message":"missing"}"""; }

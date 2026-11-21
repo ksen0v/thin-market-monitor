@@ -28,7 +28,8 @@ internal static class Venues
 }
 
 internal sealed record MarketIdentifiers(string? Rest = null, string? Stream = null, string? ListingAsset = null,
-    string? Collateral = null, string? Display = null, bool TrustedUsdQuote = true);
+    string? Collateral = null, string? Display = null, bool TrustedUsdQuote = true, bool LeveragedToken = false,
+    string? ColibriSymbol = null);
 
 internal record Market(Venue Venue, string Symbol, string Base, string Quote, Contract? Contract = null, MarketIdentifiers? Identifiers = null)
 {
@@ -38,6 +39,7 @@ internal record Market(Venue Venue, string Symbol, string Base, string Quote, Co
     public string ListingAsset => Identifiers?.ListingAsset ?? Base;
     public string RestSymbol => Identifiers?.Rest ?? Symbol;
     public string StreamSymbol => Identifiers?.Stream ?? Symbol;
+    public bool IsLeveragedToken => Contract == null && Identifiers?.LeveragedToken == true;
     public string Label => $"{Ticker} · {Source.Label}" + (Venue == Venue.Alpha ? $" · {Symbol}" : "");
     public bool Streaming => Contract?.Streaming != false;
     public double Turnover(double quantity, double price) => Contract?.Unit == QuantityUnit.Quote
@@ -50,7 +52,7 @@ internal record Threshold(int Seconds, bool Enabled, double Percent);
 internal record VolumeRule(int Seconds, bool Enabled, double Usd);
 internal enum SignalModule { Price, Volume }
 internal record Signal(Market Market, long Time, int Seconds, double Value, SignalModule Module = SignalModule.Price,
-    double? CurrentTurnover = null, double? AverageTurnover = null, int? ReferenceSeconds = null);
+    double? CurrentTurnover = null, double? AverageTurnover = null, int? ReferenceSeconds = null, double? LastPrice = null);
 internal record ChartGesture(Key Key, MouseButton? Mouse = null)
 {
     public string Label => Mouse switch
@@ -71,7 +73,11 @@ internal static class Frames
     public static string Label(int s) => s >= 86400 ? "1д" : s >= 3600 ? $"{s / 3600}ч" : s >= 60 ? $"{s / 60}м" : $"{s}с";
 }
 internal enum MetricKind { Turnover, Change, Atr, Spread }
-internal record OverviewColumn(MetricKind Kind, int Minutes);
+internal record OverviewColumn(MetricKind Kind, int Minutes)
+{
+    internal string WidthKey => FormattableString.Invariant($"{Kind}:{Minutes}");
+}
+internal enum BookmarkColor { Gold, Green, Blue, Pink, Violet }
 
 internal sealed class Settings
 {
@@ -89,13 +95,23 @@ internal sealed class Settings
     public Key FrameDown { get; set; } = Key.Down;
     public bool Overview { get; set; }
     public bool OverviewDrawer { get; set; } = true;
+    public double OverviewDrawerWidth { get; set; } = 390;
     public MarketSource OverviewSource { get; set; } = new(Venue.KuCoin);
     public Dictionary<Venue, ListingRule> OverviewSpotRules { get; set; } = [];
     public Dictionary<Venue, ListingRule> OverviewFuturesRules { get; set; } = [];
     public ListingRule OverviewRule(MarketSource source) => ListingRules(source.Segment, overview: true).GetValueOrDefault(source.Venue);
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string[]? OverviewQuotes { get; set; }
+    public bool HideOverviewLeveragedTokens { get; set; }
+    public bool ShowsOverviewQuote(string quote) => OverviewQuotes == null || OverviewQuotes.Contains(quote, StringComparer.Ordinal);
+    public bool ShowsOverviewMarket(Market market) => ShowsOverviewQuote(market.Quote) &&
+        (!HideOverviewLeveragedTokens || !market.IsLeveragedToken);
     public CellChoice? OverviewChoice { get; set; }
     public int OverviewFrame { get; set; } = 60;
     public OverviewColumn[] OverviewColumns { get; set; } = [new(MetricKind.Turnover, 1440), new(MetricKind.Change, 1440)];
+    public Dictionary<string, double> OverviewColumnWidths { get; set; } = new(StringComparer.Ordinal);
+    public Dictionary<string, BookmarkColor> OverviewBookmarks { get; set; } = new(StringComparer.Ordinal);
+    public BookmarkColor? OverviewBookmarkPriority { get; set; }
     public int OverviewSort { get; set; } = -1;
     public bool OverviewDescending { get; set; }
     public Threshold[] Thresholds { get; set; } = Defaults.ToArray();
@@ -118,6 +134,9 @@ internal sealed class Settings
     }
     public bool PriceModule { get; set; } = true;
     public bool VolumeModule { get; set; }
+    public bool SignalPopup { get; set; }
+    public bool SignalSound { get; set; }
+    public bool SignalVoice { get; set; }
     public bool ColibriEnabled { get; set; }
     public bool ColibriOverviewSync { get; set; }
     public string ColibriSlot { get; set; } = "";
@@ -159,6 +178,8 @@ internal sealed class Settings
         settings.FuturesRules ??= [];
         settings.OverviewSpotRules ??= [];
         settings.OverviewFuturesRules ??= [];
+        settings.OverviewQuotes = settings.OverviewQuotes?.Where(x => !string.IsNullOrWhiteSpace(x))
+            .Select(CoinKey).Distinct(StringComparer.Ordinal).ToArray();
         settings.ColibriSlot = settings.ColibriSlot?.Trim() ?? "";
         if (settings.SpreadFilter is not { Valid: true }) settings.SpreadFilter = new();
         settings.SignalBlacklist = (settings.SignalBlacklist ?? []).Where(c => !string.IsNullOrWhiteSpace(c))
@@ -166,6 +187,13 @@ internal sealed class Settings
         settings.FrameButtons = (settings.FrameButtons ?? [15, 60, 300]).Where(Frames.All.Contains).Distinct().Order().ToArray();
         if (!MarketSource.All.Contains(settings.OverviewSource)) settings.OverviewSource = new(Venue.KuCoin);
         if (!Frames.All.Contains(settings.OverviewFrame)) settings.OverviewFrame = 60;
+        if (settings.OverviewDrawerWidth is < 230 or > 1600) settings.OverviewDrawerWidth = 390;
+        settings.OverviewColumnWidths = (settings.OverviewColumnWidths ?? [])
+            .Where(x => x.Value is >= 56 and <= 1200).ToDictionary(x => x.Key, x => x.Value, StringComparer.Ordinal);
+        settings.OverviewBookmarks = (settings.OverviewBookmarks ?? [])
+            .Where(x => !string.IsNullOrWhiteSpace(x.Key) && Enum.IsDefined(x.Value))
+            .ToDictionary(x => x.Key, x => x.Value, StringComparer.Ordinal);
+        if (settings.OverviewBookmarkPriority is { } priority && !Enum.IsDefined(priority)) settings.OverviewBookmarkPriority = null;
         settings.OverviewColumns = (settings.OverviewColumns ?? [])
             .Select(x => x?.Kind == MetricKind.Spread ? new OverviewColumn(MetricKind.Spread, 0) : x)
             .Where(x => x != null && Enum.IsDefined(x.Kind) && (x.Kind == MetricKind.Spread || x.Minutes is >= 1 and <= 1440))
@@ -321,7 +349,7 @@ internal sealed class SpikeDetector(Threshold[] rules)
             if (change < rule.Percent * 0.75) latched[i] = false;
             if (change + 1e-9 < rule.Percent || latched[i]) continue;
             latched[i] = true;
-            best ??= new(market, trade.Time, rule.Seconds, change);
+            best ??= new(market, trade.Time, rule.Seconds, change, LastPrice: trade.Price);
         }
 
         if (best == null || (lastAlert != 0 && trade.Time - lastAlert < 30_000)) return null;

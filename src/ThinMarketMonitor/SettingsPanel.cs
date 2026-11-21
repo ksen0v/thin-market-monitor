@@ -10,12 +10,14 @@ namespace ThinMarketMonitor;
 internal sealed partial class SettingsPanel : Border, IDisposable
 {
     private const int FiltersPage = 0, ModulesPage = 1, PricePage = 2, VolumePage = 3, ChartsPage = 4,
-        OverviewPage = 5, IntegrationsPage = 6, AboutPage = 7, BlacklistPage = 8;
+        OverviewPage = 5, IntegrationsPage = 6, AboutPage = 7, BlacklistPage = 8, NotificationsPage = 9;
+    private const int PageCount = 10;
+    private const double StandardHeight = 592;
     private readonly CancellationTokenSource stop = new();
     private readonly Grid layout = new();
-    private readonly Button[] navigation = new Button[9];
-    private readonly Border[] indicators = new Border[9];
-    private readonly FrameworkElement[] pages = new FrameworkElement[9];
+    private readonly Button[] navigation = new Button[PageCount];
+    private readonly Border[] indicators = new Border[PageCount];
+    private readonly FrameworkElement[] pages = new FrameworkElement[PageCount];
     private readonly TextBlock result = Terminal.Copy("");
     private readonly TextBlock updateStatus = Terminal.Copy($"v{Updater.Current}");
     private readonly Button check = new() { Content = "Проверить версию" };
@@ -24,7 +26,10 @@ internal sealed partial class SettingsPanel : Border, IDisposable
     private readonly Updater updater;
     private readonly ColibriBridge colibri;
     private readonly TextBlock colibriStatus = Terminal.Copy("");
+    private readonly TextBlock voiceStatus = Terminal.Copy("");
     private readonly Action<bool> changed;
+    private readonly Action saveNotifications;
+    private readonly Action saveOverview;
     private readonly Action close;
     private readonly Action restart;
     private Release? update;
@@ -32,12 +37,15 @@ internal sealed partial class SettingsPanel : Border, IDisposable
     public bool Installing { get; private set; }
 
     public SettingsPanel(Settings settings, Updater updater, ColibriBridge colibri,
-        Action<bool> changed, Action close, Action restart, bool overview = false)
+        Action<bool> changed, Action close, Action restart, bool overview = false, Action? saveNotifications = null,
+        Action? saveOverview = null)
     {
         this.settings = settings;
         this.updater = updater;
         this.colibri = colibri;
         this.changed = changed;
+        this.saveNotifications = saveNotifications ?? (() => changed(false));
+        this.saveOverview = saveOverview ?? (() => changed(false));
         this.close = close;
         this.restart = restart;
         Width = 664;
@@ -56,7 +64,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         header.Child = Terminal.DialogHeader("Настройки", "Закрыть настройки", Close);
         layout.Children.Add(header);
 
-        var body = new Grid { MinHeight = 335, MaxHeight = 505 };
+        var body = new Grid { MaxHeight = 505 };
         body.ColumnDefinitions.Add(new() { Width = new GridLength(176) });
         body.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
         Grid.SetRow(body, 1);
@@ -65,13 +73,15 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         var nav = new StackPanel { Margin = new Thickness(8, 10, 8, 10) };
         AutomationProperties.SetName(nav, "Разделы настроек");
         var rail = Terminal.Rule(new Thickness(0, 0, 1, 0));
-        rail.Child = nav;
+        rail.Child = new ScrollViewer { Content = nav, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
         body.Children.Add(rail);
         AddNavigation(nav, FiltersPage, "Фильтры", "filter");
         AddNavigation(nav, BlacklistPage, "Чёрный список", "ban");
         AddNavigation(nav, ModulesPage, "Модули", "listings");
         AddNavigation(nav, PricePage, "Импульс цены", "activity");
         AddNavigation(nav, VolumePage, "Импульс объёма", "volume");
+        AddNavigation(nav, NotificationsPage, "Уведомления", "bell");
         AddNavigation(nav, ChartsPage, "Графики", "candles");
         AddNavigation(nav, OverviewPage, "Обзор", "volume");
         AddNavigation(nav, IntegrationsPage, "Интеграции", "external");
@@ -90,6 +100,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         pages[IntegrationsPage] = Integrations();
         pages[AboutPage] = About();
         pages[BlacklistPage] = BlacklistOptions();
+        pages[NotificationsPage] = NotificationOptions();
         foreach (var page in pages) pageHost.Children.Add(page);
 
         var footer = Terminal.Rule(new Thickness(0, 1, 0, 0));
@@ -132,6 +143,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
     private void SelectPage(int index)
     {
         EndCapture();
+        Height = index is BlacklistPage or ModulesPage ? double.NaN : StandardHeight;
         for (int i = 0; i < pages.Length; i++)
         {
             bool selected = i == index;
@@ -146,6 +158,40 @@ internal sealed partial class SettingsPanel : Border, IDisposable
             checkedOnOpen = true;
             _ = Check();
         }
+        if (index == NotificationsPage) _ = CheckVoice();
+    }
+
+    private StackPanel NotificationOptions()
+    {
+        var panel = new StackPanel();
+        panel.Children.Add(Terminal.Heading("Уведомления о сигналах"));
+        panel.Children.Add(Option("Всплывающее окно на рабочем столе", settings.SignalPopup, value => settings.SignalPopup = value));
+        panel.Children.Add(Option("Короткий системный звук", settings.SignalSound, value => settings.SignalSound = value));
+        panel.Children.Add(Option("Озвучка на русском языке", settings.SignalVoice, value => settings.SignalVoice = value));
+        voiceStatus.Margin = new Thickness(0, 8, 0, 0);
+        panel.Children.Add(voiceStatus);
+        return panel;
+
+        CheckBox Option(string name, bool enabled, Action<bool> set)
+        {
+            var check = new CheckBox { Content = name, IsChecked = enabled, Margin = new Thickness(0, 9, 0, 0) };
+            check.Click += (_, _) =>
+            {
+                set(check.IsChecked == true);
+                saveNotifications();
+            };
+            return check;
+        }
+    }
+
+    private async Task CheckVoice()
+    {
+        voiceStatus.Text = "Проверка русского голоса Windows…";
+        bool available = await Task.Run(WindowsSignalVoice.RussianVoiceAvailable);
+        if (stop.IsCancellationRequested) return;
+        voiceStatus.Text = available
+            ? "Русский голос Windows доступен. Озвучка работает без сети."
+            : "Русский голос для настольных приложений не найден. Добавьте его в параметрах речи Windows, затем снова откройте этот раздел.";
     }
 
     private StackPanel About()

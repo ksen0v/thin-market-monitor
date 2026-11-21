@@ -63,7 +63,9 @@ internal sealed partial class ExchangeApi
             case Venue.Htx:
                 foreach (var row in HtxField(root, "data").EnumerateArray())
                     if (row.Optional("state") == "online")
-                        yield return new(Venue.Htx, row.Str("symbol"), Asset(row.Str("base-currency")), Asset(row.Str("quote-currency")));
+                        yield return new(Venue.Htx, row.Str("symbol"), Asset(row.Str("base-currency")), Asset(row.Str("quote-currency")),
+                            Identifiers: row.Optional("tags").Split(',').Contains("etp", StringComparer.OrdinalIgnoreCase)
+                                ? new(LeveragedToken: true) : null);
                 break;
             case Venue.Weex:
                 foreach (var row in root.GetProperty("symbols").EnumerateArray())
@@ -131,14 +133,18 @@ internal sealed partial class ExchangeApi
     {
         var tokens = LighterField(assets, "asset_details").EnumerateArray().ToDictionary(t => t.Str("asset_id"), t => Asset(t.Str("symbol")));
         bool spot = segment == Segment.Spot;
-        foreach (var row in LighterField(root, spot ? "spot_order_book_details" : "order_book_details").EnumerateArray())
+        var books = LighterField(root, spot ? "spot_order_book_details" : "order_book_details");
+        var duplicateNames = books.EnumerateArray().GroupBy(row => row.Str("symbol"), StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Count() > 1).Select(group => group.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in books.EnumerateArray())
         {
             if (row.Optional("market_type") != (spot ? "spot" : "perp") || row.Optional("status") != "active" ||
                 IsTrue(row, "is_frozen") || row.Number("end_timestamp") is > 0 and var end && end <= now / (end < 1e12 ? 1000 : 1)) continue;
             if (row.TryGetProperty("market_config", out var config) && IsTrue(config, "hidden")) continue;
             string id = row.Str("market_id");
             if (!int.TryParse(id, out int index) || index < 0) continue;
-            string asset = Asset(row.Str("symbol")), quote = "USD";
+            string nativeName = row.Str("symbol");
+            string asset = Asset(nativeName), quote = "USD";
             if (spot && (!tokens.TryGetValue(row.Str("base_asset_id"), out asset!) ||
                          !tokens.TryGetValue(row.Str("quote_asset_id"), out quote!))) continue;
             string deployer = row.Optional("market_deployer");
@@ -149,9 +155,11 @@ internal sealed partial class ExchangeApi
                 _ => "lighter:" + id
             };
             bool unitSize = spot || row.Number("multiplier") == 1;
+            string? colibri = !duplicateNames.Contains(nativeName) && (!spot ||
+                nativeName.Equals($"{asset}/{quote}", StringComparison.OrdinalIgnoreCase)) ? nativeName : null;
             yield return new(Venue.Lighter, id, asset, quote, spot ? null : new("perp", unitSize ? 1 : 0),
                 new(ListingAsset: listingAsset, Collateral: spot ? null : tokens.GetValueOrDefault("3"),
-                    Display: spot ? $"{asset}/{quote}" : $"{asset}/USD · {id}"));
+                    Display: spot ? $"{asset}/{quote}" : $"{asset}/USD · {id}", ColibriSymbol: colibri));
         }
     }
 

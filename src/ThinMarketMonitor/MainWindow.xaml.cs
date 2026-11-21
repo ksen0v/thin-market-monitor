@@ -19,6 +19,7 @@ public partial class MainWindow : Window, IDisposable
     private readonly Settings settings;
     private readonly bool persistSettings;
     private readonly ColibriBridge colibri;
+    private readonly SignalNotifications notifications;
     private readonly Dictionary<MarketSource, Catalog> catalogs = new();
     private readonly ChartCell[] cells = new ChartCell[9];
     private readonly ChartCell overviewChart;
@@ -53,7 +54,7 @@ public partial class MainWindow : Window, IDisposable
     public MainWindow() : this(startMonitoring: true) { }
 
     internal MainWindow(bool startMonitoring, Settings? testSettings = null, ColibriClient? colibriClient = null,
-        HttpClient? testHttp = null)
+        HttpClient? testHttp = null, SignalNotifications? testNotifications = null)
     {
         http = testHttp ?? new(new SocketsHttpHandler
         {
@@ -63,6 +64,8 @@ public partial class MainWindow : Window, IDisposable
         settings = testSettings ?? Settings.Load();
         persistSettings = testSettings == null;
         InitializeComponent();
+        Overlay.SizeChanged += (_, _) => FitSettingsDialog();
+        notifications = testNotifications ?? new(settings, Dispatcher);
         api = new(http);
         colibri = new(settings, colibriClient);
         colibri.StatusChanged += ShowIntegrationStatus;
@@ -108,10 +111,11 @@ public partial class MainWindow : Window, IDisposable
             overviewChart.Assign(selected, pinned: false);
             activeCell = overviewChart;
             Save();
-        });
+        }, savePresentation: Save);
         overviewPanel.UserSelected += market => colibri.Open(market, automatic: true);
         OverviewDrawerHost.Content = overviewPanel;
         OverviewChartHost.Content = overviewChart;
+        OverviewDivider.AddHandler(KeyDownEvent, new KeyEventHandler(OverviewDividerKeyDown), handledEventsToo: true);
         order = cells.Max(cell => cell.Order);
 
         RebuildGrid();
@@ -310,7 +314,10 @@ public partial class MainWindow : Window, IDisposable
         DrawerSwitch.ToolTip = drawerLabel;
         System.Windows.Automation.AutomationProperties.SetName(DrawerSwitch, drawerLabel);
         OverviewDrawerHost.Visibility = settings.OverviewDrawer ? Visibility.Visible : Visibility.Collapsed;
+        UpdateOverviewDrawerWidth();
         var result = ListingFilter.Apply(catalogs, settings.OverviewRule, settings.OverviewSource);
+        var shown = settings.OverviewQuotes == null && !settings.HideOverviewLeveragedTokens
+            ? result.Markets : result.Markets.Where(settings.ShowsOverviewMarket).ToArray();
         int unavailable = result.Missing.Count(source => catalogs.GetValueOrDefault(source)?.Error != null);
         string? pending = result.Missing.Count == 0 ? null : unavailable > 0
             ? $"Недоступно каталогов: {unavailable} · фильтр ожидает данные"
@@ -318,9 +325,49 @@ public partial class MainWindow : Window, IDisposable
         string? details = result.Missing.Count == 0 ? null : string.Join("\n", result.Missing.Select(source =>
             $"{source.Label} · {catalogs.GetValueOrDefault(source)?.Error ?? "загрузка"}"));
         if (overviewChart.Choice?.Key != settings.OverviewChoice?.Key) overviewChart.Choice = settings.OverviewChoice;
-        overviewChart.Resolve(result.Markets.FirstOrDefault(m => m.Key == settings.OverviewChoice?.Key));
+        overviewChart.Resolve(shown.FirstOrDefault(m => m.Key == settings.OverviewChoice?.Key));
         overviewChart.Activate(settings.Overview);
-        overviewPanel.SetSource(result.Markets, settings.Overview && settings.OverviewDrawer, pending, details);
+        overviewPanel.SetSource(shown, settings.Overview && settings.OverviewDrawer, pending, details);
+        settingsPanel?.UpdateQuoteChoices(OverviewSourceQuotes());
+    }
+
+    private void OverviewBodySizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (e.WidthChanged) UpdateOverviewDrawerWidth();
+    }
+
+    private void UpdateOverviewDrawerWidth()
+    {
+        bool visible = settings.OverviewDrawer;
+        OverviewDivider.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        OverviewDividerColumn.Width = new GridLength(visible ? OverviewDivider.Width : 0);
+        var chart = OverviewBody.ColumnDefinitions[0];
+        chart.Width = new GridLength(1, GridUnitType.Star);
+        const double minimum = 230;
+        double contentWidth = (OverviewBody.ActualWidth > 0 ? OverviewBody.ActualWidth : 1090) - OverviewDivider.Width;
+        double maximum = Math.Clamp(contentWidth - chart.MinWidth, minimum, 1600);
+        OverviewDrawerColumn.MinWidth = visible ? minimum : 0;
+        OverviewDrawerColumn.MaxWidth = visible ? maximum : 0;
+        double preferred = Math.Clamp(settings.OverviewDrawerWidth, minimum, maximum);
+        OverviewDrawerColumn.Width = visible
+            ? new GridLength(preferred / Math.Max(chart.MinWidth, contentWidth - preferred), GridUnitType.Star) : new GridLength(0);
+    }
+
+    private void OverviewDividerCompleted(object sender, DragCompletedEventArgs e)
+    {
+        if (!e.Canceled && Math.Abs(e.HorizontalChange) >= 1) SaveOverviewDrawerWidth();
+    }
+
+    private void OverviewDividerKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Handled && e.Key is Key.Left or Key.Right) SaveOverviewDrawerWidth();
+    }
+
+    private void SaveOverviewDrawerWidth()
+    {
+        OverviewBody.UpdateLayout();
+        settings.OverviewDrawerWidth = Math.Clamp(OverviewDrawerColumn.ActualWidth, 230, 1600);
+        Save();
     }
 
     internal void SmokeTestLayout()
@@ -601,6 +648,7 @@ public partial class MainWindow : Window, IDisposable
     {
         var market = signal.Market;
         if (settings.SignalBlocked(market)) return;
+        notifications.Publish(signal);
         var visible = cells.Take(settings.Grid * settings.Grid).ToArray();
         if (visible.FirstOrDefault(c => c.Choice?.Key == market.Key) is { } existing)
         {
@@ -628,9 +676,22 @@ public partial class MainWindow : Window, IDisposable
 
     private void OpenSettings(object sender, RoutedEventArgs e)
     {
-        settingsPanel = new SettingsPanel(settings, new Updater(http), colibri, SettingsChanged, CloseDialog, Close, settings.Overview);
+        settingsPanel = new SettingsPanel(settings, new Updater(http), colibri, SettingsChanged, CloseDialog, Close, settings.Overview,
+            () => { notifications.SettingsChanged(); Save(); }, () => { RefreshOverview(); Save(); });
+        settingsPanel.UpdateQuoteChoices(OverviewSourceQuotes());
         settingsPanel.UpdateFilter(CatalogStatus.Text);
         ShowDialog(settingsPanel);
+        FitSettingsDialog();
+    }
+
+    private IEnumerable<string> OverviewSourceQuotes() =>
+        catalogs.GetValueOrDefault(settings.OverviewSource)?.Markets.Select(m => m.Quote) ?? [];
+
+    private void FitSettingsDialog()
+    {
+        if (settingsPanel == null || Overlay.ActualWidth == 0 || Overlay.ActualHeight == 0) return;
+        settingsPanel.MaxWidth = Math.Max(0, Overlay.ActualWidth - DialogHost.Margin.Left - DialogHost.Margin.Right);
+        settingsPanel.MaxHeight = Math.Max(0, Overlay.ActualHeight - DialogHost.Margin.Top - DialogHost.Margin.Bottom);
     }
 
     private void OpenSignalListings(object sender, RoutedEventArgs e)
@@ -709,6 +770,7 @@ public partial class MainWindow : Window, IDisposable
         stop.Cancel();
         if (watchingNetwork) NetworkChange.NetworkAddressChanged -= NetworkAddressChanged;
         colibri.Dispose();
+        notifications.Dispose();
         timer.Stop();
         settingsPanel?.Dispose();
         streams?.Dispose();

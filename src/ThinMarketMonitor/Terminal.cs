@@ -30,6 +30,7 @@ internal static class Terminal
                 "listings" => "M12 2 L22 7 L12 12 L2 7 Z M2 12 L12 17 L22 12 M2 17 L12 22 L22 17",
                 "activity" => "M2 12 H6 L9 4 L15 20 L18 12 H22",
                 "volume" => "M4 20 H21 M7 17 V11 M12 17 V5 M17 17 V8",
+                "bell" => "M4 17 H20 L18 14 V9 A6 6 0 0 0 6 9 V14 Z M10 21 H14",
                 "filter" => "M3 4 H21 L14 12 V20 L10 18 V12 Z",
                 "info" => "M12 2 A10 10 0 1 0 12 22 A10 10 0 1 0 12 2 M12 11 V16 M12 8 H12.1",
                 "chevron" => "M7 10 L12 15 L17 10",

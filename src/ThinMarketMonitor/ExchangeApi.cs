@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net.Http;
 using System.Security.Authentication;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace ThinMarketMonitor;
 
@@ -17,6 +18,8 @@ internal sealed partial class ExchangeApi(HttpClient http, TimeProvider? timePro
     private const string KuCoin = "https://api.kucoin.com/api/";
     private const string Gate = "https://api.gateio.ws/api/v4/spot/";
     private const string Alpha = "https://www.binance.com/bapi/defi/v1/public/";
+    private static readonly Regex GateLeveragedName = new(@"\d+(?:\.\d+)?[x×]\s*(?:long|short)\b|[一二三四五六七八九十0-9]+倍[多空]",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     public async Task<Catalog> LoadCatalog(MarketSource source, CancellationToken ct)
     {
@@ -121,7 +124,8 @@ internal sealed partial class ExchangeApi(HttpClient http, TimeProvider? timePro
         {
             ct.ThrowIfCancellationRequested();
             Market Make(string symbol, string baseName, string quote) => new(venue,
-                x.Str(symbol), x.Str(baseName).Trim().ToUpperInvariant(), x.Str(quote).Trim().ToUpperInvariant());
+                x.Str(symbol), x.Str(baseName).Trim().ToUpperInvariant(), x.Str(quote).Trim().ToUpperInvariant(),
+                Identifiers: venue == Venue.Gate && GateLeveragedName.IsMatch(x.Optional("base_name")) ? new(LeveragedToken: true) : null);
 
             Market? pair = venue switch
             {

@@ -185,6 +185,38 @@
                 </Setter.Value>
             </Setter>
         </Style>
+        <Style x:Key="OverviewBookmarkButton" TargetType="Button">
+            <Setter Property="Width" Value="28"/>
+            <Setter Property="Height" Value="24"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{StaticResource Muted}"/>
+            <Setter Property="FocusVisualStyle" Value="{StaticResource TerminalFocus}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Frame" Background="{TemplateBinding Background}">
+                            <Path Data="M2,1 H12 V15 L7,11 L2,15 Z" Width="12" Height="14" Stretch="Fill"
+                                  HorizontalAlignment="Center" VerticalAlignment="Center"
+                                  Stroke="{TemplateBinding Foreground}" StrokeThickness="1.4" Fill="{TemplateBinding Tag}"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Frame" Property="Background" Value="{StaticResource Control}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <DataTemplate x:Key="OverviewTicker">
+            <DockPanel>
+                <Button DockPanel.Dock="Left" Style="{StaticResource OverviewBookmarkButton}"
+                        Foreground="{Binding BookmarkBrush}" Tag="{Binding BookmarkFill}" ToolTip="{Binding BookmarkHint}"
+                        AutomationProperties.Name="{Binding BookmarkHint}"/>
+                <TextBlock Text="{Binding Ticker}" ToolTip="{Binding Ticker}" TextTrimming="CharacterEllipsis"
+                           FontWeight="SemiBold" VerticalAlignment="Center"/>
+            </DockPanel>
+        </DataTemplate>
         <Style x:Key="OverviewColumnHeader" TargetType="DataGridColumnHeader">
             <Setter Property="Background" Value="{StaticResource Surface}"/>
             <Setter Property="Foreground" Value="{StaticResource Muted}"/>
@@ -194,14 +226,29 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="DataGridColumnHeader">
-                        <Border x:Name="Header" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}"
-                                BorderBrush="{StaticResource Outline}" BorderThickness="0,0,0,1">
-                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center"
-                                        HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}">
-                                <ContentPresenter/>
-                                <TextBlock x:Name="SortArrow" Margin="4,0,0,0" Foreground="{StaticResource Accent}"/>
-                            </StackPanel>
-                        </Border>
+                        <Grid>
+                            <Border x:Name="Header" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}"
+                                    BorderBrush="{StaticResource Outline}" BorderThickness="0,0,0,1">
+                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center"
+                                            HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}">
+                                    <ContentPresenter VerticalAlignment="Center"/>
+                                    <TextBlock x:Name="SortArrow" Margin="4,0,0,0" Foreground="{StaticResource Accent}" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </Border>
+                            <Thumb x:Name="PART_RightHeaderGripper" Width="8" HorizontalAlignment="Right" Cursor="SizeWE"
+                                   ToolTip="Потяните для изменения ширины. Двойной щелчок возвращает автоширину.">
+                                <Thumb.Template>
+                                    <ControlTemplate TargetType="Thumb">
+                                        <Border x:Name="ResizeGrip" Background="Transparent" BorderBrush="{StaticResource Outline}" BorderThickness="0,0,1,0"/>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="ResizeGrip" Property="BorderBrush" Value="{StaticResource Accent}"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Thumb.Template>
+                            </Thumb>
+                        </Grid>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="Header" Property="Background" Value="{StaticResource Control}"/>

@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 
@@ -355,8 +356,19 @@ internal sealed partial class SettingsPanel
     private StackPanel OverviewOptions()
     {
         var panel = new StackPanel();
+        panel.Children.Add(Terminal.Heading("Валюты котировки"));
+        panel.Children.Add(overviewQuotes);
+        UpdateQuoteChoices([]);
+        var hideLeveraged = new CheckBox { Content = "Скрывать токены с плечом (3L, 3S, 5L, 5S и другие)",
+            IsChecked = settings.HideOverviewLeveragedTokens, Margin = new Thickness(0, 0, 0, 13) };
+        hideLeveraged.Click += (_, _) =>
+        {
+            settings.HideOverviewLeveragedTokens = hideLeveraged.IsChecked == true;
+            saveOverview();
+        };
+        panel.Children.Add(hideLeveraged);
         panel.Children.Add(Terminal.Heading("Колонки обзора"));
-        panel.Children.Add(Terminal.Copy("Тикер всегда виден. ATR% — средний истинный диапазон за период, делённый на последнюю цену закрытия. Спред% — текущая разница лучших ask и bid относительно их средней цены; период не нужен."));
+        panel.Children.Add(Terminal.Copy("Потяните границу заголовка, чтобы изменить ширину. Двойной щелчок возвращает автоширину. ATR% — средний истинный диапазон за период, делённый на последнюю цену закрытия. Спред% — текущая разница лучших ask и bid относительно их средней цены; период не нужен."));
         var list = new StackPanel { Margin = new Thickness(0, 10, 0, 8) };
         panel.Children.Add(list);
         var addBar = new WrapPanel();
@@ -414,6 +426,57 @@ internal sealed partial class SettingsPanel
                 row.Children.Add(Terminal.Copy(OverviewMetrics.Label(metric), false));
                 list.Children.Add(row);
             }
+        }
+    }
+
+    private readonly WrapPanel overviewQuotes = new() { Margin = new Thickness(0, 5, 0, 13) };
+    private string[] quoteChoices = [];
+
+    public void UpdateQuoteChoices(IEnumerable<string> sourceQuotes)
+    {
+        var next = new[] { "USDT", "USDC", "USD", "EUR" }.Concat(sourceQuotes.Order(StringComparer.Ordinal))
+            .Concat(settings.OverviewQuotes ?? []).Distinct(StringComparer.Ordinal).ToArray();
+        if (next.SequenceEqual(quoteChoices)) return;
+        quoteChoices = next;
+        RenderQuoteChoices();
+    }
+
+    private void RenderQuoteChoices()
+    {
+        var style = new Style(typeof(ToggleButton), Terminal.Style("TerminalButton"));
+        var active = new Trigger { Property = ToggleButton.IsCheckedProperty, Value = true };
+        active.Setters.Add(new Setter(Control.ForegroundProperty, Terminal.Brush("Required")));
+        active.Setters.Add(new Setter(Control.BackgroundProperty, Terminal.Brush("RequiredSurface")));
+        active.Setters.Add(new Setter(Control.BorderBrushProperty, Terminal.Brush("Required")));
+        style.Triggers.Add(active);
+        overviewQuotes.Children.Clear();
+        Add("Все", settings.OverviewQuotes == null, enabled =>
+        {
+            settings.OverviewQuotes = enabled ? null : [];
+            foreach (var item in overviewQuotes.Children.OfType<ToggleButton>()) item.IsChecked = enabled;
+        });
+        foreach (string quote in quoteChoices)
+            Add(quote, settings.ShowsOverviewQuote(quote), enabled =>
+            {
+                var selected = (settings.OverviewQuotes ?? quoteChoices).ToHashSet(StringComparer.Ordinal);
+                if (enabled) selected.Add(quote);
+                else selected.Remove(quote);
+                settings.OverviewQuotes = selected.Order(StringComparer.Ordinal).ToArray();
+                ((ToggleButton)overviewQuotes.Children[0]).IsChecked = false;
+            });
+
+        void Add(string name, bool enabled, Action<bool> set)
+        {
+            var button = new ToggleButton { Content = name, Style = style, IsChecked = enabled, MinHeight = 27,
+                Margin = new Thickness(0, 0, 5, 4) };
+            if (name == "Все") button.ToolTip = "Показать все валюты или снять весь выбор";
+            AutomationProperties.SetName(button, name == "Все" ? "Все валюты котировки" : $"Котировка {name}");
+            button.Click += (_, _) =>
+            {
+                set(button.IsChecked == true);
+                saveOverview();
+            };
+            overviewQuotes.Children.Add(button);
         }
     }
 

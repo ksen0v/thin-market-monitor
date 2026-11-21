@@ -42,7 +42,7 @@ internal static class OverviewMetrics
     }
 }
 
-internal sealed class OverviewPanel : DockPanel, IDisposable
+internal sealed partial class OverviewPanel : DockPanel, IDisposable
 {
     private readonly ExchangeApi api;
     private readonly Settings settings;
@@ -60,7 +60,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         IsReadOnly = true, AutoGenerateColumns = false, HeadersVisibility = DataGridHeadersVisibility.Column,
         EnableRowVirtualization = true, EnableColumnVirtualization = true, GridLinesVisibility = DataGridGridLinesVisibility.None,
         SelectionMode = DataGridSelectionMode.Single, AlternationCount = 2,
-        CanUserReorderColumns = false, CanUserResizeColumns = false, CanUserResizeRows = false,
+        CanUserReorderColumns = false, CanUserResizeColumns = true, CanUserResizeRows = false,
         BorderThickness = new Thickness(0)
     };
     private readonly TextBlock status = new() { TextTrimming = TextTrimming.CharacterEllipsis };
@@ -85,15 +85,15 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
     public event Action<Market>? UserSelected;
 
     public OverviewPanel(ExchangeApi api, Settings settings, Action changed, Action<Market> select,
-        TimeSpan? spreadInterval = null, TimeSpan? spreadTimeout = null)
+        TimeSpan? spreadInterval = null, TimeSpan? spreadTimeout = null, Action? savePresentation = null)
     {
         this.api = api;
         this.settings = settings;
         this.changed = changed;
         this.select = select;
+        this.savePresentation = savePresentation ?? changed;
         this.spreadInterval = spreadInterval ?? TimeSpan.FromMinutes(1);
         this.spreadTimeout = spreadTimeout ?? TimeSpan.FromSeconds(12);
-        Width = 390;
         Background = Terminal.Brush("Surface");
         Margin = new Thickness(1, 0, 0, 0);
         UpdateSourceButton();
@@ -131,7 +131,10 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
                 if (userSelecting) UserSelected?.Invoke(selected.Market);
             }
         };
-        table.PreviewMouseLeftButtonDown += (_, _) => MarkUserSelection();
+        table.PreviewMouseDown += OverviewMouseDown;
+        table.AddHandler(Button.ClickEvent, new RoutedEventHandler(OverviewButtonClick));
+        table.AddHandler(Thumb.DragStartedEvent, new DragStartedEventHandler(ColumnDragStarted), handledEventsToo: true);
+        table.AddHandler(Thumb.DragCompletedEvent, new DragCompletedEventHandler(ColumnDragCompleted), handledEventsToo: true);
         table.PreviewKeyDown += (_, e) =>
         {
             if (e.Key is Key.Up or Key.Down or Key.PageUp or Key.PageDown or Key.Home or Key.End) MarkUserSelection();
@@ -146,6 +149,11 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
             changed();
         };
         Children.Add(table);
+        fitTimer.Tick += (_, _) =>
+        {
+            fitTimer.Stop();
+            FitAutomaticColumns();
+        };
         UpdateColumns();
         UpdateIntegration();
     }
@@ -301,12 +309,21 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
 
     public void UpdateColumns()
     {
-        if (columns.SequenceEqual(settings.OverviewColumns) && table.Columns.Count > 0) return;
+        if (columns.SequenceEqual(settings.OverviewColumns) && table.Columns.Count > 0)
+        {
+            ApplyColumnWidths();
+            return;
+        }
         columns = settings.OverviewColumns.ToArray();
         foreach (var row in rows) row.UpdateColumns(columns);
+        tickerFit = 0;
+        metricFits = new double[columns.Length];
         table.Columns.Clear();
-        table.Columns.Add(new DataGridTextColumn { Header = "Тикер", Binding = new Binding("Ticker"), MinWidth = 118,
-            Width = new DataGridLength(1, DataGridLengthUnitType.Star), ElementStyle = TextStyle() });
+        table.Columns.Add(new DataGridTemplateColumn
+        {
+            Header = TickerHeader(), SortMemberPath = nameof(Row.Ticker), MinWidth = 100, MaxWidth = 1200,
+            CellTemplate = (DataTemplate)Application.Current.FindResource("OverviewTicker")
+        });
         var numberHeader = new Style(typeof(System.Windows.Controls.Primitives.DataGridColumnHeader), table.ColumnHeaderStyle);
         numberHeader.Setters.Add(new Setter(Control.HorizontalContentAlignmentProperty, HorizontalAlignment.Right));
         for (int i = 0; i < columns.Length; i++)
@@ -316,29 +333,26 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
             table.Columns.Add(new DataGridTextColumn
             {
                 Header = data.Kind == MetricKind.Spread ? "Спред %" : $"{unit} {MainWindow.WindowName(data.Minutes * 60)}", Binding = new Binding($"[{i}]"),
-                Width = data.Kind == MetricKind.Turnover ? 105 : 78,
+                MinWidth = 56, MaxWidth = 1200,
                 HeaderStyle = numberHeader, ElementStyle = TextStyle(i, data.Kind)
             });
         }
+        ApplyColumnWidths();
+        QueueColumnFit();
         Sort();
         Restart();
     }
 
-    private static Style TextStyle(int index = -1, MetricKind kind = MetricKind.Turnover)
+    private static Style TextStyle(int index, MetricKind kind)
     {
         var style = new Style(typeof(TextBlock));
         style.Setters.Add(new Setter(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis));
         style.Setters.Add(new Setter(VerticalAlignmentProperty, VerticalAlignment.Center));
-        if (index < 0)
-            style.Setters.Add(new Setter(TextBlock.FontWeightProperty, FontWeights.SemiBold));
-        else
-        {
-            style.Setters.Add(new Setter(TextBlock.TextAlignmentProperty, TextAlignment.Right));
-            style.Setters.Add(new Setter(TextBlock.ForegroundProperty, new Binding($"Values[{index}]")
-                { Converter = new MetricBrush(kind) }));
-            if (kind == MetricKind.Spread)
-                style.Setters.Add(new Setter(ToolTipService.ToolTipProperty, new Binding(nameof(Row.SpreadToolTip))));
-        }
+        style.Setters.Add(new Setter(TextBlock.TextAlignmentProperty, TextAlignment.Right));
+        style.Setters.Add(new Setter(TextBlock.ForegroundProperty, new Binding($"Values[{index}]")
+            { Converter = new MetricBrush(kind) }));
+        style.Setters.Add(new Setter(ToolTipService.ToolTipProperty,
+            new Binding(kind == MetricKind.Spread ? nameof(Row.SpreadDisplayToolTip) : $"[{index}]")));
         return style;
     }
 
@@ -370,7 +384,11 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
             markets = next.ToArray();
             loadingSelection = true;
             rows = next.OrderBy(m => m.Symbol, StringComparer.Ordinal).ThenBy(m => m.Contract?.Product)
-                .Select(market => new Row(market, columns)).ToArray();
+                .Select(market => new Row(market, columns, BookmarkFor(market))).ToArray();
+            tickerFit = 0;
+            Array.Clear(metricFits);
+            QueueColumnFit();
+            bookmarkMenu?.SetCurrentValue(ContextMenu.IsOpenProperty, false);
             view = new ListCollectionView(rows);
             table.ItemsSource = view;
             Sort();
@@ -414,7 +432,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
 
     private void Sort()
     {
-        SortRows(new RowComparer(settings.OverviewSort, settings.OverviewDescending));
+        SortRows(new RowComparer(settings.OverviewSort, settings.OverviewDescending, settings.OverviewBookmarkPriority));
         for (int i = 0; i < table.Columns.Count; i++)
             table.Columns[i].SortDirection = i - 1 == settings.OverviewSort
                 ? settings.OverviewDescending ? ListSortDirection.Descending : ListSortDirection.Ascending : null;
@@ -475,6 +493,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
                 if (row.SpreadStale) stale++;
             }
             foreach (var row in updated) row.NotifySpread();
+            if (updated.Count != 0) QueueColumnFit();
             spreadDetails = $"Спред · свежие котировки {snapshot.Count:N0}/{entries.Length:N0} · устаревшие {stale:N0}";
             UpdateStatusTip();
             if (numbersChanged && SortingSpread) RefreshSort();
@@ -502,6 +521,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
                     row.Set(metrics.Select((metric, i) => SnapshotValue(metric, snapshot) ?? row.Number(i)).ToArray(), metrics);
                 }
                 if (snapshots.Count != 0 && settings.OverviewSort >= 0 && !SortingSpread) RefreshSort();
+                if (snapshots.Count != 0) QueueColumnFit();
             }
             int done = 0;
             foreach (var row in entries)
@@ -542,6 +562,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
                 done++;
                 if (done % 12 == 0 || done == entries.Length)
                 {
+                    if (done == 12 || done % 240 == 0 || done == entries.Length) QueueColumnFit();
                     status.Text = done == entries.Length ? $"{done:N0} инструментов" : $"{done:N0} / {entries.Length:N0}";
                     if (settings.OverviewSort >= 0 && !SortingSpread) RefreshSort();
                 }
@@ -628,23 +649,44 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
 
     public void Dispose()
     {
+        fitTimer.Stop();
+        if (bookmarkMenu != null) bookmarkMenu.IsOpen = false;
         CancelHeaderScroll();
         sourceMenu.IsOpen = false;
         Cancel();
     }
 
-    internal sealed class Row(Market market, OverviewColumn[] metrics) : INotifyPropertyChanged
+    internal sealed class Row(Market market, OverviewColumn[] metrics, BookmarkColor? bookmark = null) : INotifyPropertyChanged
     {
         private double?[] values = new double?[metrics.Length];
         private OverviewColumn[] columns = metrics;
         private long spreadTime;
         public Market Market { get; } = market;
         public string Ticker => Market.Ticker;
+        public BookmarkColor? Bookmark { get; private set; } = bookmark;
+        public Brush? BookmarkFill => Bookmark is { } color ? ColorBrush(color) : null;
+        public Brush BookmarkBrush => BookmarkFill ?? Terminal.Brush("Muted");
+        public string BookmarkHint => $"{Ticker} · закладка: {(Bookmark is { } color ? ColorName(color) : "нет")}";
+        public void SetBookmark(BookmarkColor? color)
+        {
+            Bookmark = color;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(BookmarkFill)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(BookmarkBrush)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(BookmarkHint)));
+        }
         public double?[] Values => values;
         public bool SpreadStale { get; private set; }
         public string? SpreadToolTip => SpreadStale
             ? $"Свежих bid/ask нет. Последняя котировка в {DateTimeOffset.FromUnixTimeMilliseconds(spreadTime).ToLocalTime():HH:mm:ss}"
             : null;
+        public string SpreadDisplayToolTip
+        {
+            get
+            {
+                int index = Array.FindIndex(columns, column => column.Kind == MetricKind.Spread);
+                return SpreadToolTip is { } details ? $"{this[index]}\n{details}" : this[index];
+            }
+        }
         public string this[int i] => Number(i) is { } number
             ? number.ToString(columns[i].Kind == MetricKind.Turnover ? "N0" : columns[i].Kind == MetricKind.Spread ? "0.######" : "+0.00;-0.00;0.00", CultureInfo.CurrentCulture) +
                 (columns[i].Kind == MetricKind.Spread && SpreadStale ? "*" : "")
@@ -692,6 +734,7 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         {
             NotifyValues();
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SpreadToolTip)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SpreadDisplayToolTip)));
         }
 
         private void NotifyValues()
@@ -701,11 +744,12 @@ internal sealed class OverviewPanel : DockPanel, IDisposable
         }
     }
 
-    internal sealed class RowComparer(int key, bool desc) : IComparer
+    internal sealed class RowComparer(int key, bool desc, BookmarkColor? priority = null) : IComparer
     {
         public int Compare(object? x, object? y)
         {
             if (x is not Row a || y is not Row b) return 0;
+            if (priority is { } color && (a.Bookmark == color) != (b.Bookmark == color)) return a.Bookmark == color ? -1 : 1;
             int ticker = StringComparer.Ordinal.Compare(a.Ticker, b.Ticker);
             if (ticker == 0) ticker = StringComparer.Ordinal.Compare(a.Market.Key, b.Market.Key);
             if (key < 0) return desc ? -ticker : ticker;

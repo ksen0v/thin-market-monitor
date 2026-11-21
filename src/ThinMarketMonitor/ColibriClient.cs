@@ -56,9 +56,7 @@ internal sealed class ColibriClient : IDisposable
         string[] types = MarketTypes(market);
         var catalog = await Get(port, "/exchanges", ct);
         var candidates = catalog.GetProperty("exchanges").EnumerateArray().Where(row =>
-            types.Contains(row.GetProperty("marketType").GetString(), StringComparer.OrdinalIgnoreCase) &&
-            MatchesVenue(row.GetProperty("id").GetString()!, market.Venue,
-                [row.GetProperty("marketType").GetString()!])).ToArray();
+            MatchesVenue(row.GetProperty("id").GetString()!, row.GetProperty("marketType").GetString()!, market, types)).ToArray();
         var matches = new List<ColibriInstrument>();
         foreach (var venue in candidates)
         {
@@ -70,11 +68,8 @@ internal sealed class ColibriClient : IDisposable
             {
                 string wire = symbol.GetProperty("symbol").GetString()!;
                 string asset = symbol.GetProperty("baseAsset").GetString()!;
-                if (market.Contract != null) asset = ExchangeApi.Underlying(market.Venue, asset);
-                if (wire.Equals(market.Symbol, StringComparison.OrdinalIgnoreCase) &&
-                    symbol.GetProperty("quoteAsset").GetString()!.Equals(market.Quote, StringComparison.OrdinalIgnoreCase) &&
-                    asset.Equals(market.Base, StringComparison.OrdinalIgnoreCase))
-                    matches.Add(new(id, wire));
+                string quote = symbol.GetProperty("quoteAsset").GetString()!;
+                if (MatchesInstrument(market, wire, asset, quote)) matches.Add(new(id, wire));
             }
         }
         return matches.Count switch
@@ -84,6 +79,40 @@ internal sealed class ColibriClient : IDisposable
             _ => throw new IOException($"Colibri вернул несколько рынков для {market.Label}. Однозначное соответствие не найдено.")
         };
     }
+
+    internal static bool MatchesInstrument(Market market, string wire, string asset, string quote)
+    {
+        bool exactWire = Same(wire, market.Symbol);
+        bool exactQuote = Same(quote, market.Quote);
+        if (market.Contract != null) asset = ExchangeApi.Underlying(market.Venue, asset);
+        switch (market.Venue)
+        {
+            case Venue.Kraken:
+                if (market.Contract == null) exactWire |= Same(wire, market.StreamSymbol) || Same(wire, market.RestSymbol);
+                asset = ExchangeApi.KrakenAsset(asset);
+                exactQuote = Same(ExchangeApi.KrakenAsset(quote), market.Quote);
+                break;
+            case Venue.Mexc when market.Contract is { Product: "contract" }:
+                exactWire |= Same(market.Symbol, $"{market.Base}_{market.Quote}") && Same(wire, market.Base + market.Quote);
+                break;
+            case Venue.Lighter when market.Identifiers?.ColibriSymbol is { } native && Same(wire, native):
+                exactWire = true;
+                if (market.Contract == null && exactQuote && Same(asset, wire) &&
+                    Same(wire, $"{market.Base}/{market.Quote}")) asset = market.Base;
+                if (market.Contract is { Product: "perp" }) exactQuote |= MatchesUsdcCollateral(market, quote);
+                break;
+            case Venue.Hyperliquid when market.Contract is { Product: "perp" }:
+                exactQuote |= MatchesUsdcCollateral(market, quote);
+                break;
+        }
+        return exactWire && exactQuote && Same(asset, market.Base);
+    }
+
+    private static bool Same(string? value, string? expected) => string.Equals(value, expected, StringComparison.OrdinalIgnoreCase);
+
+    // These venues report the settlement asset in Colibri's quote field for native perpetuals.
+    private static bool MatchesUsdcCollateral(Market market, string quote) =>
+        Same(quote, "USDC") && Same(market.Identifiers?.Collateral, quote);
 
     private static string[] MarketTypes(Market market)
     {
@@ -110,10 +139,30 @@ internal sealed class ColibriClient : IDisposable
         return [family + "Futures", family + "Perpetual"];
     }
 
-    private static bool MatchesVenue(string id, Venue venue, string[] types)
+    private static bool MatchesVenue(string id, string type, Market market, string[] types)
     {
+        if (Same(type, "LinearFutures") && market.Contract is { Unit: QuantityUnit.Base } contract)
+        {
+            // Colibri advertises these linear perpetual catalogs with a common market type.
+            string? perpetualId = (market.Venue, contract.Product) switch
+            {
+                (Venue.Bitget, "USDT-FUTURES" or "USDC-FUTURES") => "BitgetLinearPerpetualFutures",
+                (Venue.Bybit, "linear") => "BybitLinearPerpetual",
+                (Venue.Gate, "futures/usdt") => "GateLinearPerpetual",
+                (Venue.Htx, "linear") => "HtxLinearPerpetual",
+                (Venue.Hyperliquid, "perp") => "HyperliquidLinearPerpetual",
+                (Venue.Kraken, "derivatives") when market.Symbol.StartsWith("PF_", StringComparison.Ordinal) => "KrakenLinearPerpetual",
+                (Venue.Lighter, "perp") => "LighterLinearPerpetual",
+                (Venue.Okx, "SWAP") => "OkxLinearPerpetualSwap",
+                _ => null
+            };
+            if (Same(id, perpetualId)) return true;
+        }
+        if (!types.Contains(type, StringComparer.OrdinalIgnoreCase)) return false;
+        var venue = market.Venue;
+        if (venue == Venue.Alpha && id.Equals("BinanceAlpha", StringComparison.OrdinalIgnoreCase)) return true;
         string[] names = venue == Venue.Gate ? ["Gate", "GateIo"] : venue == Venue.Alpha ? ["BinanceAlpha"] : [venue.ToString()];
-        return names.Any(name => types.Any(type => id.Equals(name + type, StringComparison.OrdinalIgnoreCase)));
+        return names.Any(name => id.Equals(name + type, StringComparison.OrdinalIgnoreCase));
     }
 
     public async Task Set(int port, string slot, ColibriInstrument instrument, CancellationToken ct)
