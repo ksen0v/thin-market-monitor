@@ -11,7 +11,7 @@ using System.Collections.Concurrent;
 
 namespace ThinMarketMonitor;
 
-internal sealed class ChartCell : Border
+internal sealed partial class ChartCell : Border
 {
     private readonly ExchangeApi api;
     private readonly Func<long> nextOrder;
@@ -53,12 +53,13 @@ internal sealed class ChartCell : Border
     public CandlePlot Plot => plot;
 
     public ChartCell(ExchangeApi api, int number, Action choose, Action save, Func<long> nextOrder, Func<ChartGesture> gesture,
-        Func<int[]> frameButtons)
+        Func<int[]> frameButtons, ChartFeatures? features = null)
     {
         this.api = api;
         this.nextOrder = nextOrder;
         this.frameButtons = frameButtons;
-        plot = new CandlePlot(gesture);
+        plot = new CandlePlot(gesture) { Focusable = true };
+        KeyboardNavigation.SetIsTabStop(plot, false);
         plot.OlderRequested += () => olderRequested = true;
         Margin = new Thickness(0, 0, 1, 1);
         Padding = new Thickness(0, 0, 0, 4);
@@ -76,9 +77,7 @@ internal sealed class ChartCell : Border
             Background = Terminal.Brush("Control"), BorderBrush = Terminal.Brush("Outline"), FontSize = 11
         };
         AutomationProperties.SetName(select, $"Выбрать инструмент · ячейка {number}");
-        var home = Terminal.IconButton("latest", "К последним свечам");
         select.Click += (_, _) => choose();
-        home.Click += (_, _) => plot.Reset();
         pin.Click += (_, _) => { SetPinned(Choice?.Pinned != true); save(); };
         clear.Click += (_, _) =>
         {
@@ -96,9 +95,8 @@ internal sealed class ChartCell : Border
         blacklist.Margin = new Thickness(2, 0, 0, 0);
         blacklist.Click += (_, _) => { if (market != null) BlacklistRequested?.Invoke(market); };
         actions.Children.Add(blacklist);
-        pin.Margin = home.Margin = clear.Margin = new Thickness(2, 0, 0, 0);
+        pin.Margin = clear.Margin = new Thickness(2, 0, 0, 0);
         actions.Children.Add(pin);
-        actions.Children.Add(home);
         actions.Children.Add(clear);
         DockPanel.SetDock(actions, Dock.Right);
         header.Children.Add(actions);
@@ -108,11 +106,16 @@ internal sealed class ChartCell : Border
         label.Margin = new Thickness(0, 0, 7, 0);
         header.Children.Add(label);
         DockPanel.SetDock(headerFrame, Dock.Top);
-        DockPanel.SetDock(frameBar, Dock.Top);
+        var commandBar = new DockPanel();
+        DockPanel.SetDock(commandBar, Dock.Top);
+        ConfigureChartTools(commandBar, features);
+        commandBar.Children.Add(frameBar);
         DockPanel.SetDock(detail, Dock.Bottom);
         layout.Children.Add(headerFrame);
-        layout.Children.Add(frameBar);
+        layout.Children.Add(commandBar);
         layout.Children.Add(detail);
+        DockPanel.SetDock(indicatorHint, Dock.Bottom);
+        layout.Children.Add(indicatorHint);
         layout.Children.Add(plot);
         UpdateHeader();
         UpdateFrames();
@@ -229,6 +232,7 @@ internal sealed class ChartCell : Border
         blacklist.ToolTip = blockLabel;
         AutomationProperties.SetName(blacklist, blockLabel);
         detail.ToolTip = null;
+        UpdateChartToolState();
         AutomationProperties.SetName(plot, market == null ? "" : $"Свечи {Frames.Label(frame)} · {market.Label}");
     }
 
@@ -240,6 +244,7 @@ internal sealed class ChartCell : Border
         plot.Frame = frame;
         plot.Set([], reset: true);
         UpdateHeader();
+        ResetChartTools();
         if (!active || market == null) return;
         refresh = new();
         _ = Load(market, frame, refresh);
@@ -291,7 +296,8 @@ internal sealed class ChartCell : Border
     {
         var ct = source.Token;
         long offset = ExchangeApi.CandleOffset(instrument, tf);
-        var candles = new LiveCandles(tf, offset);
+        var candles = new LiveCandles(tf, offset, ChartVolume.UsesBase(instrument));
+        long liveStart = api.CandleNow;
         var live = new ConcurrentQueue<Trade>();
         bool native = tf >= 60 || ExchangeApi.NativeSeconds(instrument);
         int queuedTrades = 0;
@@ -309,7 +315,9 @@ internal sealed class ChartCell : Border
             for (int i = 0; i < pending && live.TryDequeue(out var trade); i++)
             {
                 Interlocked.Decrement(ref queuedTrades);
-                candles.Add(trade);
+                candles.Add(trade, indicatorOptions.Volume && IsVisible && (native || trade.Time >= liveStart)
+                    ? ChartVolume.TradeAmount(instrument, trade) : double.NaN);
+                ObserveChartTrade(instrument, trade);
             }
             Draw();
         };
@@ -416,9 +424,10 @@ internal sealed class ChartCell : Border
             coverage = "Сделки REST/WS · более ранняя история биржей не предоставляется";
             try
             {
-                var trades = await api.RecentTrades(instrument, ct);
+                var trades = features != null && indicatorOptions.Profile ? await features.Recent(instrument, ct) : await api.RecentTrades(instrument, ct);
                 ct.ThrowIfCancellationRequested();
-                foreach (var trade in trades) candles.Add(trade);
+                foreach (var trade in trades) candles.Add(trade, indicatorOptions.Volume && IsVisible && trade.Time < liveStart
+                    ? ChartVolume.TradeAmount(instrument, trade) : double.NaN);
                 Draw();
             }
             catch (Exception) when (!ct.IsCancellationRequested) { coverage = "История сделок недоступна · только новые сделки"; }
@@ -454,7 +463,7 @@ internal sealed class ChartCell : Border
     }
 }
 
-internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
+internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
 {
     private const double Left = 7, Top = 7;
     internal const int DefaultVisibleBars = 220;
@@ -488,7 +497,9 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
     private readonly record struct View(Rect Plot, double Start, double End, double Low, double High)
     {
         public double Span => High - Low;
-        public double Price(double y) => Math.Max(0, High - (y - Plot.Top) / Plot.Height * Span);
+        public double Price(double y) => High - (y - Plot.Top) / Plot.Height * Span;
+        public double Time(double x) => Start + (x - Plot.Left) / Plot.Width * (End - Start);
+        public double X(double time) => Plot.Left + (time - Start) / (End - Start) * Plot.Width;
         public double Y(double price) => Plot.Top + (High - price) / Span * Plot.Height;
         public Point Bound(Point point) => new(Math.Clamp(point.X, Plot.Left, Plot.Right), Math.Clamp(point.Y, Plot.Top, Plot.Bottom));
     }
@@ -506,6 +517,8 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
 
     public void Reset()
     {
+        CancelDrawing();
+        selectedDrawing = null;
         CancelGesture();
         visible = DefaultVisibleBars;
         manualEnd = null;
@@ -532,7 +545,7 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
     {
         if (ActualWidth < 100 || ActualHeight < 48 || candles.Length == 0) return null;
         double right = ActualWidth - (ActualWidth < 160 ? 46 : 70);
-        var rect = new Rect(Left, Top, right - Left, ActualHeight - Top - 17);
+        var rect = new Rect(Left, Top, right - Left, ActualHeight - Top - 17 - InterestPaneHeight);
         double end = manualEnd ?? LiveEnd(visible);
         double start = end - visible * BarTime;
         double low = double.MaxValue, high = 0;
@@ -549,13 +562,13 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
             high = nearest.High;
         }
         double margin = Math.Max((high - low) * 0.08, high * 0.00015);
-        return new(rect, start, end, fixedPrice?.Low ?? Math.Max(0, low - margin), fixedPrice?.High ?? high + margin);
+        return new(rect, start, end, fixedPrice?.Low ?? low - margin, fixedPrice?.High ?? high + margin);
     }
 
     protected override void OnRender(DrawingContext dc)
     {
         dc.DrawRectangle(background, null, new Rect(0, 0, ActualWidth, ActualHeight));
-        if (CurrentView() is not { } view) return;
+        if (CurrentView() is not { } view) { SummarizeIndicators(null); return; }
         var plot = view.Plot;
         double step = plot.Width * BarTime / (view.End - view.Start);
         double body = Math.Max(.12, step * .67);
@@ -590,6 +603,7 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
         }
 
         dc.PushClip(new RectangleGeometry(plot));
+        var volumeBars = DrawCandleVolume(dc, view, body);
         foreach (var c in candles)
         {
             if (c.Time + BarTime <= view.Start || c.Time >= view.End) continue;
@@ -599,7 +613,11 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
             dc.DrawRectangle(rising ? up : down, null,
                 new Rect(x - body / 2, Math.Min(view.Y(c.Open), view.Y(c.Close)), body, Math.Max(1, Math.Abs(view.Y(c.Close) - view.Y(c.Open)))));
         }
+        var (volume, liquidations) = DrawProfiles(dc, view);
+        DrawAnnotations(dc, view);
         dc.Pop();
+        DrawInterest(dc, view);
+        SummarizeIndicators(view, volumeBars, volume, liquidations);
         if (priceLabel != null)
         {
             dc.DrawLine(lastPriceLine, new Point(plot.Left, priceY), new Point(plot.Right, priceY));
@@ -654,6 +672,12 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
         if (drag != null || CurrentView() is not { } view) return;
         Point at = e.GetPosition(this);
         bool inPlot = view.Plot.Contains(at);
+        if (inPlot && e.ChangedButton == MouseButton.Left && DrawingClick(at, view))
+        {
+            Focus();
+            e.Handled = true;
+            return;
+        }
         if (inPlot && gesture().Mouse == e.ChangedButton)
         {
             Start(Operation.Ruler, at, view, e.ChangedButton);
@@ -661,7 +685,6 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
             return;
         }
         if (e.ChangedButton != MouseButton.Left) return;
-        if (e.ClickCount == 2 && inPlot) { Reset(); e.Handled = true; return; }
         if (inPlot) Start(Operation.Pan, at, view, MouseButton.Left);
         else if (at.Y >= view.Plot.Bottom && at.X <= view.Plot.Right) Start(Operation.Time, at, view, MouseButton.Left);
         else if (at.X >= view.Plot.Right && at.Y <= view.Plot.Bottom) Start(Operation.Price, at, view, MouseButton.Left);
@@ -696,6 +719,7 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
+        if (drag == null && MoveDrawing(e.GetPosition(this))) return;
         if (drag is not { } move) return;
         Point point = e.GetPosition(this);
         var view = move.View;
@@ -731,6 +755,7 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
 
     protected override void OnMouseUp(MouseButtonEventArgs e)
     {
+        if (e.ChangedButton == MouseButton.Left && ReleaseDrawing()) { e.Handled = true; return; }
         if (drag?.Button != e.ChangedButton) return;
         CancelGesture();
         e.Handled = true;
@@ -739,6 +764,7 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
     public void CancelGesture()
     {
         drag = null;
+        movingAnchor = null;
         if (IsMouseCaptured) ReleaseMouseCapture();
         InvalidateVisual();
     }
@@ -746,12 +772,12 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
     protected override void OnLostMouseCapture(MouseEventArgs e)
     {
         drag = null;
+        movingAnchor = null;
         InvalidateVisual();
     }
 
     private void SetPrice(double low, double span)
     {
-        low = Math.Max(0, low);
         if (double.IsFinite(low + span) && span > 0 && low + span > low)
             fixedPrice = (low, low + span);
     }
@@ -777,8 +803,9 @@ internal sealed class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
     private static string FormatPrice(double value, double tick)
     {
         if (value == 0) return "0";
-        if (value < 0.00001 || value >= 10_000_000) return value.ToString("0.###e-0", Russian);
-        int precision = value >= 100 ? 0 : value >= 0.01 ? 4 : 5;
+        double magnitude = Math.Abs(value);
+        if (magnitude < 0.00001 || magnitude >= 10_000_000) return value.ToString("0.###e-0", Russian);
+        int precision = magnitude >= 100 ? 0 : magnitude >= 0.01 ? 4 : 5;
         precision = Math.Max(precision, Math.Clamp((int)Math.Ceiling(-Math.Log10(tick)), 0, 8));
         return value.ToString($"F{precision}", Russian);
     }

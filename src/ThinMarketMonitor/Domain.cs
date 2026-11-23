@@ -15,7 +15,8 @@ internal readonly record struct MarketSource(Venue Venue, Segment Segment = Segm
     public override string ToString() => Label;
 }
 internal enum QuantityUnit { Base, Quote }
-internal sealed record Contract(string Product, double Multiplier = 1, QuantityUnit Unit = QuantityUnit.Base, bool Streaming = true);
+internal sealed record Contract(string Product, double Multiplier = 1, QuantityUnit Unit = QuantityUnit.Base, bool Streaming = true,
+    bool Perpetual = false, string? NativeBase = null);
 internal enum ListingRule { Ignore, Require, Exclude }
 internal static class Venues
 {
@@ -46,8 +47,9 @@ internal record Market(Venue Venue, string Symbol, string Base, string Quote, Co
         ? quantity * Contract.Multiplier : price * quantity * (Contract?.Multiplier ?? 1);
 }
 
-internal record Candle(long Time, double Open, double High, double Low, double Close, double? QuoteVolume = null);
-internal record Trade(string Symbol, long Time, double Price, double Size = 0, string? Id = null);
+internal record Candle(long Time, double Open, double High, double Low, double Close, double? QuoteVolume = null,
+    double? BaseVolume = null, bool ObservedVolume = false);
+internal record Trade(string Symbol, long Time, double Price, double Size = 0, string? Id = null, bool Liquidated = false);
 internal record Threshold(int Seconds, bool Enabled, double Percent);
 internal record VolumeRule(int Seconds, bool Enabled, double Usd);
 internal enum SignalModule { Price, Volume }
@@ -161,6 +163,9 @@ internal sealed class Settings
     public bool ColibriOverviewSync { get; set; }
     public string ColibriSlot { get; set; } = "";
     public ChartGesture Ruler { get; set; } = new(Key.None, MouseButton.Middle);
+    public ModifierKeys ChartMagnet { get; set; } = ModifierKeys.Shift;
+    public Dictionary<string, ChartDrawing[]> ChartDrawings { get; set; } = new(StringComparer.Ordinal);
+    public Dictionary<string, ChartIndicatorOptions> ChartIndicators { get; set; } = new(StringComparer.Ordinal);
     public Key Fullscreen { get; set; } = Key.F;
     public int Grid { get; set; } = 2;
     public CellChoice?[] Cells { get; set; } = new CellChoice?[9];
@@ -257,6 +262,13 @@ internal sealed class Settings
         settings.Cells = (settings.Cells ?? []).Take(9).Concat(new CellChoice?[9]).Take(9).ToArray();
         settings.Grid = settings.Grid == 3 ? 3 : 2;
         if (!ChartGesture.Bindable(settings.Fullscreen)) settings.Fullscreen = Key.F;
+        if (settings.ChartMagnet is not (ModifierKeys.None or ModifierKeys.Shift or ModifierKeys.Control or ModifierKeys.Alt))
+            settings.ChartMagnet = ModifierKeys.Shift;
+        settings.ChartDrawings = (settings.ChartDrawings ?? []).Where(pair => pair.Value != null && !string.IsNullOrWhiteSpace(pair.Key))
+            .ToDictionary(pair => pair.Key, pair => pair.Value.Where(drawing => drawing is { Valid: true })
+                .DistinctBy(drawing => drawing.Id).ToArray(), StringComparer.Ordinal);
+        settings.ChartIndicators = (settings.ChartIndicators ?? []).Where(pair => pair.Value != null && !string.IsNullOrWhiteSpace(pair.Key))
+            .ToDictionary(pair => pair.Key, pair => pair.Value.Normalized(), StringComparer.Ordinal);
         if (settings.Ruler == null || (settings.Ruler.Mouse is { } mouse ? !Enum.IsDefined(mouse)
                 : !ChartGesture.Bindable(settings.Ruler.Key) || settings.Ruler.Key == settings.Fullscreen))
             settings.Ruler = new(Key.None, MouseButton.Middle);

@@ -127,8 +127,19 @@ internal sealed partial class ExchangeApi
         }
         if (symbol.Length == 0 || baseCoin.Length == 0 || quote.Length == 0) throw new JsonException("Пустой контракт");
         listingAsset ??= DenominatedListingAsset(venue, baseCoin);
+        bool perpetual = venue switch
+        {
+            Venue.Binance => row.Optional("contractType") is "PERPETUAL" or "TRADIFI_PERPETUAL",
+            Venue.Bybit => row.Optional("contractType") is "LinearPerpetual" or "InversePerpetual",
+            Venue.Okx => product == "SWAP",
+            Venue.Bitget => row.Optional("symbolType") == "perpetual",
+            Venue.Mexc => row.Optional("futureType") == "1",
+            Venue.KuCoin => row.TryGetProperty("expireDate", out var expire) && expire.ValueKind == JsonValueKind.Null,
+            Venue.Gate => stream,
+            _ => false
+        };
         return new(venue, symbol, Underlying(venue, baseCoin), quote, new(product,
-            double.IsFinite(multiplier) && multiplier > 0 ? multiplier : 0, unit, stream),
+            double.IsFinite(multiplier) && multiplier > 0 ? multiplier : 0, unit, stream, perpetual, baseCoin),
             listingAsset == null ? null : new(ListingAsset: listingAsset));
     }
 

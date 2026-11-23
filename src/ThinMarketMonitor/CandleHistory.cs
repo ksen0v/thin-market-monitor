@@ -15,6 +15,7 @@ internal sealed partial class ExchangeApi
             Venue.Binance => (p == "usdm" ? Usdm : p == "coinm" ? Coinm : Binance) + $"aggTrades?symbol={s}&limit=500",
             Venue.Bybit => Bybit + $"recent-trade?category={p ?? "spot"}&symbol={s}&limit={(p == null ? 60 : 500)}",
             Venue.Bitget => p == null ? Bitget + $"market/fills?symbol={s}&limit=100" : Mix + $"fills?symbol={s}&productType={p}&limit=100",
+            Venue.Okx => Okx + $"market/trades?instId={s}&limit=500",
             Venue.Mexc => p == null ? Mexc + $"trades?symbol={s}&limit=500" : MexcContract + $"deals/{s}",
             Venue.KuCoin => p == null ? KuCoin + $"v1/market/histories?symbol={s}" : KuContract + $"trade/history?symbol={s}",
             Venue.Gate => p == null ? Gate + $"trades?currency_pair={s}&limit=200" : GateContract + $"{p}/trades?contract={s}&limit=200",
@@ -27,6 +28,7 @@ internal sealed partial class ExchangeApi
         {
             Venue.Bybit => BybitResult(root).GetProperty("list"),
             Venue.Bitget => Envelope(root, "00000"),
+            Venue.Okx => Envelope(root, "0"),
             Venue.Mexc when p != null => Envelope(root, "0"),
             Venue.KuCoin => Envelope(root, "200000"),
             _ => root
@@ -38,6 +40,7 @@ internal sealed partial class ExchangeApi
                 Venue.Binance => ("T", "p", "a"),
                 Venue.Bybit => ("time", "price", "execId"),
                 Venue.Bitget => ("ts", "price", "tradeId"),
+                Venue.Okx => ("ts", "px", "tradeId"),
                 Venue.Mexc when p != null => ("t", "p", "i"),
                 Venue.Gate => ("create_time_ms", "price", "id"),
                 Venue.KuCoin when p != null => ("ts", "price", "tradeId"),
@@ -47,7 +50,12 @@ internal sealed partial class ExchangeApi
             double ms = row.Number(time);
             if (m.Venue == Venue.KuCoin && ms > 1e16) ms /= 1_000_000;
             if (m.Venue == Venue.Gate && !double.IsFinite(ms)) ms = row.Number("create_time") * 1000;
-            return new Trade(m.Symbol, (long)ms, row.Number(price), Id: row.Optional(id));
+            string size = m.Venue switch
+            {
+                Venue.Binance => "q", Venue.Okx => "sz", Venue.Mexc when p != null => "v", Venue.Mexc => "qty",
+                Venue.Gate when p == null => "amount", _ => "size"
+            };
+            return new Trade(m.Symbol, (long)ms, row.Number(price), Math.Abs(row.Number(size)), row.Optional(id));
         }).Where(t => t.Time > 0 && t.Price > 0 && double.IsFinite(t.Price)).OrderBy(t => t.Time).ToArray();
     }
 
@@ -200,7 +208,8 @@ internal sealed partial class ExchangeApi
         long ms = frame * 1000L;
         return input.OrderBy(x => x.Time).DistinctBy(x => x.Time).GroupBy(x => x.Time / ms * ms)
             .Select(g => new Candle(g.Key, g.First().Open, g.Max(c => c.High), g.Min(c => c.Low), g.Last().Close,
-                g.All(c => c.QuoteVolume.HasValue) ? g.Sum(c => c.QuoteVolume!.Value) : null)).ToArray();
+                g.All(c => c.QuoteVolume.HasValue) ? g.Sum(c => c.QuoteVolume!.Value) : null,
+                g.All(c => c.BaseVolume.HasValue) ? g.Sum(c => c.BaseVolume!.Value) : null)).ToArray();
     }
 
 }

@@ -7,6 +7,7 @@ try
 if (args is ["--spread"]) return await SpreadChecks.Live();
 if (args is ["--volume-live"]) return await VolumeGrowthChecks.Live();
 if (args is ["--new-venues"]) return await ExtendedVenueChecks.Live();
+if (args is ["--indicators-live"]) return await ChartFeatureChecks.Live();
 
 if (args is ["--segments"])
 {
@@ -370,6 +371,7 @@ foreach (string malformed in new[] { release.RootElement.GetRawText().Replace(Up
 BlacklistChecks.Run();
 ListingAssetChecks.Run();
 ExtendedVenueChecks.Run();
+ChartFeatureChecks.Run();
 await SpreadChecks.Run();
 await ColibriChecks.Run();
 Console.WriteLine("Listings, volume conditions, chart placement, migration, price and volume windows, eight trade adapters and update metadata passed.");

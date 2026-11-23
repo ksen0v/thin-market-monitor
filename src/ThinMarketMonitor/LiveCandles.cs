@@ -1,20 +1,31 @@
 namespace ThinMarketMonitor;
 
-internal sealed class LiveCandles(int frame, long offset = 0)
+internal sealed class LiveCandles(int frame, long offset = 0, bool volumeInBase = false)
 {
     public const int MaxBars = 12_000;
     private readonly long interval = frame * 1000L;
     private readonly SortedDictionary<long, Bar> bars = new();
+    private HashSet<string>? volumeIds;
+    private Queue<string>? volumeIdOrder;
 
     public int Count => bars.Count;
 
-    public void Add(Trade trade)
+    public void Add(Trade trade, double volume = double.NaN)
     {
         if (trade.Time <= 0 || trade.Price <= 0 || !double.IsFinite(trade.Price)) return;
         long time = ExchangeApi.CandleStart(trade.Time, interval, offset);
         var bar = GetBar(time);
-        if (!bar.Closed) bar.Add(trade);
+        if (!bar.Closed) bar.Add(trade, NewVolume(trade.Id, volume));
         Trim();
+    }
+
+    private double NewVolume(string? id, double volume)
+    {
+        if (id is not { Length: > 0 } || !double.IsFinite(volume) || volume <= 0) return volume;
+        if (!(volumeIds ??= new(StringComparer.Ordinal)).Add(id)) return double.NaN;
+        (volumeIdOrder ??= new()).Enqueue(id);
+        if (volumeIdOrder.Count > 16_384) volumeIds.Remove(volumeIdOrder.Dequeue());
+        return volume;
     }
 
     public void AddHistory(IEnumerable<Candle> candles, long requestedAt)
@@ -30,7 +41,7 @@ internal sealed class LiveCandles(int frame, long offset = 0)
         Trim();
     }
 
-    public Candle[] Snapshot() => bars.Select(entry => entry.Value.CandleAt(entry.Key)).ToArray();
+    public Candle[] Snapshot() => bars.Select(entry => entry.Value.CandleAt(entry.Key, volumeInBase)).ToArray();
 
     private Bar GetBar(long time)
     {
@@ -52,22 +63,29 @@ internal sealed class LiveCandles(int frame, long offset = 0)
         private Trade? last;
         private double high;
         private double low = double.PositiveInfinity;
+        private double observed;
 
-        public void Add(Trade trade)
+        public void Add(Trade trade, double volume)
         {
             if (first == null || trade.Time < first.Time) first = trade;
             if (last == null || trade.Time >= last.Time) last = trade;
             high = Math.Max(high, trade.Price);
             low = Math.Min(low, trade.Price);
+            if (double.IsFinite(volume) && volume > 0) observed += volume;
         }
 
-        public Candle CandleAt(long time)
+        public Candle CandleAt(long time, bool volumeInBase)
         {
             if (first == null || Closed) return History!;
             var latest = last!;
             double close = History != null && latest.Time < HistoryRequestedAt - 2000 ? History.Close : latest.Price;
+            double? quote = History?.QuoteVolume, basis = History?.BaseVolume;
+            // REST and live trades can describe the same executions. Use one total, never add overlapping totals.
+            bool observedVolume = double.IsFinite(observed) && observed > (volumeInBase ? basis : quote).GetValueOrDefault();
+            if (observedVolume && volumeInBase) basis = observed;
+            else if (observedVolume) quote = observed;
             return new(time, History?.Open ?? first.Price, Math.Max(History?.High ?? 0, high),
-                Math.Min(History?.Low ?? double.PositiveInfinity, low), close, History?.QuoteVolume);
+                Math.Min(History?.Low ?? double.PositiveInfinity, low), close, quote, basis, observedVolume);
         }
     }
 }

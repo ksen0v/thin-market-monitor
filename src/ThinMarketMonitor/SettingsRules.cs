@@ -339,6 +339,24 @@ internal sealed partial class SettingsPanel
         var fullscreen = AddShortcut("Полный экран", settings.Fullscreen.ToString());
         var up = AddShortcut("Следующий таймфрейм", settings.FrameUp.ToString());
         var down = AddShortcut("Предыдущий таймфрейм", settings.FrameDown.ToString());
+        var magnets = new[] { ModifierKeys.Shift, ModifierKeys.Control, ModifierKeys.Alt, ModifierKeys.None };
+        var magnet = new ComboBox
+        {
+            ItemsSource = new[] { "Shift", "Ctrl", "Alt", "Выключен" }, SelectedIndex = Array.IndexOf(magnets, settings.ChartMagnet),
+            MinWidth = 160, VerticalAlignment = VerticalAlignment.Center
+        };
+        AutomationProperties.SetName(magnet, "Магнит рисунков · удерживать");
+        var magnetRow = new DockPanel { Margin = new Thickness(0, 8, 0, 5) };
+        DockPanel.SetDock(magnet, Dock.Right);
+        magnetRow.Children.Add(magnet);
+        magnetRow.Children.Add(new TextBlock { Text = "Магнит рисунков · удерживать", VerticalAlignment = VerticalAlignment.Center });
+        panel.Children.Add(magnetRow);
+        magnet.SelectionChanged += (_, _) =>
+        {
+            if (magnet.SelectedIndex < 0) return;
+            settings.ChartMagnet = magnets[magnet.SelectedIndex];
+            savePreferences();
+        };
         var frames = new WrapPanel { Margin = new Thickness(0, 8, 0, 8) };
         foreach (int frame in Frames.All)
         {

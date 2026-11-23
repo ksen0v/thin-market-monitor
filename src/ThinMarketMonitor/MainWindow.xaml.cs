@@ -71,19 +71,20 @@ public partial class MainWindow : Window, IDisposable
         notifications = testNotifications ?? new(settings, Dispatcher, speak: neuralVoice.Speak);
         signalCooldown = new(signalClock ?? TimeProvider.System);
         api = new(http);
+        var chartFeatures = new ChartFeatures(settings, api, source => catalogs.GetValueOrDefault(source), Save);
         colibri = new(settings, colibriClient);
         colibri.StatusChanged += ShowIntegrationStatus;
         var mark = Terminal.Icon("candles");
         System.Windows.Documents.TextElement.SetForeground(mark, Terminal.Brush("Accent"));
         BrandMark.Child = mark;
-        SettingsButton.Content = Terminal.LabelWithIcon("settings", "Настройки", 5);
         SignalListingsButton.Content = Terminal.LabelWithIcon("listings", "Листинги", 5);
         for (int i = 0; i < cells.Length; i++)
         {
             int slot = i;
-            var cell = new ChartCell(api, i + 1, () => PickMarket(slot), Save, () => ++order, () => settings.Ruler, () => settings.FrameButtons)
+            var cell = new ChartCell(api, i + 1, () => PickMarket(slot), Save, () => ++order, () => settings.Ruler, () => settings.FrameButtons, chartFeatures)
                 { Choice = settings.Cells[i] };
             cells[i] = cell;
+            cell.IndicatorLayoutChanged += () => ResizeChartGrid(this, null);
             cell.PreviewMouseDown += (_, _) => activeCell = cell;
             cell.GotKeyboardFocus += (_, _) => activeCell = cell;
             cell.FrameChanged += _ => Save();
@@ -95,7 +96,7 @@ public partial class MainWindow : Window, IDisposable
             settings.OverviewDrawer = true;
             RefreshOverview();
             Save();
-        }, Save, () => ++order, () => settings.Ruler, () => settings.FrameButtons)
+        }, Save, () => ++order, () => settings.Ruler, () => settings.FrameButtons, chartFeatures)
         {
             Choice = settings.OverviewChoice,
             PlotHeight = double.NaN
@@ -160,10 +161,15 @@ public partial class MainWindow : Window, IDisposable
             e.Handled = true;
             return;
         }
-        if (e.Key == Key.Escape && fullscreenCell != null) { ExitFullscreen(); e.Handled = true; return; }
-        if (Keyboard.FocusedElement is TextBoxBase || Keyboard.Modifiers != ModifierKeys.None) return;
         var underMouse = overviewChart.IsVisible && overviewChart.IsMouseOver ? overviewChart
             : cells.FirstOrDefault(c => c.IsMouseOver && c.IsVisible);
+        var drawing = fullscreenCell ?? underMouse ?? (activeCell?.IsVisible == true ? activeCell : null);
+        if (e.Key == Key.Escape && (drawing?.Plot.CancelDrawing() == true ||
+            overviewChart.Plot.CancelDrawing() || cells.Any(cell => cell.Plot.CancelDrawing())))
+        { e.Handled = true; return; }
+        if (e.Key == Key.Escape && fullscreenCell != null) { ExitFullscreen(); e.Handled = true; return; }
+        if (Keyboard.FocusedElement is TextBoxBase || Keyboard.Modifiers != ModifierKeys.None) return;
+        if (e.Key == Key.Delete && drawing?.Plot.DeleteDrawing() == true) { e.Handled = true; return; }
         if (e.Key == settings.Fullscreen)
         {
             if (!e.IsRepeat)
@@ -215,6 +221,7 @@ public partial class MainWindow : Window, IDisposable
         cell.PlotHeight = double.NaN;
         cell.Margin = new Thickness(0);
         Workspace.Visibility = Visibility.Collapsed;
+        BottomNavigation.Visibility = Visibility.Collapsed;
         FullChart.Content = cell;
         FullChart.Visibility = Visibility.Visible;
         if (changeWindow)
@@ -235,6 +242,7 @@ public partial class MainWindow : Window, IDisposable
         FullChart.Content = null;
         FullChart.Visibility = Visibility.Collapsed;
         Workspace.Visibility = Visibility.Visible;
+        BottomNavigation.Visibility = Visibility.Visible;
         WindowStyle = previousWindowStyle;
         ResizeMode = previousResizeMode;
         WindowState = previousWindowState;
@@ -287,13 +295,20 @@ public partial class MainWindow : Window, IDisposable
     private void ResizeChartGrid(object sender, SizeChangedEventArgs? e)
     {
         if (Charts != null && ChartScroll != null)
-            Charts.Height = Math.Max(settings.Grid * 116, ChartScroll.ActualHeight - ChartScroll.Padding.Top);
+        {
+            int minimum = cells.Take(settings.Grid * settings.Grid).Any(cell => cell?.HasIndicatorLayout == true) ? 165 : 116;
+            Charts.Height = Math.Max(settings.Grid * minimum, ChartScroll.ActualHeight - ChartScroll.Padding.Top);
+        }
     }
 
     private void ChangeWorkspace(object sender, RoutedEventArgs e)
     {
+        if (settingsPanel?.Installing == true) return;
+        if (DialogHost.Content != null) CloseDialog();
+        bool overview = ReferenceEquals(sender, OverviewButton);
+        if (settings.Overview == overview) return;
         colibri.CancelPending();
-        settings.Overview = !settings.Overview;
+        settings.Overview = overview;
         activeCell = settings.Overview ? overviewChart : null;
         RefreshOverview();
         Save();
@@ -311,7 +326,7 @@ public partial class MainWindow : Window, IDisposable
         GridSpace.Visibility = settings.Overview ? Visibility.Collapsed : Visibility.Visible;
         OverviewSpace.Visibility = settings.Overview ? Visibility.Visible : Visibility.Collapsed;
         GridSwitch.Visibility = SignalListingsButton.Visibility = settings.Overview ? Visibility.Collapsed : Visibility.Visible;
-        SpaceSwitch.Content = settings.Overview ? "Сигналы" : "Обзор";
+        UpdateNavigation();
         DrawerSwitch.Content = Terminal.Icon(settings.OverviewDrawer ? "drawer-open" : "drawer-closed");
         DrawerSwitch.Foreground = Terminal.Brush(settings.OverviewDrawer ? "Accent" : "Muted");
         string drawerLabel = settings.OverviewDrawer ? "Скрыть инструменты" : "Показать инструменты";
@@ -678,6 +693,8 @@ public partial class MainWindow : Window, IDisposable
 
     private void OpenSettings(object sender, RoutedEventArgs e)
     {
+        if (settingsPanel != null) { settingsPanel.Close(); return; }
+        if (DialogHost.Content != null) CloseDialog();
         settingsPanel = new SettingsPanel(settings, new Updater(http), colibri, SettingsChanged, CloseDialog, Close, settings.Overview,
             () => { notifications.SettingsChanged(); Save(); }, () => { RefreshOverview(); Save(); }, notifications.PreviewSound,
             neuralVoice, notifications.PreviewVoice, Save);
@@ -724,6 +741,7 @@ public partial class MainWindow : Window, IDisposable
         Workspace.IsEnabled = false;
         Overlay.Visibility = Visibility.Visible;
         DialogHost.Content = content;
+        UpdateNavigation();
     }
 
     private void CloseDialog()
@@ -735,8 +753,22 @@ public partial class MainWindow : Window, IDisposable
         DialogHost.Content = null;
         Overlay.Visibility = Visibility.Collapsed;
         Workspace.IsEnabled = true;
+        UpdateNavigation();
         if (previousFocus != null) Keyboard.Focus(previousFocus);
         previousFocus = null;
+    }
+
+    private void UpdateNavigation()
+    {
+        var selected = settingsPanel != null ? SettingsButton : settings.Overview ? OverviewButton : SignalsButton;
+        foreach (var button in new[] { SignalsButton, OverviewButton, SettingsButton })
+        {
+            bool active = ReferenceEquals(button, selected);
+            button.Background = Terminal.Brush(active ? "AccentSurface" : "Surface");
+            button.Foreground = Terminal.Brush(active ? "Accent" : "Text");
+            button.BorderBrush = Terminal.Brush(active ? "Accent" : "Outline");
+            System.Windows.Automation.AutomationProperties.SetItemStatus(button, active ? "Активный раздел" : "");
+        }
     }
 
     private void Save()

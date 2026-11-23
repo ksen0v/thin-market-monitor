@@ -4,12 +4,15 @@
         Title="Thin Market Monitor" Width="1180" Height="720" MinWidth="690" MinHeight="470" Icon="Assets/terminal.ico"
         WindowStartupLocation="CenterScreen" UseLayoutRounding="True" Style="{StaticResource {x:Type Window}}">
     <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
         <DockPanel x:Name="Workspace">
             <Border DockPanel.Dock="Top" Height="42" Padding="10,0" Background="{StaticResource Surface}"
                     BorderBrush="{StaticResource Outline}" BorderThickness="0,0,0,1">
                 <DockPanel>
                     <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-                        <Button x:Name="SpaceSwitch" Click="ChangeWorkspace" MinHeight="26" Margin="0,0,6,0"/>
                         <Button x:Name="SignalListingsButton" Click="OpenSignalListings" MinHeight="26" Margin="0,0,6,0"
                                 AutomationProperties.Name="Листинги сигналов"/>
                         <Border x:Name="GridSwitch" Background="{StaticResource Plot}" BorderBrush="{StaticResource Outline}" BorderThickness="1">
@@ -18,7 +21,6 @@
                                 <ToggleButton x:Name="GridThree" Style="{StaticResource GridButton}" Content="3 × 3" Click="ChangeGrid" Margin="2,0,0,0"/>
                             </StackPanel>
                         </Border>
-                        <Button x:Name="SettingsButton" AutomationProperties.Name="Настройки" Click="OpenSettings" MinHeight="26" Margin="5,0,0,0"/>
                     </StackPanel>
                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                         <Border x:Name="BrandMark" Width="21" Height="21" Background="{StaticResource AccentSurface}" Margin="0,0,8,0"/>
@@ -32,15 +34,6 @@
             </Border>
             <Grid Margin="10,5,10,10">
                 <DockPanel x:Name="GridSpace">
-                    <WrapPanel DockPanel.Dock="Top" MinHeight="34" Margin="0,0,0,5">
-                        <TextBlock x:Name="CatalogStatus" Text="Обновление каталогов…" Margin="0,8,9,0" TextTrimming="CharacterEllipsis"/>
-                        <Border BorderBrush="{StaticResource Outline}" BorderThickness="1,0,0,0" Padding="9,0,0,0" Margin="0,8,0,0">
-                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                <Ellipse x:Name="StreamLed" Width="6" Height="6" Fill="{StaticResource Muted}" Margin="0,0,6,0"/>
-                                <TextBlock x:Name="StreamStatus" Foreground="{StaticResource Muted}" FontSize="11"/>
-                            </StackPanel>
-                        </Border>
-                    </WrapPanel>
                     <ScrollViewer x:Name="ChartScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
                                   SizeChanged="ResizeChartGrid" Background="{StaticResource Outline}" Padding="1,1,0,0">
                         <UniformGrid x:Name="Charts" Rows="2" Columns="2" AutomationProperties.Name="Свечные графики"/>
@@ -91,5 +84,22 @@
             <ContentControl x:Name="DialogHost" Margin="10" HorizontalAlignment="Center" VerticalAlignment="Center"
                             Focusable="False" IsTabStop="False"/>
         </Grid>
+        <Border x:Name="BottomNavigation" Grid.Row="1" Background="{StaticResource Surface}" BorderBrush="{StaticResource Outline}"
+                BorderThickness="0,1,0,0" Padding="10,5">
+            <DockPanel>
+                <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" AutomationProperties.Name="Рабочие области">
+                    <Button x:Name="SignalsButton" Content="_Сигналы" AutomationProperties.Name="Сигналы" Click="ChangeWorkspace" MinHeight="30" Margin="0,0,4,0"/>
+                    <Button x:Name="OverviewButton" Content="_Обзор" AutomationProperties.Name="Обзор" Click="ChangeWorkspace" MinHeight="30" Margin="0,0,4,0"/>
+                    <Button x:Name="SettingsButton" Content="_Настройки" AutomationProperties.Name="Настройки" Click="OpenSettings" MinHeight="30"/>
+                </StackPanel>
+                <StackPanel Margin="14,0,0,0" VerticalAlignment="Center">
+                    <TextBlock x:Name="CatalogStatus" Text="Обновление каталогов…" TextTrimming="CharacterEllipsis" FontSize="11"/>
+                    <DockPanel>
+                        <Ellipse x:Name="StreamLed" DockPanel.Dock="Left" Width="6" Height="6" Fill="{StaticResource Muted}" Margin="0,0,6,0"/>
+                        <TextBlock x:Name="StreamStatus" Foreground="{StaticResource Muted}" FontSize="11" TextTrimming="CharacterEllipsis"/>
+                    </DockPanel>
+                </StackPanel>
+            </DockPanel>
+        </Border>
     </Grid>
 </Window>

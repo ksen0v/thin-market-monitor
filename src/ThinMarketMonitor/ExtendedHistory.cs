@@ -169,8 +169,10 @@ internal sealed partial class ExchangeApi
                         ValidVolume(row[5].Num() * row[6].Num()));
                     break;
                 case Venue.Kraken:
+                    double? nativeVolume = ValidVolume(row.Number("volume"));
                     yield return new(row.GetProperty("time").Int(), row.Number("open"), row.Number("high"), row.Number("low"),
-                        row.Number("close"), m.Contract?.Unit == QuantityUnit.Quote ? ValidVolume(m.Turnover(row.Number("volume"), 1)) : null);
+                        row.Number("close"), m.Contract?.Unit == QuantityUnit.Quote ? ValidVolume(m.Turnover(row.Number("volume"), 1)) : null,
+                        m.Contract?.Unit == QuantityUnit.Base ? nativeVolume : null);
                     break;
                 case Venue.Weex:
                     yield return new(row[0].Int(), row[1].Num(), row[2].Num(), row[3].Num(), row[4].Num(), At(row, 7));
@@ -178,7 +180,8 @@ internal sealed partial class ExchangeApi
                 default:
                     // Lighter has native quote volume V. Hyperliquid v is base size and lacks a VWAP.
                     yield return new(row.GetProperty("t").Int(), row.Number("o"), row.Number("h"), row.Number("l"), row.Number("c"),
-                        m.Venue == Venue.Lighter ? ValidVolume(row.Number("V")) : null);
+                        m.Venue == Venue.Lighter ? ValidVolume(row.Number("V")) : null,
+                        m.Venue == Venue.Hyperliquid ? ValidVolume(row.Number("v")) : null);
                     break;
             }
         }
@@ -218,9 +221,10 @@ internal sealed partial class ExchangeApi
             Venue.Kraken when m.Contract == null => new(m.Symbol, (long)(row[2].Num() * 1000), row[0].Num(), row[1].Num(),
                 row.GetArrayLength() > 6 ? row[6].Str() : null),
             Venue.Kraken => new(m.Symbol, IsoTime(row.Optional("time")), row.Number("price"), row.Number("size"),
-                row.Optional("sequence_id")),
+                row.Optional("sequence_id"), row.Optional("type") == "liquidation"),
             Venue.Weex => new(m.Symbol, row.GetProperty("time").Int(), row.Number("price"), row.Number("qty"), row.Optional("id")),
-            Venue.Lighter => new(m.Symbol, row.GetProperty("timestamp").Int(), row.Number("price"), row.Number("size"), row.Optional("trade_id")),
+            Venue.Lighter => new(m.Symbol, row.GetProperty("timestamp").Int(), row.Number("price"), row.Number("size"),
+                row.Optional("trade_id"), row.Optional("type") == "liquidation"),
             _ => new(m.Symbol, row.GetProperty("time").Int(), row.Number("px"), row.Number("sz"), row.Optional("tid"))
         }).Where(t => t.Time > 0 && double.IsFinite(t.Price) && t.Price > 0)
             .OrderBy(t => t.Time).ToArray();

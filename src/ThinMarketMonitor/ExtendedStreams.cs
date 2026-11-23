@@ -208,9 +208,9 @@ internal static class ExtendedStreams
             string index = ChannelSymbol(channel);
             trades = new[] { "trades", "liquidation_trades" }
                 .SelectMany(property => root.TryGetProperty(property, out var data) && data.ValueKind == JsonValueKind.Array
-                    ? data.EnumerateArray().AsEnumerable() : [])
-                .Where(row => row.Optional("market_id") == index)
-                .Select(row => new Trade(index, row.GetProperty("timestamp").Int(), row.Number("price"), row.Number("size"), row.Optional("trade_id")));
+                    ? data.EnumerateArray().Where(row => row.Optional("market_id") == index)
+                        .Select(row => new Trade(index, row.GetProperty("timestamp").Int(), row.Number("price"), row.Number("size"),
+                            row.Optional("trade_id"), property == "liquidation_trades" || row.Optional("type") == "liquidation")) : []);
         }
         else if (m.Venue == Venue.Hyperliquid && channel == "trades")
             trades = root.GetProperty("data").EnumerateArray().Select(row => new Trade(row.Str("coin"),
@@ -263,10 +263,11 @@ internal static class ExtendedStreams
     public static async Task Send(ClientWebSocket socket, object value, CancellationToken ct) =>
         await socket.SendAsync(JsonSerializer.SerializeToUtf8Bytes(value).AsMemory(), WebSocketMessageType.Text, true, ct);
 
-    public static async Task<JsonDocument> Read(ClientWebSocket socket, byte[] buffer, MemoryStream message, bool gzip, CancellationToken ct)
+    public static async Task<JsonDocument> Read(ClientWebSocket socket, byte[] buffer, MemoryStream message, bool gzip, CancellationToken ct,
+        TimeSpan? idle = null)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeout.CancelAfter(TimeSpan.FromSeconds(70));
+        timeout.CancelAfter(idle ?? TimeSpan.FromSeconds(70));
         message.SetLength(0);
         while (true)
         {

@@ -79,7 +79,7 @@ internal sealed partial class ExchangeApi
                         ? (row.Optional("underlyingType") == "Stocks" ? UsStockListingAsset(asset) : null) ?? "weex:" + asset
                         : DenominatedListingAsset(Venue.Weex, asset);
                     // The public trade q and candle volume are already base units, independent of order lot size.
-                    yield return new(Venue.Weex, row.Str("symbol"), asset, quote, spot ? null : new("linear"),
+                    yield return new(Venue.Weex, row.Str("symbol"), asset, quote, spot ? null : new("linear", Perpetual: true),
                         spot ? null : new(ListingAsset: listingAsset, Collateral: row.Optional("marginAsset")));
                 }
                 break;
@@ -108,7 +108,8 @@ internal sealed partial class ExchangeApi
                     double size = inverse ? row.Number("contractSize") : 1;
                     if (!double.IsFinite(size) || size <= 0) continue;
                     yield return new(Venue.Kraken, symbol, KrakenAsset(row.Str("base")), KrakenAsset(row.Str("quote")),
-                        new("derivatives", size, inverse ? QuantityUnit.Quote : QuantityUnit.Base));
+                        new("derivatives", size, inverse ? QuantityUnit.Quote : QuantityUnit.Base,
+                            Perpetual: symbol.StartsWith("PF_") || symbol.StartsWith("PI_")));
                 }
                 break;
         }
@@ -124,7 +125,9 @@ internal sealed partial class ExchangeApi
             double size = row.Number("contract_size");
             if (quote.Length == 0 || !double.IsFinite(size) || size <= 0) continue;
             yield return new(Venue.Htx, symbol, asset, quote,
-                new(product, size, product == "linear" ? QuantityUnit.Base : QuantityUnit.Quote),
+                new(product, size, product == "linear" ? QuantityUnit.Base : QuantityUnit.Quote,
+                    Perpetual: product == "inverse" || product == "linear" && (row.Optional("contract_type") == "swap" ||
+                        row.Optional("contract_type").Length == 0 && symbol.Count(character => character == '-') == 1)),
                 new(Collateral: product == "linear" ? quote : asset));
         }
     }
@@ -157,7 +160,7 @@ internal sealed partial class ExchangeApi
             bool unitSize = spot || row.Number("multiplier") == 1;
             string? colibri = !duplicateNames.Contains(nativeName) && (!spot ||
                 nativeName.Equals($"{asset}/{quote}", StringComparison.OrdinalIgnoreCase)) ? nativeName : null;
-            yield return new(Venue.Lighter, id, asset, quote, spot ? null : new("perp", unitSize ? 1 : 0),
+            yield return new(Venue.Lighter, id, asset, quote, spot ? null : new("perp", unitSize ? 1 : 0, Perpetual: true),
                 new(ListingAsset: listingAsset, Collateral: spot ? null : tokens.GetValueOrDefault("3"),
                     Display: spot ? $"{asset}/{quote}" : $"{asset}/USD · {id}", ColibriSymbol: colibri));
         }
@@ -205,7 +208,7 @@ internal sealed partial class ExchangeApi
                 if (asset.Length == 0) continue;
                 // Hyperliquid specifies the oracle denomination for its core perps separately from margin.
                 string quote = dex.Length != 0 ? "USD" : asset is "PURR" or "HYPE" ? "USDC" : "USDT";
-                yield return new(Venue.Hyperliquid, symbol, asset, quote, new("perp"),
+                yield return new(Venue.Hyperliquid, symbol, asset, quote, new("perp", Perpetual: true),
                     new(ListingAsset: dex.Length == 0 ? DenominatedListingAsset(Venue.Hyperliquid, symbol) : "hyperliquid:" + symbol,
                         Collateral: collateral, Display: $"{symbol}/{quote}"));
             }
