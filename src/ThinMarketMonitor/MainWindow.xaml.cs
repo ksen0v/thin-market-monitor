@@ -101,12 +101,7 @@ public partial class MainWindow : Window, IDisposable
             cell.OpenInColibri += market => colibri.Open(market);
             cell.BlacklistRequested += BlacklistSignalCoin;
         }
-        overviewChart = new ChartCell(api, 0, () =>
-        {
-            settings.OverviewDrawer = true;
-            RefreshOverview();
-            Save();
-        }, Save, () => ++order, () => settings.Ruler, () => settings.FrameButtons, chartFeatures)
+        overviewChart = new ChartCell(api, 0, null, Save, () => ++order, () => settings.Ruler, () => settings.FrameButtons, chartFeatures)
         {
             Choice = settings.OverviewChoice,
             PlotHeight = double.NaN
@@ -179,6 +174,7 @@ public partial class MainWindow : Window, IDisposable
         { e.Handled = true; return; }
         if (e.Key == Key.Escape && fullscreenCell != null) { ExitFullscreen(); e.Handled = true; return; }
         if (Keyboard.FocusedElement is TextBoxBase || Keyboard.Modifiers != ModifierKeys.None) return;
+        if (e.Key is Key.Up or Key.Down && ChartSurface.IsPaneDivider(Keyboard.FocusedElement)) return;
         if (e.Key == Key.Delete && drawing?.Plot.DeleteDrawing() == true) { e.Handled = true; return; }
         if (e.Key == settings.Fullscreen)
         {
@@ -214,8 +210,8 @@ public partial class MainWindow : Window, IDisposable
 
     private void CancelChartGestures()
     {
-        foreach (var cell in cells) cell.Plot.CancelGesture();
-        overviewChart.Plot.CancelGesture();
+        foreach (var cell in cells) cell.CancelGestures();
+        overviewChart.CancelGestures();
         keyboardRuler = null;
     }
 

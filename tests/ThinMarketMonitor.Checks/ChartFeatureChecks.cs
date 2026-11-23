@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Threading;
 using ThinMarketMonitor;
 
@@ -122,6 +123,16 @@ internal static class ChartFeatureChecks
         var migrated = Settings.Deserialize(JsonSerializer.Serialize(prior));
         Check(migrated.ChartIndicators[Bitcoin.Key] is { Volume: true, HasInterest: true } && migrated.Thresholds.Length == 0,
             "opening pre-volume-default settings enables candle volume once while preserving other saved choices");
+        var startingSizes = new[] { 90d, ChartPaneLayout.InterestMinimum, 100d };
+        InterestLayer[] panes = [new(Venue.Binance, null, null), new(Venue.Gate, null, null)];
+        var resized = ChartPaneLayout.Resize(startingSizes, [Venue.Binance, Venue.Gate], 1, -40, null);
+        double chartHeight = startingSizes.Sum() + panes.Length * ChartPaneLayout.DividerHeight;
+        var restoredSizes = ChartPaneLayout.Measure(chartHeight, panes, resized);
+        var enlarged = ChartPaneLayout.Measure(chartHeight + 80, panes, resized);
+        Check(resized is { Valid: true } && Math.Abs(restoredSizes[0] - 50) < .001 &&
+            Math.Abs(restoredSizes[1] - ChartPaneLayout.InterestMinimum) < .001 &&
+            Math.Abs(restoredSizes[2] - 140) < .001 && enlarged[2] > restoredSizes[2],
+            "resizing past the adjoining pane's minimum adjusts the next pane and proportions work in larger windows");
         Console.WriteLine("Chart drawing geometry, profile arithmetic, live volume joins, OI scale and volume default passed.");
     }
 
@@ -219,9 +230,28 @@ internal static class ChartFeatureChecks
             var sources = Field<IndicatorDisplay>(plot, "indicators").Interest;
             Check(sources.Select(layer => layer.Venue).SequenceEqual([Venue.Lighter, Venue.Binance]),
                 "the newest enabled exchange is stacked above the previous OI pane");
+            var surface = Field<ChartSurface>(cell, "chartSurface");
+            var run = Field<CancellationTokenSource>(cell, "indicatorRun");
+            var less = PaneButton(surface, "Опустить панель OI · Lighter");
+            Check(less.IsEnabled && !PaneButton(surface, "Поднять панель OI · Lighter").IsEnabled,
+                "the first pane offers the down control");
+            Click(less);
+            var reopenedSettings = Settings.Deserialize(JsonSerializer.Serialize(settings));
+            Check(reopenedSettings.ChartIndicators[Bitcoin.Key].Interest!.Keys.Reverse().SequenceEqual([Venue.Binance, Venue.Lighter]) &&
+                Field<IndicatorDisplay>(plot, "indicators").Interest[0].Venue == Venue.Binance &&
+                ReferenceEquals(run, Field<CancellationTokenSource>(cell, "indicatorRun")),
+                "reordering the OI panes persists the order within the chart without restarting subscriptions");
+            Click(PaneButton(surface, "Поднять панель OI · Lighter"));
             plot.Set(bars);
             window.UpdateLayout();
             CheckInterestPanels(window, plot, bars);
+            CheckPaneResize(window, plot, surface, settings);
+
+            Click(PaneButton(surface, "Закрыть панель OI · Lighter"));
+            Check(settings.ChartIndicators[Bitcoin.Key].Interest!.Keys.SequenceEqual([Venue.Binance]) &&
+                Field<IndicatorDisplay>(plot, "indicators").Interest is [{ Venue: Venue.Binance }] &&
+                settings.ChartPaneWeights.ContainsKey(Bitcoin.Key),
+                "the close button removes just that OI pane and remembers its layout settings for reopening");
 
             Click(preferences);
             Check(AutomationProperties.GetItemStatus(preferences) == "Активный раздел" &&
@@ -229,10 +259,16 @@ internal static class ChartFeatureChecks
             Click(overview);
             await requests.Canceled.Task.WaitAsync(TimeSpan.FromSeconds(5));
             await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            var overviewChart = Field<ChartCell>(window, "overviewChart");
             Check(settings.Overview && !settings.OverviewDrawer && !cell.IsVisible &&
                 AutomationProperties.GetItemStatus(overview) == "Активный раздел" &&
-                Field<Border>(Field<ChartCell>(window, "overviewChart"), "drawingToolbar").IsVisible,
+                Field<Border>(overviewChart, "drawingToolbar").IsVisible,
                 "Overview expands the drawing tools, cancels unused indicator requests and keeps the drawer state");
+            Check(HeaderButtons(cell).Any(button => Equals(button.Content, "Выбрать")) &&
+                HeaderButtons(cell).Contains(Field<Button>(cell, "pin")) &&
+                !HeaderButtons(overviewChart).Any(button => Equals(button.Content, "Выбрать")) &&
+                !HeaderButtons(overviewChart).Contains(Field<Button>(overviewChart, "pin")),
+                "choose and pin are present in Signals only");
             Click(signals);
             Check(!settings.Overview && cell.Choice is { Key: var key, Pinned: true } && key == Bitcoin.Key,
                 "switching back restores the signal grid and selection");
@@ -256,6 +292,47 @@ internal static class ChartFeatureChecks
         }
         static void Click(Button button) => button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         static void ClickMenu(MenuItem item) => item.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+    }
+
+    private static Button PaneButton(ChartSurface surface, string name) => surface.Children.OfType<StackPanel>()
+        .SelectMany(panel => panel.Children.OfType<Button>()).Single(button => AutomationProperties.GetName(button) == name);
+
+    private static Button[] HeaderButtons(ChartCell chart) => ((DockPanel)Field<Border>(chart, "headerFrame").Child)
+        .Children.OfType<StackPanel>().SelectMany(panel => panel.Children.OfType<Button>()).ToArray();
+
+    private static void CheckPaneResize(Window window, CandlePlot plot, ChartSurface surface, Settings settings)
+    {
+        window.UpdateLayout();
+        var grip = surface.Children.OfType<Thumb>().Single(thumb => AutomationProperties.GetName(thumb) == "Высота панели OI · Lighter");
+        var original = plot.MeasurePanes(plot.ActualHeight);
+        double y = grip.TranslatePoint(new Point(), surface).Y;
+        Check(grip.IsVisible && grip.ActualHeight == ChartPaneLayout.DividerHeight &&
+            Math.Abs(y - (7 + original[0])) < 1, "the draggable separator occupies the geometry between price and the first OI pane");
+        Begin();
+        Drag(-21);
+        var preview = plot.MeasurePanes(plot.ActualHeight);
+        Check(preview[1] > original[1] + 15 && preview[0] < original[0] - 15 &&
+            !settings.ChartPaneWeights.ContainsKey(Bitcoin.Key), "dragging previews the height without writing settings");
+        End(canceled: false);
+        var loaded = Settings.Deserialize(JsonSerializer.Serialize(settings)).ChartPaneWeights[Bitcoin.Key];
+        Check(loaded.Interest.ContainsKey(Venue.Lighter) &&
+            Math.Abs(ChartPaneLayout.Measure(plot.ActualHeight - 24,
+                Field<IndicatorDisplay>(plot, "indicators").Interest, loaded)[1] - preview[1]) < .001,
+            "the finished drag restores the same height after a settings reload");
+        Begin();
+        Drag(15);
+        End(canceled: true);
+        Check(Math.Abs(plot.MeasurePanes(plot.ActualHeight)[1] - preview[1]) < .001,
+            "cancelling a drag restores the last saved size");
+
+        void Begin() => grip.RaiseEvent(new DragStartedEventArgs(0, 0) { RoutedEvent = Thumb.DragStartedEvent });
+        void End(bool canceled) => grip.RaiseEvent(new DragCompletedEventArgs(0, 0, canceled) { RoutedEvent = Thumb.DragCompletedEvent });
+        void Drag(double delta)
+        {
+            var gesture = Field<object>(surface, "resize");
+            double start = (double)gesture.GetType().GetProperty("StartY")!.GetValue(gesture)!;
+            typeof(ChartSurface).GetMethod("PreviewResize", Private)!.Invoke(surface, [grip, start + delta]);
+        }
     }
 
     private static void CheckInterestPanels(Window window, CandlePlot plot, Candle[] bars)

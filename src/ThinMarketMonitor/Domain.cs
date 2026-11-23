@@ -167,6 +167,7 @@ internal sealed class Settings
     public ModifierKeys ChartMagnet { get; set; } = ModifierKeys.Shift;
     public Dictionary<string, ChartDrawing[]> ChartDrawings { get; set; } = new(StringComparer.Ordinal);
     public Dictionary<string, ChartIndicatorOptions> ChartIndicators { get; set; } = new(StringComparer.Ordinal);
+    public Dictionary<string, ChartPaneWeights> ChartPaneWeights { get; set; } = new(StringComparer.Ordinal);
     public Key Fullscreen { get; set; } = Key.F;
     public int Grid { get; set; } = 2;
     public CellChoice?[] Cells { get; set; } = new CellChoice?[9];
@@ -272,6 +273,8 @@ internal sealed class Settings
         settings.ChartIndicators = (settings.ChartIndicators ?? []).Where(pair => pair.Value != null && !string.IsNullOrWhiteSpace(pair.Key))
             .ToDictionary(pair => pair.Key, pair => pair.Value.Normalized() with { Volume = !defaultVolume || pair.Value.Volume },
                 StringComparer.Ordinal);
+        settings.ChartPaneWeights = (settings.ChartPaneWeights ?? []).Where(pair => pair.Value is { Valid: true } && !string.IsNullOrWhiteSpace(pair.Key))
+            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
         if (settings.Ruler == null || (settings.Ruler.Mouse is { } mouse ? !Enum.IsDefined(mouse)
                 : !ChartGesture.Bindable(settings.Ruler.Key) || settings.Ruler.Key == settings.Fullscreen))
             settings.Ruler = new(Key.None, MouseButton.Middle);

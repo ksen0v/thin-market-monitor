@@ -5,22 +5,30 @@ namespace ThinMarketMonitor;
 
 internal sealed partial class CandlePlot
 {
-    private const double InterestPaneMinimum = 46;
     private readonly Dictionary<(string Instrument, bool Usd), (double Low, double High)> interestRanges = [];
     private InterestWindow? lastInterestWindow;
+    private ChartPaneWeights? paneWeights;
     internal event Action<InterestWindow>? InterestRangeChanged;
 
     private readonly record struct InterestPane(InterestLayer Layer, Rect Header, Rect Graph);
     private sealed record InterestAxis(string Instrument, Venue Venue, string Unit, InterestScale Scale, bool Estimated);
 
-    private double InterestPaneHeight
+    internal void SetPaneWeights(ChartPaneWeights? weights)
     {
-        get
+        paneWeights = weights;
+        InvalidateVisual();
+    }
+
+    internal double[] MeasurePanes(double height) =>
+        ChartPaneLayout.Measure(height - Top - TimeAxisHeight, indicators?.Interest ?? [], paneWeights);
+
+    internal static IEnumerable<Rect> PaneDividers(double width, double[] sizes)
+    {
+        double y = Top + sizes[0];
+        for (int i = 1; i < sizes.Length; i++)
         {
-            int count = indicators?.Interest.Length ?? 0;
-            if (count == 0) return 0;
-            double target = ActualHeight * (count == 1 ? .30 : .52);
-            return Math.Max(0, Math.Min(Math.Min(ActualHeight - 55, count * 170), Math.Max(count * InterestPaneMinimum, target)));
+            yield return new(Left, y, Math.Max(0, width - Left), ChartPaneLayout.DividerHeight);
+            y += sizes[i] + ChartPaneLayout.DividerHeight;
         }
     }
 
@@ -40,14 +48,16 @@ internal sealed partial class CandlePlot
 
     private IEnumerable<InterestPane> InterestPanes(View view)
     {
-        if (indicators is not { Interest.Length: > 0 } data || InterestPaneHeight <= 0) yield break;
-        double height = InterestPaneHeight / data.Interest.Length;
-        if (height < 34) yield break;
-        for (int i = 0; i < data.Interest.Length; i++)
+        if (indicators is not { Interest.Length: > 0 } data || view.PaneHeights is not { } sizes) yield break;
+        int index = 0;
+        foreach (var divider in PaneDividers(ActualWidth, sizes))
         {
-            double top = view.Plot.Bottom + i * height;
-            yield return new(data.Interest[i], new(view.Plot.Left, top, ActualWidth - view.Plot.Left, 17),
-                new(view.Plot.Left, top + 17, view.Plot.Width, height - 18));
+            double headerHeight = ChartPaneLayout.HeaderHeight;
+            double graphHeight = sizes[index + 1] - headerHeight - 1;
+            if (graphHeight >= 14)
+                yield return new(data.Interest[index], new(view.Plot.Left, divider.Bottom, divider.Width, headerHeight),
+                    new(view.Plot.Left, divider.Bottom + headerHeight, view.Plot.Width, graphHeight));
+            index++;
         }
     }
 
@@ -164,9 +174,10 @@ internal sealed partial class CandlePlot
         string? symbol = pane.Layer.Market?.Symbol;
         string ending = (unit.Length == 0 ? "" : " · " + unit) + (pane.Layer.Reading?.LoadingHistory == true ? " · загрузка…" : "");
         var caption = Text($"OI · {source}" + (symbol == null ? "" : " " + symbol) + ending, color);
-        if (caption.Width > header.Width - 10) caption = Text($"OI · {source}{ending}", color);
-        dc.PushClip(new RectangleGeometry(header));
-        dc.DrawText(caption, new(header.Left + 4, header.Top + 2));
+        double available = Math.Max(0, header.Width - ChartSurface.ControlsWidth - 6);
+        if (caption.Width > available) caption = Text($"OI · {source}{ending}", color);
+        dc.PushClip(new RectangleGeometry(new Rect(header.Location, new Size(available, header.Height))));
+        dc.DrawText(caption, new(header.Left + 4, header.Top + 3));
         dc.Pop();
     }
 

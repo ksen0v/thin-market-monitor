@@ -39,6 +39,7 @@ internal static class Terminal
                 "filter" => "M3 4 H21 L14 12 V20 L10 18 V12 Z",
                 "info" => "M12 2 A10 10 0 1 0 12 22 A10 10 0 1 0 12 2 M12 11 V16 M12 8 H12.1",
                 "chevron" => "M7 10 L12 15 L17 10",
+                "chevron-up" => "M7 14 L12 9 L17 14",
                 "drawer-open" => "M3 4 H21 V20 H3 Z M15 4 V20 M17 8 H19 M17 12 H19 M17 16 H19",
                 "drawer-closed" => "M3 4 H21 V20 H3 Z M15 4 V20 M7 12 H12 M10 10 L12 12 L10 14",
                 "external" => "M14 3 H21 V10 M21 3 L11 13 M10 5 H4 V21 H20 V15",

@@ -16,6 +16,7 @@ internal sealed partial class ChartCell : Border
     private readonly ExchangeApi api;
     private readonly Func<long> nextOrder;
     private readonly CandlePlot plot;
+    private readonly ChartSurface chartSurface;
     private readonly ScrollViewer chartViewport;
     private readonly DockPanel layout = new();
     private readonly TextBlock label = new() { TextTrimming = TextTrimming.CharacterEllipsis, FontWeight = FontWeights.SemiBold };
@@ -50,16 +51,17 @@ internal sealed partial class ChartCell : Border
     public long Order => Choice?.Order ?? 0;
     public double PlotHeight { set => plot.Height = value; }
     public bool HasMarket => market != null;
-    public bool IsInteracting => plot.IsMouseCaptured;
+    public bool IsInteracting => plot.IsMouseCaptured || chartSurface.IsResizing;
     public CandlePlot Plot => plot;
 
-    public ChartCell(ExchangeApi api, int number, Action choose, Action save, Func<long> nextOrder, Func<ChartGesture> gesture,
+    public ChartCell(ExchangeApi api, int number, Action? choose, Action save, Func<long> nextOrder, Func<ChartGesture> gesture,
         Func<int[]> frameButtons, ChartFeatures? features = null)
     {
         this.api = api;
         this.nextOrder = nextOrder;
         this.frameButtons = frameButtons;
         plot = new CandlePlot(gesture) { Focusable = true };
+        chartSurface = new(plot, MoveInterestPane, CloseInterestPane, SavePaneWeights);
         KeyboardNavigation.SetIsTabStop(plot, false);
         plot.OlderRequested += () => olderRequested = true;
         Margin = new Thickness(0, 0, 1, 1);
@@ -72,21 +74,25 @@ internal sealed partial class ChartCell : Border
         var header = new DockPanel { Margin = new Thickness(7, 2, 7, 2), MinHeight = 24 };
         headerFrame.Child = header;
         var actions = new StackPanel { Orientation = Orientation.Horizontal };
-        var select = new Button
+        Button? select = null;
+        if (choose != null)
         {
-            Content = "Выбрать", Style = Terminal.Style("IconButton"), Padding = new Thickness(6, 1, 6, 1),
-            Background = Terminal.Brush("Control"), BorderBrush = Terminal.Brush("Outline"), FontSize = 11
-        };
-        AutomationProperties.SetName(select, $"Выбрать инструмент · ячейка {number}");
-        select.Click += (_, _) => choose();
+            select = new Button
+            {
+                Content = "Выбрать", Style = Terminal.Style("IconButton"), Padding = new Thickness(6, 1, 6, 1),
+                Background = Terminal.Brush("Control"), BorderBrush = Terminal.Brush("Outline"), FontSize = 11
+            };
+            AutomationProperties.SetName(select, $"Выбрать инструмент · ячейка {number}");
+            select.Click += (_, _) => choose();
+            actions.Children.Add(select);
+        }
         pin.Click += (_, _) => { SetPinned(Choice?.Pinned != true); save(); };
         clear.Click += (_, _) =>
         {
             Clear();
             save();
-            select.Focus();
+            if (select?.Focus() != true) plot.Focus();
         };
-        actions.Children.Add(select);
         colibri.Visibility = Visibility.Collapsed;
         colibri.Margin = new Thickness(2, 0, 0, 0);
         colibri.Click += (_, _) => { if (market != null) OpenInColibri?.Invoke(market); };
@@ -97,7 +103,7 @@ internal sealed partial class ChartCell : Border
         blacklist.Click += (_, _) => { if (market != null) BlacklistRequested?.Invoke(market); };
         actions.Children.Add(blacklist);
         pin.Margin = clear.Margin = new Thickness(2, 0, 0, 0);
-        actions.Children.Add(pin);
+        if (number > 0) actions.Children.Add(pin);
         actions.Children.Add(clear);
         DockPanel.SetDock(actions, Dock.Right);
         header.Children.Add(actions);
@@ -120,7 +126,7 @@ internal sealed partial class ChartCell : Border
         layout.Children.Add(indicatorHint);
         chartViewport = new ScrollViewer
         {
-            Content = plot, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            Content = chartSurface, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Focusable = false
         };
         chartBody.Children.Add(chartViewport);
@@ -134,6 +140,12 @@ internal sealed partial class ChartCell : Border
         if (active == visible) return;
         active = visible;
         ResetFeed();
+    }
+
+    internal void CancelGestures()
+    {
+        chartSurface.CancelResize();
+        plot.CancelGesture();
     }
 
     public void SetColibriEnabled(bool enabled)
@@ -475,7 +487,7 @@ internal sealed partial class ChartCell : Border
 
 internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
 {
-    private const double Left = 7, Top = 7;
+    private const double Left = 7, Top = 7, TimeAxisHeight = 17;
     internal const int DefaultVisibleBars = 220;
     internal const int MaxVisibleBars = 6000;
     private const double LatestFraction = .8;
@@ -504,7 +516,7 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
     private Point rulerEnd;
     private enum Operation { Pan, InterestPan, Time, Price, InterestPrice, Ruler }
     private sealed record Drag(Operation Mode, Point Start, View View, double Visible, MouseButton? Button, InterestAxis? Interest);
-    private readonly record struct View(Rect Plot, double Start, double End, double Low, double High)
+    private readonly record struct View(Rect Plot, double Start, double End, double Low, double High, double[]? PaneHeights = null)
     {
         public double Span => High - Low;
         public double Price(double y) => High - (y - Plot.Top) / Plot.Height * Span;
@@ -557,7 +569,8 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
     {
         if (ActualWidth < 100 || ActualHeight < 48 || candles.Length == 0) return null;
         double right = ActualWidth - (ActualWidth < 160 ? 46 : 70);
-        var rect = new Rect(Left, Top, right - Left, ActualHeight - Top - 17 - InterestPaneHeight);
+        var paneHeights = indicators is { Interest.Length: > 0 } ? MeasurePanes(ActualHeight) : null;
+        var rect = new Rect(Left, Top, right - Left, paneHeights?[0] ?? ActualHeight - Top - TimeAxisHeight);
         double end = manualEnd ?? LiveEnd(visible);
         double start = end - visible * BarTime;
         double low = double.MaxValue, high = 0;
@@ -574,7 +587,7 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
             high = nearest.High;
         }
         double margin = Math.Max((high - low) * 0.08, high * 0.00015);
-        return new(rect, start, end, fixedPrice?.Low ?? low - margin, fixedPrice?.High ?? high + margin);
+        return new(rect, start, end, fixedPrice?.Low ?? low - margin, fixedPrice?.High ?? high + margin, paneHeights);
     }
 
     protected override void OnRender(DrawingContext dc)

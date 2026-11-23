@@ -44,6 +44,16 @@ internal sealed partial class ChartCell
         plot.DrawingsChanged += values => { if (market != null) shared.SetDrawings(market.Key, values); };
         shared.DrawingsChanged += key => { if (market?.Key == key) plot.SetDrawings(shared.Drawings(key)); };
         shared.IndicatorsChanged += key => { if (market?.Key == key) ResetChartTools(); };
+        shared.InterestOrderChanged += key =>
+        {
+            if (market is not { } instrument || instrument.Key != key) return;
+            indicatorOptions = shared.Options(key);
+            PublishIndicators(instrument);
+        };
+        shared.PaneWeightsChanged += key =>
+        {
+            if (market?.Key == key) chartSurface.RestoreWeights(shared.PaneWeights(key));
+        };
         plot.IndicatorSummary += (shortText, detailText) =>
         {
             indicatorHint.Text = shortText;
@@ -224,6 +234,29 @@ internal sealed partial class ChartCell
         AutomationProperties.SetItemStatus(indicatorTools, indicatorOptions.Empty ? "" : "Индикаторы включены");
     }
 
+    private void SavePaneWeights(ChartPaneWeights? weights)
+    {
+        if (market is { } instrument) features?.SetPaneWeights(instrument.Key, weights);
+    }
+
+    private void CloseInterestPane(Venue venue)
+    {
+        if (market is not { } instrument || features == null || indicatorOptions.Interest is not { } selected) return;
+        var sources = new Dictionary<Venue, string>(selected);
+        if (sources.Remove(venue)) features.SetOptions(instrument.Key, indicatorOptions with { Interest = sources });
+    }
+
+    private void MoveInterestPane(Venue venue, int direction)
+    {
+        if (market is not { } instrument || features == null || indicatorOptions.Interest is not { } sources) return;
+        var topToBottom = sources.Keys.Reverse().ToArray();
+        int before = Array.IndexOf(topToBottom, venue), after = before + direction;
+        if (before < 0 || after < 0 || after >= topToBottom.Length) return;
+        (topToBottom[before], topToBottom[after]) = (topToBottom[after], topToBottom[before]);
+        var order = topToBottom.Reverse().ToDictionary(source => source, source => sources[source]);
+        features.SetOptions(instrument.Key, indicatorOptions with { Interest = order }, orderOnly: true);
+    }
+
     private void ResetChartTools()
     {
         if (features == null) return;
@@ -231,6 +264,8 @@ internal sealed partial class ChartCell
         indicatorRun = null;
         if (market?.Key != indicatorMarket || frame != indicatorFrame)
         {
+            if (market?.Key != indicatorMarket)
+                chartSurface.RestoreWeights(market == null ? null : features.PaneWeights(market.Key));
             interestWindow = null;
             interestViewportTimer.Stop();
             indicatorMarket = market?.Key;

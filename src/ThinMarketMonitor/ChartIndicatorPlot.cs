@@ -25,6 +25,7 @@ internal sealed partial class CandlePlot
     private IndicatorDisplay? indicators;
     private (string Caption, string Detail) lastSummary;
     internal event Action<string, string>? IndicatorSummary;
+    internal event Action<string?, InterestLayer[]>? InterestPanesChanged;
 
     internal void UpdateIndicators(IndicatorDisplay? value)
     {
@@ -34,12 +35,13 @@ internal sealed partial class CandlePlot
             CancelGesture();
         indicators = value;
         int count = value?.Interest.Length ?? 0;
-        MinHeight = count > 0 ? 62 + count * InterestPaneMinimum : 0;
+        MinHeight = count > 0 ? Top + TimeAxisHeight + ChartPaneLayout.MinimumHeight(count) : 0;
         if (value == null)
         {
             lastSummary = default;
             lastInterestWindow = null;
         }
+        InterestPanesChanged?.Invoke(value?.Market.Key, value?.Interest ?? []);
         InvalidateVisual();
     }
 
@@ -143,7 +145,7 @@ internal sealed partial class CandlePlot
         if (data.Options.HasInterest)
         {
             shortParts.Add("OI · " + string.Join(", ", data.Interest.Select(layer => layer.Venue.Label())));
-            details.Add("Открытый интерес · потяните шкалу справа для растяжения. Двойной щелчок вернёт автоматический масштаб.");
+            details.Add("Открытый интерес · потяните границу панели для изменения высоты. Шкала справа управляет масштабом значений.");
             if (data.Options.InterestUsd)
                 details.Add("USD · значения бирж и расчёт по цене того же контракта (≈). USDT и USDC оценены по номиналу.");
             foreach (var layer in data.Interest)

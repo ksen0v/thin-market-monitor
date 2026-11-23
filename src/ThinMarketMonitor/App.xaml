@@ -107,6 +107,29 @@
             <Setter Property="MinWidth" Value="23"/>
             <Setter Property="Padding" Value="4,1"/>
         </Style>
+        <Style x:Key="ChartPaneDivider" TargetType="Thumb">
+            <Setter Property="FocusVisualStyle" Value="{StaticResource TerminalFocus}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Thumb">
+                        <Grid Background="Transparent">
+                            <Border x:Name="Rule" Height="1" Background="{StaticResource GridLine}"/>
+                            <Border x:Name="Grip" Height="2" Width="20" CornerRadius="1" Background="{StaticResource Muted}"/>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Grip" Property="Background" Value="{StaticResource Accent}"/>
+                                <Setter TargetName="Rule" Property="Background" Value="{StaticResource Outline}"/>
+                            </Trigger>
+                            <Trigger Property="IsDragging" Value="True">
+                                <Setter TargetName="Grip" Property="Background" Value="{StaticResource Accent}"/>
+                                <Setter TargetName="Rule" Property="Background" Value="{StaticResource Accent}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
         <Style x:Key="WorkspaceNavigationButton" TargetType="Button" BasedOn="{StaticResource TerminalButton}">
             <Setter Property="Width" Value="46"/>
             <Setter Property="Height" Value="32"/>

@@ -18,8 +18,11 @@ internal sealed class ChartFeatures(Settings settings, ExchangeApi api, Func<Mar
     public System.Windows.Input.ModifierKeys Magnet => settings.ChartMagnet;
     public event Action<string>? DrawingsChanged;
     public event Action<string>? IndicatorsChanged;
+    public event Action<string>? InterestOrderChanged;
+    public event Action<string>? PaneWeightsChanged;
     public ChartDrawing[] Drawings(string key) => settings.ChartDrawings.GetValueOrDefault(key) ?? [];
     public ChartIndicatorOptions Options(string key) => settings.ChartIndicators.GetValueOrDefault(key) ?? ChartIndicatorOptions.Default;
+    public ChartPaneWeights? PaneWeights(string key) => settings.ChartPaneWeights.GetValueOrDefault(key);
 
     public void SetDrawings(string key, ChartDrawing[] drawings)
     {
@@ -29,12 +32,23 @@ internal sealed class ChartFeatures(Settings settings, ExchangeApi api, Func<Mar
         DrawingsChanged?.Invoke(key);
     }
 
-    public void SetOptions(string key, ChartIndicatorOptions options)
+    public void SetOptions(string key, ChartIndicatorOptions options, bool orderOnly = false)
     {
         if (options.Volume && !options.HasDetails && !options.InterestUsd) settings.ChartIndicators.Remove(key);
         else settings.ChartIndicators[key] = options;
         save();
-        IndicatorsChanged?.Invoke(key);
+        (orderOnly ? InterestOrderChanged : IndicatorsChanged)?.Invoke(key);
+    }
+
+    public void SetPaneWeights(string key, ChartPaneWeights? weights)
+    {
+        if (weights == null)
+        {
+            if (!settings.ChartPaneWeights.Remove(key)) return;
+        }
+        else settings.ChartPaneWeights[key] = weights;
+        save();
+        PaneWeightsChanged?.Invoke(key);
     }
 
     public async Task<Catalog> Futures(Venue venue, CancellationToken ct)
