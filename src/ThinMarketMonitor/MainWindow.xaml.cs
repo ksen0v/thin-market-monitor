@@ -78,6 +78,16 @@ public partial class MainWindow : Window, IDisposable
         System.Windows.Documents.TextElement.SetForeground(mark, Terminal.Brush("Accent"));
         BrandMark.Child = mark;
         SignalListingsButton.Content = Terminal.LabelWithIcon("listings", "Листинги", 5);
+        foreach (var (button, icon, accessKey) in new[]
+        {
+            (SignalsButton, "activity", "С"), (OverviewButton, "overview-nav", "О"), (SettingsButton, "gear", "Н")
+        })
+        {
+            var glyph = Terminal.Icon(icon);
+            glyph.Width = glyph.Height = 20;
+            button.Content = glyph;
+            AccessKeyManager.Register(accessKey, button);
+        }
         for (int i = 0; i < cells.Length; i++)
         {
             int slot = i;
@@ -223,6 +233,7 @@ public partial class MainWindow : Window, IDisposable
         Workspace.Visibility = Visibility.Collapsed;
         BottomNavigation.Visibility = Visibility.Collapsed;
         FullChart.Content = cell;
+        cell.SetFullscreenDrawingToolbar(true);
         FullChart.Visibility = Visibility.Visible;
         if (changeWindow)
         {
@@ -237,6 +248,7 @@ public partial class MainWindow : Window, IDisposable
         if (fullscreenCell == null) return;
         CancelChartGestures();
         var previous = fullscreenCell;
+        previous.SetFullscreenDrawingToolbar(false);
         previous.Margin = new Thickness(0, 0, 1, 1);
         fullscreenCell = null;
         FullChart.Content = null;
@@ -296,7 +308,7 @@ public partial class MainWindow : Window, IDisposable
     {
         if (Charts != null && ChartScroll != null)
         {
-            int minimum = cells.Take(settings.Grid * settings.Grid).Any(cell => cell?.HasIndicatorLayout == true) ? 165 : 116;
+            int minimum = cells.Take(settings.Grid * settings.Grid).Max(cell => cell?.MinimumGridHeight ?? 116);
             Charts.Height = Math.Max(settings.Grid * minimum, ChartScroll.ActualHeight - ChartScroll.Padding.Top);
         }
     }
@@ -309,6 +321,8 @@ public partial class MainWindow : Window, IDisposable
         if (settings.Overview == overview) return;
         colibri.CancelPending();
         settings.Overview = overview;
+        if (overview) overviewChart.ResetDrawingToolbar();
+        else foreach (var cell in cells) cell.ResetDrawingToolbar();
         activeCell = settings.Overview ? overviewChart : null;
         RefreshOverview();
         Save();
@@ -764,9 +778,9 @@ public partial class MainWindow : Window, IDisposable
         foreach (var button in new[] { SignalsButton, OverviewButton, SettingsButton })
         {
             bool active = ReferenceEquals(button, selected);
-            button.Background = Terminal.Brush(active ? "AccentSurface" : "Surface");
+            button.Background = active ? Terminal.Brush("AccentSurface") : System.Windows.Media.Brushes.Transparent;
             button.Foreground = Terminal.Brush(active ? "Accent" : "Text");
-            button.BorderBrush = Terminal.Brush(active ? "Accent" : "Outline");
+            button.BorderBrush = active ? Terminal.Brush("Accent") : System.Windows.Media.Brushes.Transparent;
             System.Windows.Automation.AutomationProperties.SetItemStatus(button, active ? "Активный раздел" : "");
         }
     }
@@ -803,6 +817,9 @@ public partial class MainWindow : Window, IDisposable
     {
         if (stop.IsCancellationRequested) return;
         stop.Cancel();
+        AccessKeyManager.Unregister("С", SignalsButton);
+        AccessKeyManager.Unregister("О", OverviewButton);
+        AccessKeyManager.Unregister("Н", SettingsButton);
         if (watchingNetwork) NetworkChange.NetworkAddressChanged -= NetworkAddressChanged;
         colibri.Dispose();
         notifications.Dispose();

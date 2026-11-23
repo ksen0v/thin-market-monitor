@@ -94,7 +94,26 @@ internal static class ChartFeatureChecks
             """));
         Check(gateFills is [{ Time: Now, Size: 1, Price: 9, Side: LiquidationSide.Long }],
             "public Gate data contributes executed order events, not position or unfilled order volume");
-        Console.WriteLine("Chart drawing geometry, profile arithmetic, live volume joins, unit mapping and OI/liquidation sources passed.");
+        var millions = InterestScale.Create([new(1, 2_150_000), new(2, 2_870_000)], 4)!.Value;
+        Check(millions.Ticks().Select(millions.Label).SequenceEqual(["2M", "2,2M", "2,4M", "2,6M", "2,8M", "3M"]) &&
+            millions.Delta(121_000).StartsWith("+121K") &&
+            InterestScale.Create([new(1, double.NaN)], 3) == null &&
+            InterestScale.Create([new(1, 0)], 3) is { Low: 0, High: > 0 },
+            "OI axes have rounded numeric ticks and distinguish a valid zero from missing data");
+        var close = InterestScale.Create([new(1, 2_000_000.01), new(2, 2_000_000.09)], 4)!.Value;
+        string[] closeLabels = close.Ticks().Select(close.Label).ToArray();
+        Check(closeLabels.Distinct().Count() == closeLabels.Length && close.Delta(-0.08).StartsWith("-0,08"),
+            "a narrow range keeps its axis labels distinct and ruler changes measurable");
+
+        var prior = new Settings
+        {
+            SchemaVersion = 1, Thresholds = [],
+            ChartIndicators = new() { [Bitcoin.Key] = new(Volume: false, Interest: new() { [Venue.Binance] = "" }) }
+        };
+        var migrated = Settings.Deserialize(JsonSerializer.Serialize(prior));
+        Check(migrated.ChartIndicators[Bitcoin.Key] is { Volume: true, HasInterest: true } && migrated.Thresholds.Length == 0,
+            "opening pre-volume-default settings enables candle volume once while preserving other saved choices");
+        Console.WriteLine("Chart drawing geometry, profile arithmetic, live volume joins, OI scale and volume default passed.");
     }
 
     public static async Task Ui()
@@ -111,8 +130,18 @@ internal static class ChartFeatureChecks
         window.Show();
         await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
         window.UpdateLayout();
+        var navigation = (FrameworkElement)window.FindName("WorkspaceNavigation");
+        var bottom = (FrameworkElement)window.FindName("BottomNavigation");
         try
         {
+            AssertCenteredNavigation();
+            Check(new[] { signals, overview, preferences }.All(b => b.Content is Viewbox && b.IsTabStop &&
+                !string.IsNullOrEmpty(AutomationProperties.GetName(b))) && AutomationProperties.GetItemStatus(signals) == "Активный раздел",
+                "center navigation has accessible icon-only buttons and an active state");
+            window.Width -= 100;
+            window.UpdateLayout();
+            AssertCenteredNavigation();
+
             var time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var bars = new[] { new Candle(time - 60_000, 10, 12, 9, 11, 50), new Candle(time, 11, 13, 10, 12, 75) };
             var plot = cell.Plot;
@@ -122,13 +151,27 @@ internal static class ChartFeatureChecks
             var bounds = (Rect)view.GetType().GetProperty("Plot")!.GetValue(view)!;
             Check((double)view.GetType().GetMethod("Price")!.Invoke(view, [bounds.Bottom])! == -20,
                 "WPF price view can pan below zero while candles keep their true prices");
+            var header = Field<TextBlock>(cell, "label");
+            string headerText = string.Concat(header.Inlines.OfType<System.Windows.Documents.Run>().Select(run => run.Text));
+            Check(headerText == "BTC/USDT Binance" && header.ToolTip is string tooltip && tooltip.Contains("BTCUSDT"),
+                $"the chart header shows the ticker once and retains the native identifier in its tooltip ({headerText} / {header.ToolTip})");
+            typeof(ChartCell).GetMethod("SetChartDetail", Private)!.Invoke(cell, ["", null]);
+            Check(Field<TextBlock>(cell, "detail").Visibility == Visibility.Collapsed,
+                "healthy charts hide the gesture help strip");
             var button = Field<Button>(cell, "drawingTools");
+            var rail = Field<Border>(cell, "drawingToolbar");
+            Check(rail.Visibility == Visibility.Collapsed, "drawing tools start collapsed in the signal grid");
             Click(button);
-            var horizontal = button.ContextMenu.Items.OfType<MenuItem>().First();
-            ClickMenu(horizontal);
-            button.ContextMenu.IsOpen = false;
+            window.UpdateLayout();
+            var tools = Field<Dictionary<DrawingKind, Button>>(cell, "drawingActions");
+            Check(rail.IsVisible && tools.Count == 3 && tools.Values.All(b => b.Content is Viewbox) &&
+                rail.TranslatePoint(new Point(rail.ActualWidth, 0), cell).X <= plot.TranslatePoint(new Point(), cell).X,
+                "drawing tools open as three icon actions to the left of the plot");
+            Click(tools[DrawingKind.HorizontalRay]);
+            view = typeof(CandlePlot).GetMethod("CurrentView", Private)!.Invoke(plot, null)!;
+            bounds = (Rect)view.GetType().GetProperty("Plot")!.GetValue(view)!;
             typeof(CandlePlot).GetMethod("DrawingClick", Private)!.Invoke(plot, [new Point(bounds.Left + 10, bounds.Bottom - 3), view]);
-            Check(settings.ChartDrawings[Bitcoin.Key] is [{ Start.Price: < 0 }], "a real drawing menu stores time/price anchors for this market");
+            Check(settings.ChartDrawings[Bitcoin.Key] is [{ Start.Price: < 0 }], "the drawing action stores time/price anchors for this market");
             var original = settings.ChartDrawings[Bitcoin.Key][0];
             cell.SetFrame(300);
             Check(Field<ChartDrawing[]>(plot, "drawings").Single() == original &&
@@ -136,14 +179,28 @@ internal static class ChartFeatureChecks
                 "drawing anchors survive timeframe and settings reload");
             var featureMenu = Field<Button>(cell, "indicatorTools");
             Click(featureMenu);
+            var volumeToggle = featureMenu.ContextMenu.Items.OfType<MenuItem>().First();
+            Check(volumeToggle.IsChecked && Field<TextBlock>(cell, "indicatorHint").Visibility == Visibility.Collapsed,
+                "volume is enabled on a new chart without an extra status row");
+            ClickMenu(volumeToggle);
+            featureMenu.ContextMenu.IsOpen = false;
+            Check(!Settings.Deserialize(JsonSerializer.Serialize(settings)).ChartIndicators[Bitcoin.Key].Volume,
+                "a user's volume opt-out persists across launches even with no other indicators selected");
+            Click(featureMenu);
             ClickMenu(featureMenu.ContextMenu.Items.OfType<MenuItem>().First());
             featureMenu.ContextMenu.IsOpen = false;
+
             Click(featureMenu);
             ClickMenu(featureMenu.ContextMenu.Items.OfType<MenuItem>().First(item => Equals(item.Header, "Binance")));
             featureMenu.ContextMenu.IsOpen = false;
             await requests.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
             Check(settings.ChartIndicators[Bitcoin.Key].Volume && settings.ChartIndicators[Bitcoin.Key].HasInterest &&
-                cell.HasIndicatorLayout && plot.ActualHeight >= 48, "chart tools work in a 3×3 layout and start requests on demand");
+                Field<TextBlock>(cell, "indicatorHint").IsVisible && plot.ActualHeight >= 48,
+                "chart tools work in a 3×3 layout and start requests on demand");
+            Click(button);
+            plot.Set(bars);
+            window.UpdateLayout();
+            CheckInterestPanel(plot, bars);
 
             Click(preferences);
             Check(AutomationProperties.GetItemStatus(preferences) == "Активный раздел" &&
@@ -152,23 +209,56 @@ internal static class ChartFeatureChecks
             await requests.Canceled.Task.WaitAsync(TimeSpan.FromSeconds(5));
             await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
             Check(settings.Overview && !settings.OverviewDrawer && !cell.IsVisible &&
-                AutomationProperties.GetItemStatus(overview) == "Активный раздел", "changing workspace cancels unused indicator requests and keeps the drawer state");
+                AutomationProperties.GetItemStatus(overview) == "Активный раздел" &&
+                Field<Border>(Field<ChartCell>(window, "overviewChart"), "drawingToolbar").IsVisible,
+                "Overview expands the drawing tools, cancels unused indicator requests and keeps the drawer state");
             Click(signals);
             Check(!settings.Overview && cell.Choice is { Key: var key, Pinned: true } && key == Bitcoin.Key,
                 "switching back restores the signal grid and selection");
 
             typeof(MainWindow).GetMethod("EnterFullscreen", Private)!.Invoke(window, [cell, false]);
             window.UpdateLayout();
-            Check(button.IsVisible && featureMenu.IsVisible &&
-                ((FrameworkElement)window.FindName("BottomNavigation")).Visibility == Visibility.Collapsed, "both tools remain available in fullscreen");
+            Check(button.IsVisible && rail.IsVisible && featureMenu.IsVisible && bottom.Visibility == Visibility.Collapsed,
+                "fullscreen expands the drawing tools and keeps indicators available");
             typeof(MainWindow).GetMethod("ExitFullscreen", Private)!.Invoke(window, null);
+            Check(rail.Visibility == Visibility.Collapsed, "leaving fullscreen restores the compact signal toolbar");
             cell.Assign(Bitcoin with { Symbol = "ETHUSDT", Base = "ETH", Contract = Bitcoin.Contract! with { Streaming = false } }, true);
-            Check(Field<ChartDrawing[]>(plot, "drawings").Length == 0 && !cell.HasIndicatorLayout, "a different market shows its own annotations and indicator setup");
+            Check(Field<ChartDrawing[]>(plot, "drawings").Length == 0 && !plot.InterestScaleVenue.HasValue,
+                "a different market shows its own annotations and indicator setup");
         }
         finally { window.Close(); }
 
+        void AssertCenteredNavigation()
+        {
+            double center = navigation.TranslatePoint(new Point(navigation.ActualWidth / 2, 0), bottom).X;
+            Check(Math.Abs(center - bottom.ActualWidth / 2) <= 1, "workspace buttons are centered at different window sizes");
+        }
         static void Click(Button button) => button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         static void ClickMenu(MenuItem item) => item.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+    }
+
+    private static void CheckInterestPanel(CandlePlot plot, Candle[] bars)
+    {
+        InterestLayer binance = new(Venue.Binance, Bitcoin, new("BTC", 300, [new(bars[0].Time, 120_000), new(bars[1].Time, 141_000)]));
+        InterestLayer lighter = new(Venue.Lighter, null, new("USD", 0, [new(bars[0].Time, 2_100_000), new(bars[1].Time, 2_600_000)]));
+        var options = ChartIndicatorOptions.Default with { Interest = new() { [Venue.Binance] = "", [Venue.Lighter] = "" } };
+        var display = new IndicatorDisplay(Bitcoin, options, null, null, "", "", [binance, lighter]);
+        plot.UpdateIndicators(display);
+        Check(plot.InterestScaleVenue == Venue.Binance && plot.SelectInterestScale(Venue.Lighter), "open interest scale can switch sources");
+        var view = typeof(CandlePlot).GetMethod("CurrentView", Private)!.Invoke(plot, null)!;
+        var graph = (Rect)typeof(CandlePlot).GetMethod("InterestGraph", Private)!.Invoke(plot, [view])!;
+        var at = new Point(graph.Left + graph.Width / 2, graph.Top + graph.Height / 2);
+        var ruler = typeof(CandlePlot).GetMethod("RulerViewport", Private)!;
+        var target = ruler.Invoke(plot, [at, view]);
+        Check(target != null, $"ruler can measure the OI pane (plot height {plot.ActualHeight}, OI height {graph.Height})");
+        var axis = Field<object>(target!, "Item2", BindingFlags.Public | BindingFlags.Instance);
+        var scale = (InterestScale)axis.GetType().GetProperty("Scale")!.GetValue(axis)!;
+        var measureView = Field<object>(target!, "Item1", BindingFlags.Public | BindingFlags.Instance);
+        Check((string)axis.GetType().GetProperty("Unit")!.GetValue(axis)! == "USD" && scale.Low == 2_000_000 &&
+            (double)measureView.GetType().GetMethod("Price")!.Invoke(measureView, [graph.Bottom])! == scale.Low,
+            "the OI ruler uses the selected USD scale at the correct screen coordinates");
+        plot.UpdateIndicators(display with { Interest = [binance, lighter with { Reading = null }] });
+        Check(ruler.Invoke(plot, [at, view]) == null, "an empty OI series never starts a ruler with invented values");
     }
 
     public static async Task<int> Live()
@@ -263,7 +353,8 @@ internal static class ChartFeatureChecks
         }
     }
 
-    private static T Field<T>(object owner, string name) => (T)owner.GetType().GetField(name, Private)!.GetValue(owner)!;
+    private static T Field<T>(object owner, string name, BindingFlags flags = Private) =>
+        (T)owner.GetType().GetField(name, flags)!.GetValue(owner)!;
     private static JsonElement Json(string json) { using var doc = JsonDocument.Parse(json); return doc.RootElement.Clone(); }
     private static void Check(bool value, string description) { if (!value) throw new InvalidOperationException(description); }
 }

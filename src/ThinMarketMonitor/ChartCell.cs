@@ -107,8 +107,9 @@ internal sealed partial class ChartCell : Border
         header.Children.Add(label);
         DockPanel.SetDock(headerFrame, Dock.Top);
         var commandBar = new DockPanel();
+        var chartBody = new DockPanel();
         DockPanel.SetDock(commandBar, Dock.Top);
-        ConfigureChartTools(commandBar, features);
+        ConfigureChartTools(commandBar, chartBody, features, number == 0);
         commandBar.Children.Add(frameBar);
         DockPanel.SetDock(detail, Dock.Bottom);
         layout.Children.Add(headerFrame);
@@ -116,7 +117,8 @@ internal sealed partial class ChartCell : Border
         layout.Children.Add(detail);
         DockPanel.SetDock(indicatorHint, Dock.Bottom);
         layout.Children.Add(indicatorHint);
-        layout.Children.Add(plot);
+        chartBody.Children.Add(plot);
+        layout.Children.Add(chartBody);
         UpdateHeader();
         UpdateFrames();
     }
@@ -210,8 +212,7 @@ internal sealed partial class ChartCell : Border
         else
         {
             label.Inlines.Add($"{market.Base}/{market.Quote}");
-            label.Inlines.Add(new System.Windows.Documents.Run(" " + market.Venue.Label() +
-                (market.Venue == Venue.Alpha || market.Contract != null ? $" · {market.Ticker}" : ""))
+            label.Inlines.Add(new System.Windows.Documents.Run(" " + market.Venue.Label())
             {
                 Foreground = Terminal.Brush("Muted"), FontWeight = FontWeights.Normal, FontSize = 11
             });
@@ -226,14 +227,20 @@ internal sealed partial class ChartCell : Border
                 { Foreground = Terminal.Brush("Rising"), FontWeight = FontWeights.SemiBold });
         UpdatePin();
         colibri.IsEnabled = market != null;
-        detail.Text = market == null && Choice != null ? "Инструмент вне доступного списка" : "";
+        SetChartDetail(market == null && Choice != null ? "Инструмент вне доступного списка" : "");
         blacklist.IsEnabled = market != null;
         string blockLabel = market == null ? "В чёрный список сигналов" : $"В чёрный список сигналов · {market.Base}";
         blacklist.ToolTip = blockLabel;
         AutomationProperties.SetName(blacklist, blockLabel);
-        detail.ToolTip = null;
         UpdateChartToolState();
         AutomationProperties.SetName(plot, market == null ? "" : $"Свечи {Frames.Label(frame)} · {market.Label}");
+    }
+
+    private void SetChartDetail(string text, string? hint = null)
+    {
+        detail.Text = text;
+        detail.ToolTip = hint;
+        detail.Visibility = text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void ResetFeed()
@@ -321,7 +328,7 @@ internal sealed partial class ChartCell : Border
             }
             Draw();
         };
-        detail.Text = "Загрузка свечей…";
+        SetChartDetail("Загрузка свечей…");
         try
         {
             if (instrument.Streaming)
@@ -370,17 +377,14 @@ internal sealed partial class ChartCell : Border
                         if (initial && found && tf < 60) olderRequested |= plot.MissingHistoryBars(nextPage) > 0;
                     }
                     if (native && candles.Count >= LiveCandles.MaxBars) { finished = true; coverage = "Достигнут локальный предел 12 000 свечей"; }
-                    detail.Text = $"{Frames.Label(tf)} · " + (coverage.Length > 0 ? coverage :
-                        candles.Count == 0 ? "Биржа не вернула свечи" : "Колесо — масштаб · ЛКМ — сдвиг · шкалы — растяжение");
-                    detail.ToolTip = null;
+                    SetChartDetail(coverage.Length > 0 ? coverage : candles.Count == 0 ? "Биржа не вернула свечи" : "");
                 }
                 catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
                     if (loadingOlder) olderRequested = true;
-                    detail.Text = loadingOlder ? "История слева не загрузилась · повтор через 12 с" :
+                    SetChartDetail(loadingOlder ? "История слева не загрузилась · повтор через 12 с" :
                         !historyLoaded ? "История не загрузилась полностью · повтор через 12 с" :
-                        "Свечи не обновились · повтор через 12 с";
-                    detail.ToolTip = ExchangeApi.ConnectionProblem(ex) ?? ex.Message;
+                        "Свечи не обновились · повтор через 12 с", ExchangeApi.ConnectionProblem(ex) ?? ex.Message);
                     await Task.Delay(12000, ct);
                 }
                 await Task.Delay(native ? 300 : 450, ct);
@@ -493,7 +497,7 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
     private Drag? drag;
     private Point rulerEnd;
     private enum Operation { Pan, Time, Price, Ruler }
-    private sealed record Drag(Operation Mode, Point Start, View View, double Visible, MouseButton? Button);
+    private sealed record Drag(Operation Mode, Point Start, View View, double Visible, MouseButton? Button, InterestAxis? Interest);
     private readonly record struct View(Rect Plot, double Start, double End, double Low, double High)
     {
         public double Span => High - Low;
@@ -568,7 +572,7 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
     protected override void OnRender(DrawingContext dc)
     {
         dc.DrawRectangle(background, null, new Rect(0, 0, ActualWidth, ActualHeight));
-        if (CurrentView() is not { } view) { SummarizeIndicators(null); return; }
+        if (CurrentView() is not { } view) { interestLegend.Clear(); SummarizeIndicators(null); return; }
         var plot = view.Plot;
         double step = plot.Width * BarTime / (view.End - view.Start);
         double body = Math.Max(.12, step * .67);
@@ -615,8 +619,10 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
         }
         var (volume, liquidations) = DrawProfiles(dc, view);
         DrawAnnotations(dc, view);
+        if (volumeBars.Known > 0 && indicators is { } data && plot.Width > 95 && plot.Height > 31)
+            DrawText(dc, $"V · {ChartVolume.Unit(data.Market)}", plot.Left + 4, plot.Bottom - 14);
         dc.Pop();
-        DrawInterest(dc, view);
+        DrawInterest(dc, view, columns);
         SummarizeIndicators(view, volumeBars, volume, liquidations);
         if (priceLabel != null)
         {
@@ -640,16 +646,21 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
         var b = view.Bound(rulerEnd);
         double first = view.Price(a.Y), last = view.Price(b.Y);
         double change = PriceChange(first, last);
-        dc.DrawLine(rulerLine, a, new Point(b.X, a.Y));
-        dc.DrawLine(rulerLine, new Point(b.X, a.Y), b);
-        dc.DrawEllipse(accent, null, a, 3, 3);
-        dc.DrawEllipse(accent, null, b, 3, 3);
+        var interest = measure.Interest;
+        Brush color = interest == null ? accent : InterestBrush(interest.Venue);
+        Pen line = interest == null ? rulerLine : new(color, 1);
+        dc.DrawLine(line, a, new Point(b.X, a.Y));
+        dc.DrawLine(line, new Point(b.X, a.Y), b);
+        dc.DrawEllipse(color, null, a, 3, 3);
+        dc.DrawEllipse(color, null, b, 3, 3);
         string percent = double.IsFinite(change) ? change.ToString("+0.00;-0.00;0.00", Russian) + "%" : "—";
-        string text = $"{FormatPrice(first, view.Span / 100)} → {FormatPrice(last, view.Span / 100)}   {percent}";
-        var formatted = Text(text, accent);
+        string text = interest == null
+            ? $"{FormatPrice(first, view.Span / 100)} → {FormatPrice(last, view.Span / 100)}   {percent}"
+            : $"{interest.Scale.Delta(last - first)} {interest.Unit}   {percent}";
+        var formatted = Text(text, color);
         double x = Math.Clamp(b.X + 7, view.Plot.Left, Math.Max(view.Plot.Left, ActualWidth - formatted.Width - 14));
         double y = Math.Clamp(b.Y - formatted.Height - 9, view.Plot.Top, Math.Max(view.Plot.Top, view.Plot.Bottom - formatted.Height - 6));
-        dc.DrawRectangle(background, rulerLine, new Rect(x, y, formatted.Width + 10, formatted.Height + 6));
+        dc.DrawRectangle(background, line, new Rect(x, y, formatted.Width + 10, formatted.Height + 6));
         dc.DrawText(formatted, new Point(x + 5, y + 3));
     }
 
@@ -678,9 +689,13 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
             e.Handled = true;
             return;
         }
-        if (inPlot && gesture().Mouse == e.ChangedButton)
+        if (e.ChangedButton == MouseButton.Left && ClickInterestLegend(at))
         {
-            Start(Operation.Ruler, at, view, e.ChangedButton);
+            e.Handled = true;
+            return;
+        }
+        if (gesture().Mouse == e.ChangedButton && BeginRulerAt(at, view, e.ChangedButton))
+        {
             e.Handled = true;
             return;
         }
@@ -695,10 +710,18 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
     public bool BeginKeyboardRuler()
     {
         if (drag != null || !IsMouseOver || CurrentView() is not { } view) return false;
-        var at = Mouse.GetPosition(this);
-        if (!view.Plot.Contains(at)) return false;
-        Start(Operation.Ruler, at, view, null);
-        return true;
+        return BeginRulerAt(Mouse.GetPosition(this), view, null);
+    }
+
+    private bool BeginRulerAt(Point at, View view, MouseButton? button) =>
+        RulerViewport(at, view) is { } target && Start(Operation.Ruler, at, target.View, button, target.Interest);
+
+    private (View View, InterestAxis? Interest)? RulerViewport(Point at, View view)
+    {
+        if (view.Plot.Contains(at)) return (view, null);
+        var graph = InterestGraph(view);
+        if (!graph.Contains(at) || GetInterestAxis(view, graph) is not { } interest) return null;
+        return (new(graph, view.Start, view.End, interest.Scale.Low, interest.Scale.High), interest);
     }
 
     public void EndKeyboardRuler()
@@ -709,12 +732,13 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
     internal static double PriceChange(double start, double end) =>
         start > 0 && double.IsFinite(start) && double.IsFinite(end) ? (end / start - 1) * 100 : double.NaN;
 
-    private void Start(Operation mode, Point at, View view, MouseButton? button)
+    private bool Start(Operation mode, Point at, View view, MouseButton? button, InterestAxis? interest = null)
     {
-        if (!CaptureMouse()) return;
-        drag = new(mode, at, view, visible, button);
+        if (!CaptureMouse()) return false;
+        drag = new(mode, at, view, visible, button, interest);
         rulerEnd = at;
         InvalidateVisual();
+        return true;
     }
 
     protected override void OnMouseMove(MouseEventArgs e)

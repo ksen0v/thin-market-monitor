@@ -1,11 +1,13 @@
 namespace ThinMarketMonitor;
 
-internal sealed record ChartIndicatorOptions(bool Volume = false, bool Profile = false, bool Liquidations = false,
+internal sealed record ChartIndicatorOptions(bool Volume = true, bool Profile = false, bool Liquidations = false,
     Dictionary<Venue, string>? Interest = null)
 {
-    public static ChartIndicatorOptions Off { get; } = new();
+    public static ChartIndicatorOptions Default { get; } = new();
+    public static ChartIndicatorOptions Off { get; } = new(Volume: false);
     public bool HasInterest => Interest is { Count: > 0 };
-    public bool Empty => !Volume && !Profile && !Liquidations && !HasInterest;
+    public bool HasDetails => Profile || Liquidations || HasInterest;
+    public bool Empty => !Volume && !HasDetails;
     public ChartIndicatorOptions Normalized() => this with
     {
         Interest = (Interest ?? []).Where(pair => Enum.IsDefined(pair.Key) && pair.Key != Venue.Alpha)

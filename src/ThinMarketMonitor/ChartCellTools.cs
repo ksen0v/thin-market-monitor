@@ -9,6 +9,10 @@ internal sealed partial class ChartCell
 {
     private ChartFeatures? features;
     private Button? drawingTools, indicatorTools;
+    private Border? drawingToolbar;
+    private readonly Dictionary<DrawingKind, Button> drawingActions = [];
+    private bool drawingToolbarDefault;
+    private bool? drawingToolbarBeforeFullscreen;
     private readonly TextBlock indicatorHint = new()
     {
         Height = 15, FontSize = 10, Margin = new Thickness(7, 1, 7, 0),
@@ -24,13 +28,14 @@ internal sealed partial class ChartCell
     private long profileSince;
     private string profileStatus = "";
     private string liquidationStatus = "";
-    internal bool HasIndicatorLayout => indicatorHint.Visibility == Visibility.Visible;
+    internal int MinimumGridHeight { get; private set; } = 116;
     internal event Action? IndicatorLayoutChanged;
 
-    private void ConfigureChartTools(DockPanel bar, ChartFeatures? shared)
+    private void ConfigureChartTools(DockPanel bar, DockPanel body, ChartFeatures? shared, bool showDrawingTools)
     {
         if (shared == null) return;
         features = shared;
+        drawingToolbarDefault = showDrawingTools;
         indicatorHint.Foreground = Terminal.Brush("Muted");
         plot.Magnet = () => shared.Magnet;
         plot.DrawingsChanged += values => { if (market != null) shared.SetDrawings(market.Key, values); };
@@ -38,9 +43,9 @@ internal sealed partial class ChartCell
         shared.IndicatorsChanged += key => { if (market?.Key == key) ResetChartTools(); };
         plot.IndicatorSummary += (shortText, detailText) =>
         {
-            if (indicatorHint.Text == shortText && Equals(indicatorHint.ToolTip, detailText)) return;
             indicatorHint.Text = shortText;
             indicatorHint.ToolTip = detailText;
+            if (indicatorTools != null) indicatorTools.ToolTip = detailText;
         };
         IsVisibleChanged += (_, _) =>
         {
@@ -48,32 +53,84 @@ internal sealed partial class ChartCell
             ResetChartTools();
         };
 
-        var tools = new StackPanel { Orientation = Orientation.Horizontal };
-        DockPanel.SetDock(tools, Dock.Right);
-        bar.Children.Add(tools);
         indicatorTools = Terminal.IconButton("volume", "Индикаторы графика");
-        drawingTools = Terminal.IconButton("draw", "Инструменты рисования");
+        drawingTools = Terminal.IconButton("draw", "Панель рисования");
         foreach (var button in new[] { drawingTools, indicatorTools })
         {
             button.MinHeight = 21;
             button.Padding = new Thickness(5, 1, 5, 1);
-            tools.Children.Add(button);
+            DockPanel.SetDock(button, button == drawingTools ? Dock.Left : Dock.Right);
+            bar.Children.Add(button);
         }
-        drawingTools.Click += (_, _) => OpenTools(drawingTools, DrawingMenu());
+        var drawingColumn = new StackPanel { Orientation = Orientation.Vertical };
+        drawingToolbar = Terminal.Rule(new Thickness(0, 0, 1, 0));
+        drawingToolbar.Padding = new Thickness(2, 3, 2, 3);
+        drawingToolbar.Child = drawingColumn;
+        DockPanel.SetDock(drawingToolbar, Dock.Left);
+        body.Children.Add(drawingToolbar);
+        AutomationProperties.SetName(drawingToolbar, "Инструменты рисования");
+        foreach (var (kind, icon, label) in new[]
+        {
+            (DrawingKind.HorizontalRay, "horizontal-ray", "Горизонтальный луч"),
+            (DrawingKind.Ray, "trend-ray", "Наклонный луч"),
+            (DrawingKind.Segment, "segment", "Отрезок")
+        })
+        {
+            var button = Terminal.IconButton(icon, label);
+            button.Width = 26;
+            button.Height = 25;
+            button.Margin = new Thickness(0, 0, 0, 2);
+            button.Click += (_, _) =>
+            {
+                if (plot.CurrentDrawingTool == kind) plot.CancelDrawing();
+                else plot.BeginDrawing(kind);
+            };
+            drawingActions.Add(kind, button);
+            drawingColumn.Children.Add(button);
+        }
+        drawingTools.Click += (_, _) => SetDrawingToolbar(!DrawingToolbarExpanded);
         indicatorTools.Click += (_, _) => OpenTools(indicatorTools, IndicatorMenu());
+        plot.DrawingToolChanged += UpdateDrawingButtons;
+        SetDrawingToolbar(showDrawingTools);
     }
 
-    private IEnumerable<MenuItem> DrawingMenu()
+    private bool DrawingToolbarExpanded => drawingToolbar?.Visibility == Visibility.Visible;
+
+    internal void ResetDrawingToolbar() => SetDrawingToolbar(drawingToolbarDefault);
+
+    internal void SetFullscreenDrawingToolbar(bool fullscreen)
     {
-        foreach (var (kind, label) in new[]
+        if (fullscreen)
         {
-            (DrawingKind.HorizontalRay, "Горизонтальный луч"),
-            (DrawingKind.Ray, "Наклонный луч"),
-            (DrawingKind.Segment, "Отрезок")
-        })
-            yield return Item(label, () => plot.BeginDrawing(kind), hint: "Поставьте точки на графике. Удерживайте клавишу магнита для привязки к свече.");
-        yield return Item("Отменить построение · Esc", () => plot.CancelDrawing(), enabled: plot.IsDrawing);
-        yield return Item("Удалить выбранный рисунок · Delete", () => plot.DeleteDrawing(), enabled: plot.HasSelectedDrawing);
+            drawingToolbarBeforeFullscreen = DrawingToolbarExpanded;
+            SetDrawingToolbar(true);
+        }
+        else if (drawingToolbarBeforeFullscreen is { } previous)
+        {
+            drawingToolbarBeforeFullscreen = null;
+            SetDrawingToolbar(previous);
+        }
+    }
+
+    private void SetDrawingToolbar(bool show)
+    {
+        if (drawingToolbar == null || drawingTools == null) return;
+        if (!show) plot.CancelDrawing();
+        drawingToolbar.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        drawingTools.Foreground = Terminal.Brush(show ? "Accent" : "Muted");
+        drawingTools.ToolTip = show ? "Свернуть инструменты рисования" : "Развернуть инструменты рисования";
+        AutomationProperties.SetItemStatus(drawingTools, show ? "Развёрнута" : "Свёрнута");
+    }
+
+    private void UpdateDrawingButtons()
+    {
+        foreach (var (kind, button) in drawingActions)
+        {
+            bool active = plot.CurrentDrawingTool == kind;
+            button.Foreground = Terminal.Brush(active ? "Accent" : "Text");
+            button.Background = active ? Terminal.Brush("AccentSurface") : System.Windows.Media.Brushes.Transparent;
+            AutomationProperties.SetItemStatus(button, active ? "Активный инструмент" : "");
+        }
     }
 
     private IEnumerable<MenuItem> IndicatorMenu()
@@ -86,6 +143,13 @@ internal sealed partial class ChartCell
         yield return Item("Фактические ликвидации", () => Change(o => o with { Liquidations = !o.Liquidations }),
             indicatorOptions.Liquidations, hint: LiquidationAvailability(instrument) ?? "Биржа публикует цены исполнений.");
 
+        if (indicatorOptions.Interest is { Count: > 1 } sources)
+        {
+            yield return new MenuItem { Header = "Шкала и линейка OI", IsEnabled = false, Style = Terminal.Style("TerminalMenuItem") };
+            foreach (var venue in sources.Keys.Order())
+                yield return Item(venue.Label(), () => plot.SelectInterestScale(venue), plot.InterestScaleVenue == venue,
+                    hint: interestLayers.GetValueOrDefault(venue)?.Reading?.Unit);
+        }
         yield return new MenuItem { Header = "Открытый интерес · источники", IsEnabled = false, Style = Terminal.Style("TerminalMenuItem") };
         foreach (var venue in Enum.GetValues<Venue>().Where(venue => venue != Venue.Alpha))
         {
@@ -135,8 +199,9 @@ internal sealed partial class ChartCell
     private void UpdateChartToolState()
     {
         if (drawingTools == null || indicatorTools == null) return;
-        drawingTools.IsEnabled = indicatorTools.IsEnabled = market != null;
-        indicatorTools.Foreground = Terminal.Brush(indicatorOptions.Empty ? "Text" : "Accent");
+        indicatorTools.IsEnabled = market != null;
+        foreach (var button in drawingActions.Values) button.IsEnabled = market != null;
+        indicatorTools.Foreground = Terminal.Brush(indicatorOptions.HasDetails ? "Accent" : "Text");
         AutomationProperties.SetItemStatus(indicatorTools, indicatorOptions.Empty ? "" : "Индикаторы включены");
     }
 
@@ -162,14 +227,17 @@ internal sealed partial class ChartCell
         foreach (var venue in interestLayers.Keys.Where(venue => indicatorOptions.Interest?.ContainsKey(venue) != true).ToArray())
             interestLayers.Remove(venue);
         bool shown = active && IsVisible && market != null && !indicatorOptions.Empty;
-        var visibility = shown ? Visibility.Visible : Visibility.Collapsed;
-        if (indicatorHint.Visibility != visibility)
+        bool details = shown && indicatorOptions.HasDetails;
+        indicatorHint.Visibility = details ? Visibility.Visible : Visibility.Collapsed;
+        int minimum = !details ? 116 : indicatorOptions.HasInterest ? 186 : 165;
+        if (MinimumGridHeight != minimum)
         {
-            indicatorHint.Visibility = visibility;
+            MinimumGridHeight = minimum;
             IndicatorLayoutChanged?.Invoke();
         }
         if (!shown || market is not { } instrument)
         {
+            if (indicatorTools != null) indicatorTools.ToolTip = "Индикаторы графика";
             plot.UpdateIndicators(null);
             return;
         }

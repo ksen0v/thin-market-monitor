@@ -85,21 +85,32 @@
                             Focusable="False" IsTabStop="False"/>
         </Grid>
         <Border x:Name="BottomNavigation" Grid.Row="1" Background="{StaticResource Surface}" BorderBrush="{StaticResource Outline}"
-                BorderThickness="0,1,0,0" Padding="10,5">
-            <DockPanel>
-                <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" AutomationProperties.Name="Рабочие области">
-                    <Button x:Name="SignalsButton" Content="_Сигналы" AutomationProperties.Name="Сигналы" Click="ChangeWorkspace" MinHeight="30" Margin="0,0,4,0"/>
-                    <Button x:Name="OverviewButton" Content="_Обзор" AutomationProperties.Name="Обзор" Click="ChangeWorkspace" MinHeight="30" Margin="0,0,4,0"/>
-                    <Button x:Name="SettingsButton" Content="_Настройки" AutomationProperties.Name="Настройки" Click="OpenSettings" MinHeight="30"/>
-                </StackPanel>
-                <StackPanel Margin="14,0,0,0" VerticalAlignment="Center">
+                BorderThickness="0,1,0,0" Padding="10,4">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Border x:Name="WorkspaceNavigation" Grid.Column="1" Background="{StaticResource Plot}" BorderBrush="{StaticResource Outline}"
+                        BorderThickness="1" CornerRadius="10" Padding="3" AutomationProperties.Name="Рабочие области">
+                    <StackPanel Orientation="Horizontal">
+                        <Button x:Name="SignalsButton" Style="{StaticResource WorkspaceNavigationButton}" ToolTip="Сигналы"
+                                AutomationProperties.Name="Сигналы" Click="ChangeWorkspace"/>
+                        <Button x:Name="OverviewButton" Style="{StaticResource WorkspaceNavigationButton}" ToolTip="Обзор"
+                                AutomationProperties.Name="Обзор" Click="ChangeWorkspace" Margin="3,0"/>
+                        <Button x:Name="SettingsButton" Style="{StaticResource WorkspaceNavigationButton}" ToolTip="Настройки"
+                                AutomationProperties.Name="Настройки" Click="OpenSettings"/>
+                    </StackPanel>
+                </Border>
+                <StackPanel Grid.Column="2" Margin="12,0,0,0" VerticalAlignment="Center">
                     <TextBlock x:Name="CatalogStatus" Text="Обновление каталогов…" TextTrimming="CharacterEllipsis" FontSize="11"/>
                     <DockPanel>
                         <Ellipse x:Name="StreamLed" DockPanel.Dock="Left" Width="6" Height="6" Fill="{StaticResource Muted}" Margin="0,0,6,0"/>
                         <TextBlock x:Name="StreamStatus" Foreground="{StaticResource Muted}" FontSize="11" TextTrimming="CharacterEllipsis"/>
                     </DockPanel>
                 </StackPanel>
-            </DockPanel>
+            </Grid>
         </Border>
     </Grid>
 </Window>

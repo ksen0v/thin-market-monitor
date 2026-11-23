@@ -19,7 +19,7 @@ internal sealed class ChartFeatures(Settings settings, ExchangeApi api, Func<Mar
     public event Action<string>? DrawingsChanged;
     public event Action<string>? IndicatorsChanged;
     public ChartDrawing[] Drawings(string key) => settings.ChartDrawings.GetValueOrDefault(key) ?? [];
-    public ChartIndicatorOptions Options(string key) => settings.ChartIndicators.GetValueOrDefault(key) ?? ChartIndicatorOptions.Off;
+    public ChartIndicatorOptions Options(string key) => settings.ChartIndicators.GetValueOrDefault(key) ?? ChartIndicatorOptions.Default;
 
     public void SetDrawings(string key, ChartDrawing[] drawings)
     {
@@ -31,7 +31,7 @@ internal sealed class ChartFeatures(Settings settings, ExchangeApi api, Func<Mar
 
     public void SetOptions(string key, ChartIndicatorOptions options)
     {
-        if (options.Empty) settings.ChartIndicators.Remove(key);
+        if (options.Volume && !options.HasDetails) settings.ChartIndicators.Remove(key);
         else settings.ChartIndicators[key] = options;
         save();
         IndicatorsChanged?.Invoke(key);

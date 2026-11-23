@@ -68,6 +68,8 @@ internal sealed partial class CandlePlot
     private readonly Pen selectedLine = new(Terminal.Brush("Text"), 1.5);
     internal Func<ModifierKeys> Magnet { get; set; } = () => ModifierKeys.Shift;
     internal event Action<ChartDrawing[]>? DrawingsChanged;
+    internal event Action? DrawingToolChanged;
+    internal DrawingKind? CurrentDrawingTool => drawingTool;
     internal bool HasSelectedDrawing => selectedDrawing.HasValue;
     internal bool IsDrawing => drawingTool.HasValue || movingAnchor != null;
 
@@ -85,6 +87,7 @@ internal sealed partial class CandlePlot
         selectedDrawing = null;
         drawingTool = kind;
         Cursor = Cursors.Cross;
+        DrawingToolChanged?.Invoke();
         InvalidateVisual();
     }
 
@@ -95,6 +98,7 @@ internal sealed partial class CandlePlot
         drawingStart = drawingPreview = null;
         if (movingAnchor != null) CancelGesture();
         ClearValue(CursorProperty);
+        DrawingToolChanged?.Invoke();
         InvalidateVisual();
         return true;
     }

@@ -85,6 +85,7 @@ internal enum BookmarkColor { Gold, Green, Blue, Pink, Violet }
 internal sealed class Settings
 {
     private const int EditableSignalPeriodsVersion = 1;
+    private const int DefaultChartVolumeVersion = 2;
     internal const int MaxModuleSeconds = 3600;
     internal const int MaxFilterSeconds = 86400;
     internal const int MaxRules = 24;
@@ -92,7 +93,7 @@ internal sealed class Settings
     internal const int MaxSignalCooldownMinutes = 1440;
     internal static readonly Threshold[] Defaults = [new(15, true, 4), new(60, true, 5), new(300, true, 12), new(900, true, 20)];
     internal static readonly Threshold[] DefaultVolumeGrowth = [new(15, true, 100), new(60, true, 100), new(300, true, 100), new(900, true, 100)];
-    public int SchemaVersion { get; set; } = EditableSignalPeriodsVersion;
+    public int SchemaVersion { get; set; } = DefaultChartVolumeVersion;
     public Dictionary<Venue, ListingRule> Rules { get; set; } = new() { [Venue.KuCoin] = ListingRule.Require };
     public Dictionary<Venue, ListingRule> FuturesRules { get; set; } = [];
     public ListingRule Rule(MarketSource source) => ListingRules(source.Segment).GetValueOrDefault(source.Venue);
@@ -231,9 +232,10 @@ internal sealed class Settings
         if (settings.OverviewSort < -1 || settings.OverviewSort >= settings.OverviewColumns.Length) settings.OverviewSort = -1;
         using var document = JsonDocument.Parse(json);
         var root = document.RootElement;
-        bool exactPeriods = root.ValueKind == JsonValueKind.Object && root.TryGetProperty(nameof(SchemaVersion), out _) &&
-            settings.SchemaVersion >= EditableSignalPeriodsVersion;
-        settings.SchemaVersion = Math.Max(settings.SchemaVersion, EditableSignalPeriodsVersion);
+        bool versioned = root.ValueKind == JsonValueKind.Object && root.TryGetProperty(nameof(SchemaVersion), out _);
+        bool exactPeriods = versioned && settings.SchemaVersion >= EditableSignalPeriodsVersion;
+        bool defaultVolume = versioned && settings.SchemaVersion >= DefaultChartVolumeVersion;
+        settings.SchemaVersion = Math.Max(settings.SchemaVersion, DefaultChartVolumeVersion);
         var price = ValidThresholds(settings.Thresholds ?? Defaults, 10_000).ToArray();
         if (!exactPeriods)
         {
@@ -268,7 +270,8 @@ internal sealed class Settings
             .ToDictionary(pair => pair.Key, pair => pair.Value.Where(drawing => drawing is { Valid: true })
                 .DistinctBy(drawing => drawing.Id).ToArray(), StringComparer.Ordinal);
         settings.ChartIndicators = (settings.ChartIndicators ?? []).Where(pair => pair.Value != null && !string.IsNullOrWhiteSpace(pair.Key))
-            .ToDictionary(pair => pair.Key, pair => pair.Value.Normalized(), StringComparer.Ordinal);
+            .ToDictionary(pair => pair.Key, pair => pair.Value.Normalized() with { Volume = !defaultVolume || pair.Value.Volume },
+                StringComparer.Ordinal);
         if (settings.Ruler == null || (settings.Ruler.Mouse is { } mouse ? !Enum.IsDefined(mouse)
                 : !ChartGesture.Bindable(settings.Ruler.Key) || settings.Ruler.Key == settings.Fullscreen))
             settings.Ruler = new(Key.None, MouseButton.Middle);
