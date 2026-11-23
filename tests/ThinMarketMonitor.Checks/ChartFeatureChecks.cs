@@ -55,11 +55,16 @@ internal static class ChartFeatureChecks
         var spot = Bitcoin with { Contract = null };
         var perp = Bitcoin with { Venue = Venue.Bybit, Contract = new("linear", Perpetual: true) };
         var another = perp with { Symbol = "BTCOTHER" };
-        var wrongQuote = perp with { Symbol = "BTCUSDC", Quote = "USDC" };
-        Check(ChartFeatures.ComparableContracts(spot, Venue.Bybit, [perp, another, wrongQuote, perp with
-            { Symbol = "BTCUSD", Contract = new("inverse", Unit: QuantityUnit.Quote, Perpetual: true) }]).Length == 2 &&
+        var usdc = perp with { Symbol = "BTCUSDC", Quote = "USDC" };
+        var bybitInverse = perp with { Symbol = "BTCUSD", Quote = "USD", Contract = new("inverse", Unit: QuantityUnit.Quote, Perpetual: true) };
+        var matching = ChartFeatures.ComparableContracts(spot, Venue.Bybit, [perp, another, usdc, bybitInverse,
+            perp with { Symbol = "SAMEALIAS", Identifiers = new(ListingAsset: "unrelated:BTC") }]);
+        Check(matching.Length == 4 && ChartFeatures.ChooseInterestContract(spot, matching, "") == null &&
+            ChartFeatures.ChooseInterestContract(spot, [perp, usdc, bybitInverse], "") == perp &&
+            ChartFeatures.ChooseInterestContract(spot, [bybitInverse], "") == null &&
+            ChartFeatures.ChooseInterestContract(spot, matching, bybitInverse.Key) == bybitInverse &&
             ChartFeatures.ComparableContracts(inverse, Venue.Binance, [Bitcoin]).SequenceEqual([inverse]),
-            "only exact quote, derivative kind and confirmed asset matches are candidates, and ambiguity remains explicit");
+            "exact quote is preferred, different contracts stay individually selectable, and ambiguous or inverse substitutes need explicit selection");
 
         var rows = ExchangeApi.DecodeInterest(perp, Json("""
             {"retCode":0,"result":{"symbol":"BTCUSDT","category":"linear","list":[
@@ -73,6 +78,10 @@ internal static class ChartFeatureChecks
             {"result":{"timestamp":[1795384800],"data":[["10","14","9","13"]]}}
             """), 3600, Now).Single() == new InterestPoint(1_795_384_800_000, 10),
             "an hourly close is not backdated to the opening timestamp");
+        var dollarCandidates = ChartFeatures.ComparableContracts(spot, Venue.Kraken, [kraken]);
+        Check(ChartFeatures.ChooseInterestContract(spot, dollarCandidates, "") == kraken &&
+            ChartFeatures.ComparableContracts(spot with { Quote = "EUR" }, Venue.Kraken, [kraken]).SequenceEqual([kraken]),
+            "a confirmed linear USD contract can be overlaid on a spot chart quoted in USDT or EUR");
         var fill = BinanceLiquidations.Decode(inverse, Json("""
             {"e":"forceOrder","E":1795387800001,"o":{"s":"BTCUSD_PERP","st":2,"S":"SELL","X":"FILLED","p":"8","ap":"10","l":"3","z":"3","T":1795387800000}}
             """));
@@ -165,8 +174,9 @@ internal static class ChartFeatureChecks
             window.UpdateLayout();
             var tools = Field<Dictionary<DrawingKind, Button>>(cell, "drawingActions");
             Check(rail.IsVisible && tools.Count == 3 && tools.Values.All(b => b.Content is Viewbox) &&
-                rail.TranslatePoint(new Point(rail.ActualWidth, 0), cell).X <= plot.TranslatePoint(new Point(), cell).X,
-                "drawing tools open as three icon actions to the left of the plot");
+                rail.TranslatePoint(new Point(rail.ActualWidth, 0), cell).X <= plot.TranslatePoint(new Point(), cell).X &&
+                rail.CornerRadius.TopLeft > 0 && rail.VerticalAlignment == VerticalAlignment.Center,
+                "drawing tools open on the left in a rounded, vertically centered panel");
             Click(tools[DrawingKind.HorizontalRay]);
             view = typeof(CandlePlot).GetMethod("CurrentView", Private)!.Invoke(plot, null)!;
             bounds = (Rect)view.GetType().GetProperty("Plot")!.GetValue(view)!;
@@ -198,9 +208,20 @@ internal static class ChartFeatureChecks
                 Field<TextBlock>(cell, "indicatorHint").IsVisible && plot.ActualHeight >= 48,
                 "chart tools work in a 3×3 layout and start requests on demand");
             Click(button);
+            Click(featureMenu);
+            ClickMenu(featureMenu.ContextMenu.Items.OfType<MenuItem>().First(item => Equals(item.Header, "Открытый интерес в USD")));
+            featureMenu.ContextMenu.IsOpen = false;
+            Check(Settings.Deserialize(JsonSerializer.Serialize(settings)).ChartIndicators[Bitcoin.Key].InterestUsd,
+                "the chart's USD unit preference persists between sessions");
+            Click(featureMenu);
+            ClickMenu(featureMenu.ContextMenu.Items.OfType<MenuItem>().First(item => Equals(item.Header, "Lighter")));
+            featureMenu.ContextMenu.IsOpen = false;
+            var sources = Field<IndicatorDisplay>(plot, "indicators").Interest;
+            Check(sources.Select(layer => layer.Venue).SequenceEqual([Venue.Lighter, Venue.Binance]),
+                "the newest enabled exchange is stacked above the previous OI pane");
             plot.Set(bars);
             window.UpdateLayout();
-            CheckInterestPanel(plot, bars);
+            CheckInterestPanels(window, plot, bars);
 
             Click(preferences);
             Check(AutomationProperties.GetItemStatus(preferences) == "Активный раздел" &&
@@ -223,7 +244,7 @@ internal static class ChartFeatureChecks
             typeof(MainWindow).GetMethod("ExitFullscreen", Private)!.Invoke(window, null);
             Check(rail.Visibility == Visibility.Collapsed, "leaving fullscreen restores the compact signal toolbar");
             cell.Assign(Bitcoin with { Symbol = "ETHUSDT", Base = "ETH", Contract = Bitcoin.Contract! with { Streaming = false } }, true);
-            Check(Field<ChartDrawing[]>(plot, "drawings").Length == 0 && !plot.InterestScaleVenue.HasValue,
+            Check(Field<ChartDrawing[]>(plot, "drawings").Length == 0 && (Field<IndicatorDisplay?>(plot, "indicators")?.Interest.Length ?? 0) == 0,
                 "a different market shows its own annotations and indicator setup");
         }
         finally { window.Close(); }
@@ -237,28 +258,50 @@ internal static class ChartFeatureChecks
         static void ClickMenu(MenuItem item) => item.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
     }
 
-    private static void CheckInterestPanel(CandlePlot plot, Candle[] bars)
+    private static void CheckInterestPanels(Window window, CandlePlot plot, Candle[] bars)
     {
-        InterestLayer binance = new(Venue.Binance, Bitcoin, new("BTC", 300, [new(bars[0].Time, 120_000), new(bars[1].Time, 141_000)]));
-        InterestLayer lighter = new(Venue.Lighter, null, new("USD", 0, [new(bars[0].Time, 2_100_000), new(bars[1].Time, 2_600_000)]));
-        var options = ChartIndicatorOptions.Default with { Interest = new() { [Venue.Binance] = "", [Venue.Lighter] = "" } };
-        var display = new IndicatorDisplay(Bitcoin, options, null, null, "", "", [binance, lighter]);
+        InterestLayer binance = new(Venue.Binance, Bitcoin, new("BTC", 300, [new(bars[0].Time, 120_000, 6_100_000), new(bars[1].Time, 141_000, 7_600_000)]));
+        InterestLayer lighter = new(Venue.Lighter, null, new("USD", 0, [new(bars[0].Time, 2_100_000, 2_100_000), new(bars[1].Time, 2_600_000, 2_600_000)]));
+        var options = ChartIndicatorOptions.Default with { Interest = new() { [Venue.Binance] = "", [Venue.Lighter] = "" }, InterestUsd = true };
+        var display = new IndicatorDisplay(Bitcoin, options, null, null, "", "", [lighter, binance]);
         plot.UpdateIndicators(display);
-        Check(plot.InterestScaleVenue == Venue.Binance && plot.SelectInterestScale(Venue.Lighter), "open interest scale can switch sources");
+        window.UpdateLayout();
         var view = typeof(CandlePlot).GetMethod("CurrentView", Private)!.Invoke(plot, null)!;
-        var graph = (Rect)typeof(CandlePlot).GetMethod("InterestGraph", Private)!.Invoke(plot, [view])!;
-        var at = new Point(graph.Left + graph.Width / 2, graph.Top + graph.Height / 2);
+        var panes = ((System.Collections.IEnumerable)typeof(CandlePlot).GetMethod("InterestPanes", Private)!.Invoke(plot, [view])!)
+            .Cast<object>().ToArray();
+        var graphs = panes.Select(pane => (Rect)pane.GetType().GetProperty("Graph")!.GetValue(pane)!).ToArray();
+        Check(graphs.Length == 2 && graphs[0].Bottom < graphs[1].Top && graphs.All(rect => rect.Height >= 20),
+            "the two OI series have separately usable panes in a compact 3×3 chart");
         var ruler = typeof(CandlePlot).GetMethod("RulerViewport", Private)!;
-        var target = ruler.Invoke(plot, [at, view]);
-        Check(target != null, $"ruler can measure the OI pane (plot height {plot.ActualHeight}, OI height {graph.Height})");
-        var axis = Field<object>(target!, "Item2", BindingFlags.Public | BindingFlags.Instance);
-        var scale = (InterestScale)axis.GetType().GetProperty("Scale")!.GetValue(axis)!;
-        var measureView = Field<object>(target!, "Item1", BindingFlags.Public | BindingFlags.Instance);
-        Check((string)axis.GetType().GetProperty("Unit")!.GetValue(axis)! == "USD" && scale.Low == 2_000_000 &&
-            (double)measureView.GetType().GetMethod("Price")!.Invoke(measureView, [graph.Bottom])! == scale.Low,
-            "the OI ruler uses the selected USD scale at the correct screen coordinates");
-        plot.UpdateIndicators(display with { Interest = [binance, lighter with { Reading = null }] });
-        Check(ruler.Invoke(plot, [at, view]) == null, "an empty OI series never starts a ruler with invented values");
+        var (upper, upperScale) = Ruler(0, "USD");
+        var (_, lowerScale) = Ruler(1, "USD");
+        Check(upperScale.Low == 2_000_000 && lowerScale.Low == 6_000_000,
+            "both rulers use the USD values of their own series");
+        typeof(CandlePlot).GetMethod("SetInterestRange", Private)!.Invoke(plot, [upper, 1_000_000d, 6_000_000d]);
+        Check(Ruler(0, "USD").Scale.Low == 1_000_000 && Ruler(1, "USD").Scale == lowerScale,
+            "stretching one OI axis uses a separate range");
+        var onScale = new Point(graphs[0].Right + 5, Center(0).Y);
+        Check((bool)typeof(CandlePlot).GetMethod("StartInterestAxisDrag", Private)!.Invoke(plot, [onScale, view, true])! &&
+            Ruler(0, "USD").Scale == upperScale, "a double click on an OI scale restores auto on that pane");
+        plot.UpdateIndicators(display with { Options = options with { InterestUsd = false } });
+        Check(Ruler(1, "BTC").Scale.High < 200_000, "switching back uses the original contract units");
+        plot.UpdateIndicators(display with { Interest = [lighter with { Reading = null }, binance] });
+        Check(ruler.Invoke(plot, [Center(0), view]) == null, "an empty OI series never starts a ruler with invented values");
+
+        Point Center(int index) => new(graphs[index].Left + graphs[index].Width / 2, graphs[index].Top + graphs[index].Height / 2);
+
+        (object Axis, InterestScale Scale) Ruler(int index, string unit)
+        {
+            var target = ruler.Invoke(plot, [Center(index), view]);
+            Check(target != null, "ruler accepts points in each OI pane");
+            var axis = Field<object>(target!, "Item2", BindingFlags.Public | BindingFlags.Instance);
+            var scale = (InterestScale)axis.GetType().GetProperty("Scale")!.GetValue(axis)!;
+            var viewport = Field<object>(target!, "Item1", BindingFlags.Public | BindingFlags.Instance);
+            Check((string)axis.GetType().GetProperty("Unit")!.GetValue(axis)! == unit &&
+                Math.Abs((double)viewport.GetType().GetMethod("Price")!.Invoke(viewport, [graphs[index].Bottom])! - scale.Low) < 1e-5,
+                "ruler uses the corresponding pane coordinates and selected units");
+            return (axis, scale);
+        }
     }
 
     public static async Task<int> Live()

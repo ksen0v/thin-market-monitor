@@ -1,0 +1,192 @@
+using System.Windows;
+using System.Windows.Media;
+
+namespace ThinMarketMonitor;
+
+internal sealed partial class CandlePlot
+{
+    private const double InterestPaneMinimum = 46;
+    private readonly Dictionary<(string Instrument, bool Usd), (double Low, double High)> interestRanges = [];
+    private InterestWindow? lastInterestWindow;
+    internal event Action<InterestWindow>? InterestRangeChanged;
+
+    private readonly record struct InterestPane(InterestLayer Layer, Rect Header, Rect Graph);
+    private sealed record InterestAxis(string Instrument, Venue Venue, string Unit, InterestScale Scale, bool Estimated);
+
+    private double InterestPaneHeight
+    {
+        get
+        {
+            int count = indicators?.Interest.Length ?? 0;
+            if (count == 0) return 0;
+            double target = ActualHeight * (count == 1 ? .30 : .52);
+            return Math.Max(0, Math.Min(Math.Min(ActualHeight - 55, count * 170), Math.Max(count * InterestPaneMinimum, target)));
+        }
+    }
+
+    private void ReportInterestRange(View view)
+    {
+        if (indicators?.Options.HasInterest != true || InterestRangeChanged == null) return;
+        // Request OI only over the portion of the visible window with chart history.
+        long from = (long)Math.Max(view.Start, candles[0].Time);
+        long until = (long)Math.Min(view.End, candles[^1].Time + BarTime);
+        if (until <= from) return;
+        long quantum = Math.Max(60_000, BarTime);
+        var requested = new InterestWindow(ExchangeApi.CandleStart(from, quantum), ExchangeApi.CandleStart(until, quantum) + quantum);
+        if (lastInterestWindow == requested) return;
+        lastInterestWindow = requested;
+        InterestRangeChanged.Invoke(requested);
+    }
+
+    private IEnumerable<InterestPane> InterestPanes(View view)
+    {
+        if (indicators is not { Interest.Length: > 0 } data || InterestPaneHeight <= 0) yield break;
+        double height = InterestPaneHeight / data.Interest.Length;
+        if (height < 34) yield break;
+        for (int i = 0; i < data.Interest.Length; i++)
+        {
+            double top = view.Plot.Bottom + i * height;
+            yield return new(data.Interest[i], new(view.Plot.Left, top, ActualWidth - view.Plot.Left, 17),
+                new(view.Plot.Left, top + 17, view.Plot.Width, height - 18));
+        }
+    }
+
+    private InterestPane? InterestPaneAt(Point at, View view, bool axisOnly)
+    {
+        foreach (var pane in InterestPanes(view))
+            if (axisOnly ? at.X >= pane.Graph.Right && at.Y >= pane.Graph.Top && at.Y <= pane.Graph.Bottom : pane.Graph.Contains(at))
+                return pane;
+        return null;
+    }
+
+    private static string InterestInstrument(InterestLayer layer) => layer.Market?.Key ?? layer.Venue.ToString();
+    private static int InterestIntervals(Rect graph) => Math.Clamp((int)(graph.Height / 23), 1, 6);
+
+    private InterestAxis? GetInterestAxis(InterestPane pane, InterestPoint[] points)
+    {
+        string instrument = InterestInstrument(pane.Layer);
+        if (drag is { Mode: Operation.Ruler, Interest: { } measuring } && measuring.Instrument == instrument)
+            return measuring;
+        if (pane.Layer.Reading is not { } reading || points.Length == 0) return null;
+        bool usd = indicators?.Options.InterestUsd == true;
+        int intervals = InterestIntervals(pane.Graph);
+        var scale = interestRanges.TryGetValue((instrument, usd), out var fixedRange)
+            ? InterestScale.Fixed(fixedRange.Low, fixedRange.High, intervals)
+            : InterestScale.Create(points, intervals);
+        return scale is { } value ? new(instrument, pane.Layer.Venue, usd ? "USD" : reading.Unit, value,
+            usd && points.Any(point => point.Estimated)) : null;
+    }
+
+    private void SetInterestRange(InterestAxis scale, double low, double span)
+    {
+        double high = low + span;
+        if (InterestScale.Fixed(low, high, 4).HasValue)
+            interestRanges[(scale.Instrument, indicators?.Options.InterestUsd == true)] = (low, high);
+    }
+
+    private bool StartInterestAxisDrag(Point at, View view, bool reset)
+    {
+        if (InterestPaneAt(at, view, axisOnly: true) is not { } pane ||
+            GetInterestAxis(pane, VisibleInterest(pane.Layer.Reading, view)) is not { } measure) return false;
+        if (reset)
+        {
+            interestRanges.Remove((measure.Instrument, indicators?.Options.InterestUsd == true));
+            InvalidateVisual();
+            return true;
+        }
+        return Start(Operation.InterestPrice, at, InterestView(view, pane, measure.Scale), System.Windows.Input.MouseButton.Left, measure);
+    }
+
+    private static View InterestView(View chart, InterestPane pane, InterestScale scale) =>
+        new(pane.Graph, chart.Start, chart.End, scale.Low, scale.High);
+
+    private InterestPoint[] VisibleInterest(InterestReading? reading, View view)
+    {
+        if (reading == null) return [];
+        bool usd = indicators?.Options.InterestUsd == true;
+        return reading.Points.Where(point => point.Time >= view.Start && point.Time < view.End)
+            .Select(point => point with { Value = point.InUnit(usd) }).Where(point => point.Value >= 0 && double.IsFinite(point.Value)).ToArray();
+    }
+
+    private void DrawInterest(DrawingContext dc, View view, int columns)
+    {
+        ReportInterestRange(view);
+        foreach (var pane in InterestPanes(view))
+        {
+            var graph = pane.Graph;
+            var points = VisibleInterest(pane.Layer.Reading, view);
+            var numeric = GetInterestAxis(pane, points);
+            var color = InterestBrush(pane.Layer.Venue);
+            DrawInterestTitle(dc, pane, numeric, color);
+            for (int i = 0; i < columns; i++)
+            {
+                double x = graph.Left + graph.Width * i / (columns - 1);
+                dc.DrawLine(gridLine, new(x, graph.Top), new(x, graph.Bottom));
+            }
+            if (numeric == null)
+            {
+                DrawText(dc, "—", graph.Right + 5, graph.Top + 1);
+                string local = pane.Layer.Status ?? (pane.Layer.Reading is { Points.Length: 0 } reading ? reading.Status : null)
+                    ?? (indicators?.Options.InterestUsd == true && pane.Layer.Reading is { Points.Length: > 0 } set &&
+                        !set.Points.Any(point => point.Usd.HasValue) ? "Нет оценки в USD" : "Нет точек в диапазоне");
+                dc.PushClip(new RectangleGeometry(graph));
+                DrawText(dc, local, graph.Left + 5, graph.Top + Math.Max(0, (graph.Height - 12) / 2));
+                dc.Pop();
+                continue;
+            }
+
+            var series = InterestView(view, pane, numeric.Scale);
+            DrawInterestGrid(dc, series, numeric.Scale, color);
+            dc.PushClip(new RectangleGeometry(graph));
+            var line = new Pen(color, 1.45);
+            Point? previous = null;
+            long last = 0;
+            int period = pane.Layer.Reading!.Period;
+            long spacing = period == 0 ? 85_000 : period * 1300L;
+            foreach (var point in points)
+            {
+                var at = new Point(series.X(point.Time), series.Y(point.Value));
+                if (previous is { } before && point.Time - last <= spacing) dc.DrawLine(line, before, at);
+                else dc.DrawEllipse(color, null, at, 1.7, 1.7);
+                (previous, last) = (at, point.Time);
+            }
+            dc.Pop();
+        }
+    }
+
+    private void DrawInterestTitle(DrawingContext dc, InterestPane pane, InterestAxis? numeric, Brush color)
+    {
+        var header = pane.Header;
+        dc.DrawLine(gridLine, header.TopLeft, header.TopRight);
+        string unit = numeric == null ? (indicators?.Options.InterestUsd == true ? "USD" : pane.Layer.Reading?.Unit ?? "") :
+            numeric.Estimated ? "≈ USD" : numeric.Unit;
+        string source = pane.Layer.Venue.Label();
+        string? symbol = pane.Layer.Market?.Symbol;
+        string ending = (unit.Length == 0 ? "" : " · " + unit) + (pane.Layer.Reading?.LoadingHistory == true ? " · загрузка…" : "");
+        var caption = Text($"OI · {source}" + (symbol == null ? "" : " " + symbol) + ending, color);
+        if (caption.Width > header.Width - 10) caption = Text($"OI · {source}{ending}", color);
+        dc.PushClip(new RectangleGeometry(header));
+        dc.DrawText(caption, new(header.Left + 4, header.Top + 2));
+        dc.Pop();
+    }
+
+    private void DrawInterestGrid(DrawingContext dc, View series, InterestScale scale, Brush brush)
+    {
+        var graph = series.Plot;
+        double lastLabel = double.PositiveInfinity;
+        foreach (var tick in scale.Ticks())
+        {
+            double y = Math.Clamp(series.Y(tick), graph.Top, graph.Bottom);
+            dc.DrawLine(gridLine, new(graph.Left, y), new(graph.Right + 3, y));
+            if (lastLabel - y < 16) continue;
+            double available = ActualWidth - graph.Right - 6;
+            var label = Text(scale.Label(tick), brush);
+            if (label.Width > available) label.SetFontSize(Math.Max(7, 11 * available / label.Width));
+            double top = Math.Clamp(y - label.Height / 2, graph.Top - label.Height / 4, graph.Bottom - label.Height * .75);
+            dc.DrawText(label, new(graph.Right + 5, top));
+            lastLabel = y;
+        }
+    }
+
+    private static Brush InterestBrush(Venue venue) => interestColors[(int)venue % interestColors.Length];
+}

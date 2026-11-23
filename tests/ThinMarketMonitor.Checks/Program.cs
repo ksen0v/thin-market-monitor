@@ -372,6 +372,7 @@ BlacklistChecks.Run();
 ListingAssetChecks.Run();
 ExtendedVenueChecks.Run();
 ChartFeatureChecks.Run();
+await OpenInterestChecks.Run();
 await SpreadChecks.Run();
 await ColibriChecks.Run();
 Console.WriteLine("Listings, volume conditions, chart placement, migration, price and volume windows, eight trade adapters and update metadata passed.");

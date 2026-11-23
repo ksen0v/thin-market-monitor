@@ -16,6 +16,7 @@ internal sealed partial class ChartCell : Border
     private readonly ExchangeApi api;
     private readonly Func<long> nextOrder;
     private readonly CandlePlot plot;
+    private readonly ScrollViewer chartViewport;
     private readonly DockPanel layout = new();
     private readonly TextBlock label = new() { TextTrimming = TextTrimming.CharacterEllipsis, FontWeight = FontWeights.SemiBold };
     private readonly TextBlock detail = new() { TextTrimming = TextTrimming.CharacterEllipsis, FontSize = 11 };
@@ -117,7 +118,12 @@ internal sealed partial class ChartCell : Border
         layout.Children.Add(detail);
         DockPanel.SetDock(indicatorHint, Dock.Bottom);
         layout.Children.Add(indicatorHint);
-        chartBody.Children.Add(plot);
+        chartViewport = new ScrollViewer
+        {
+            Content = plot, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Focusable = false
+        };
+        chartBody.Children.Add(chartViewport);
         layout.Children.Add(chartBody);
         UpdateHeader();
         UpdateFrames();
@@ -496,7 +502,7 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
     private (double Low, double High)? fixedPrice;
     private Drag? drag;
     private Point rulerEnd;
-    private enum Operation { Pan, Time, Price, Ruler }
+    private enum Operation { Pan, InterestPan, Time, Price, InterestPrice, Ruler }
     private sealed record Drag(Operation Mode, Point Start, View View, double Visible, MouseButton? Button, InterestAxis? Interest);
     private readonly record struct View(Rect Plot, double Start, double End, double Low, double High)
     {
@@ -527,6 +533,8 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
         visible = DefaultVisibleBars;
         manualEnd = null;
         fixedPrice = null;
+        interestRanges.Clear();
+        lastInterestWindow = null;
         InvalidateVisual();
     }
 
@@ -572,7 +580,7 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
     protected override void OnRender(DrawingContext dc)
     {
         dc.DrawRectangle(background, null, new Rect(0, 0, ActualWidth, ActualHeight));
-        if (CurrentView() is not { } view) { interestLegend.Clear(); SummarizeIndicators(null); return; }
+        if (CurrentView() is not { } view) { SummarizeIndicators(null); return; }
         var plot = view.Plot;
         double step = plot.Width * BarTime / (view.End - view.Start);
         double body = Math.Max(.12, step * .67);
@@ -656,7 +664,7 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
         string percent = double.IsFinite(change) ? change.ToString("+0.00;-0.00;0.00", Russian) + "%" : "—";
         string text = interest == null
             ? $"{FormatPrice(first, view.Span / 100)} → {FormatPrice(last, view.Span / 100)}   {percent}"
-            : $"{interest.Scale.Delta(last - first)} {interest.Unit}   {percent}";
+            : $"{(interest.Estimated ? "≈ " : "")}{interest.Scale.Delta(last - first)} {interest.Unit}   {percent}";
         var formatted = Text(text, color);
         double x = Math.Clamp(b.X + 7, view.Plot.Left, Math.Max(view.Plot.Left, ActualWidth - formatted.Width - 14));
         double y = Math.Clamp(b.Y - formatted.Height - 9, view.Plot.Top, Math.Max(view.Plot.Top, view.Plot.Bottom - formatted.Height - 6));
@@ -667,6 +675,7 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
     protected override void OnMouseWheel(MouseWheelEventArgs e)
     {
         if (drag != null || CurrentView() is not { } view) return;
+        if (Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) && indicators?.Interest.Length > 1) return;
         double fraction = Math.Clamp((e.GetPosition(this).X - Left) / view.Plot.Width, 0, 1);
         double count = ClampCount(visible * Math.Pow(e.Delta > 0 ? .78 : 1.28, Math.Abs(e.Delta) / 120d));
         if (manualEnd.HasValue)
@@ -689,18 +698,16 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
             e.Handled = true;
             return;
         }
-        if (e.ChangedButton == MouseButton.Left && ClickInterestLegend(at))
-        {
-            e.Handled = true;
-            return;
-        }
         if (gesture().Mouse == e.ChangedButton && BeginRulerAt(at, view, e.ChangedButton))
         {
             e.Handled = true;
             return;
         }
         if (e.ChangedButton != MouseButton.Left) return;
+        if (StartInterestAxisDrag(at, view, reset: e.ClickCount == 2)) { e.Handled = true; return; }
         if (inPlot) Start(Operation.Pan, at, view, MouseButton.Left);
+        else if (InterestPaneAt(at, view, axisOnly: false) is { } pane)
+            Start(Operation.InterestPan, at, view with { Plot = pane.Graph }, MouseButton.Left);
         else if (at.Y >= view.Plot.Bottom && at.X <= view.Plot.Right) Start(Operation.Time, at, view, MouseButton.Left);
         else if (at.X >= view.Plot.Right && at.Y <= view.Plot.Bottom) Start(Operation.Price, at, view, MouseButton.Left);
         else return;
@@ -719,9 +726,9 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
     private (View View, InterestAxis? Interest)? RulerViewport(Point at, View view)
     {
         if (view.Plot.Contains(at)) return (view, null);
-        var graph = InterestGraph(view);
-        if (!graph.Contains(at) || GetInterestAxis(view, graph) is not { } interest) return null;
-        return (new(graph, view.Start, view.End, interest.Scale.Low, interest.Scale.High), interest);
+        if (InterestPaneAt(at, view, axisOnly: false) is not { } pane ||
+            GetInterestAxis(pane, VisibleInterest(pane.Layer.Reading, view)) is not { } interest) return null;
+        return (InterestView(view, pane, interest.Scale), interest);
     }
 
     public void EndKeyboardRuler()
@@ -754,11 +761,11 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
             case Operation.Ruler:
                 rulerEnd = view.Bound(point);
                 break;
-            case Operation.Pan:
+            case Operation.Pan or Operation.InterestPan:
                 if (Math.Abs(point.X - move.Start.X) > 1 || manualEnd.HasValue)
                     manualEnd = ClampEnd(PanEnd(view.End, dx, move.Visible, BarTime), move.Visible);
                 RequestOlder(dx > 0);
-                if (Math.Abs(point.Y - move.Start.Y) > 4 || fixedPrice.HasValue)
+                if (move.Mode == Operation.Pan && (Math.Abs(point.Y - move.Start.Y) > 4 || fixedPrice.HasValue))
                     SetPrice(view.Low + dy * view.Span, view.Span);
                 break;
             case Operation.Time:
@@ -768,10 +775,12 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
                     manualEnd = ClampEnd(view.End + (visible - move.Visible) * (1 - anchor) * BarTime, visible);
                 RequestOlder(dx > 0);
                 break;
-            case Operation.Price:
+            case Operation.Price or Operation.InterestPrice:
                 double span = view.Span * Math.Exp(Math.Clamp(dy * 2.3, -5, 5));
                 double fromBottom = 1 - Math.Clamp((move.Start.Y - view.Plot.Top) / view.Plot.Height, 0, 1);
-                SetPrice(view.Price(move.Start.Y) - fromBottom * span, span);
+                double low = view.Price(move.Start.Y) - fromBottom * span;
+                if (move.Interest is { } interest) SetInterestRange(interest, low, span);
+                else SetPrice(low, span);
                 break;
         }
         InvalidateVisual();

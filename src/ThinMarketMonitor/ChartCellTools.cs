@@ -24,6 +24,9 @@ internal sealed partial class ChartCell
     private int indicatorFrame;
     private readonly Dictionary<Venue, Market[]> interestCandidates = [];
     private readonly Dictionary<Venue, InterestLayer> interestLayers = [];
+    private readonly DispatcherTimer interestViewportTimer = new(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(220) };
+    private TaskCompletionSource interestViewportChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private InterestWindow? interestWindow;
     private ExecutionTape? tradeTape, liquidationTape;
     private long profileSince;
     private string profileStatus = "";
@@ -47,6 +50,19 @@ internal sealed partial class ChartCell
             indicatorHint.ToolTip = detailText;
             if (indicatorTools != null) indicatorTools.ToolTip = detailText;
         };
+        plot.InterestRangeChanged += range =>
+        {
+            interestWindow = range;
+            interestViewportTimer.Stop();
+            interestViewportTimer.Start();
+        };
+        interestViewportTimer.Tick += (_, _) =>
+        {
+            interestViewportTimer.Stop();
+            var waiting = interestViewportChanged;
+            interestViewportChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            waiting.TrySetResult();
+        };
         IsVisibleChanged += (_, _) =>
         {
             if (!IsVisible) plot.CancelDrawing();
@@ -63,8 +79,11 @@ internal sealed partial class ChartCell
             bar.Children.Add(button);
         }
         var drawingColumn = new StackPanel { Orientation = Orientation.Vertical };
-        drawingToolbar = Terminal.Rule(new Thickness(0, 0, 1, 0));
-        drawingToolbar.Padding = new Thickness(2, 3, 2, 3);
+        drawingToolbar = Terminal.Rule(new Thickness(1));
+        drawingToolbar.CornerRadius = new CornerRadius(10);
+        drawingToolbar.VerticalAlignment = VerticalAlignment.Center;
+        drawingToolbar.Margin = new Thickness(4, 0, 4, 0);
+        drawingToolbar.Padding = new Thickness(3);
         drawingToolbar.Child = drawingColumn;
         DockPanel.SetDock(drawingToolbar, Dock.Left);
         body.Children.Add(drawingToolbar);
@@ -143,28 +162,24 @@ internal sealed partial class ChartCell
         yield return Item("Фактические ликвидации", () => Change(o => o with { Liquidations = !o.Liquidations }),
             indicatorOptions.Liquidations, hint: LiquidationAvailability(instrument) ?? "Биржа публикует цены исполнений.");
 
-        if (indicatorOptions.Interest is { Count: > 1 } sources)
-        {
-            yield return new MenuItem { Header = "Шкала и линейка OI", IsEnabled = false, Style = Terminal.Style("TerminalMenuItem") };
-            foreach (var venue in sources.Keys.Order())
-                yield return Item(venue.Label(), () => plot.SelectInterestScale(venue), plot.InterestScaleVenue == venue,
-                    hint: interestLayers.GetValueOrDefault(venue)?.Reading?.Unit);
-        }
+        yield return Item("Открытый интерес в USD", () => Change(o => o with { InterestUsd = !o.InterestUsd }),
+            indicatorOptions.InterestUsd, hint: "Единицы для шкал OI и линейки");
         yield return new MenuItem { Header = "Открытый интерес · источники", IsEnabled = false, Style = Terminal.Style("TerminalMenuItem") };
         foreach (var venue in Enum.GetValues<Venue>().Where(venue => venue != Venue.Alpha))
         {
             var layer = interestLayers.GetValueOrDefault(venue);
             bool chosen = indicatorOptions.Interest?.ContainsKey(venue) == true;
-            string label = layer?.Market == null ? venue.Label() : $"{venue.Label()} · {layer.Market.Ticker}";
+            string label = layer?.Market == null ? venue.Label() : $"{venue.Label()} · {layer.Market.Symbol}";
             string? status = layer?.Status ?? layer?.Reading?.Status;
             if (chosen && status != null) label += $" · {status}";
             yield return Item(label, () => SetInterest(venue, null), chosen,
                 hint: layer?.Reading is { } reading ? $"{reading.Unit} · {PeriodLabel(reading.Period)}" : status);
-            if (!chosen || interestCandidates.GetValueOrDefault(venue) is not { Length: > 1 } choices) continue;
+            if (!chosen || interestCandidates.GetValueOrDefault(venue) is not { Length: > 0 } choices ||
+                (choices.Length == 1 && layer?.Market?.Key == choices[0].Key)) continue;
             foreach (var candidate in choices)
                 yield return Item($"    {candidate.Symbol} · {candidate.Contract!.Product}", () => SetInterest(venue, candidate.Key),
                     indicatorOptions.Interest?.GetValueOrDefault(venue) == candidate.Key,
-                    hint: $"{candidate.Base}/{candidate.Quote} · {candidate.Source.Label}");
+                    hint: $"{candidate.Base}/{candidate.Quote} · {(candidate.Contract!.Unit == QuantityUnit.Quote ? "инверсный" : "линейный")}");
         }
 
         void Change(Func<ChartIndicatorOptions, ChartIndicatorOptions> change)
@@ -175,7 +190,11 @@ internal sealed partial class ChartCell
         {
             var sources = new Dictionary<Venue, string>(indicatorOptions.Interest ?? []);
             if (contract != null) sources[venue] = contract;
-            else if (!sources.Remove(venue)) sources[venue] = "";
+            else if (!sources.Remove(venue))
+            {
+                sources[venue] = "";
+                chartViewport.ScrollToTop();
+            }
             Change(options => options with { Interest = sources });
         }
     }
@@ -212,6 +231,8 @@ internal sealed partial class ChartCell
         indicatorRun = null;
         if (market?.Key != indicatorMarket || frame != indicatorFrame)
         {
+            interestWindow = null;
+            interestViewportTimer.Stop();
             indicatorMarket = market?.Key;
             indicatorFrame = frame;
             interestLayers.Clear();
@@ -237,6 +258,7 @@ internal sealed partial class ChartCell
         }
         if (!shown || market is not { } instrument)
         {
+            interestViewportTimer.Stop();
             if (indicatorTools != null) indicatorTools.ToolTip = "Индикаторы графика";
             plot.UpdateIndicators(null);
             return;
@@ -282,6 +304,8 @@ internal sealed partial class ChartCell
         {
             while (!ct.IsCancellationRequested)
             {
+                Task change = interestViewportChanged.Task;
+                bool loadingHistory = false;
                 try
                 {
                     var catalog = instrument.Contract != null && instrument.Venue == venue
@@ -289,18 +313,18 @@ internal sealed partial class ChartCell
                     ct.ThrowIfCancellationRequested();
                     var candidates = ChartFeatures.ComparableContracts(instrument, venue, catalog.Markets);
                     interestCandidates[venue] = candidates;
-                    var found = choice.Length > 0 ? candidates.FirstOrDefault(m => m.Key == choice) :
-                        candidates.Length == 1 ? candidates[0] : null;
+                    var found = ChartFeatures.ChooseInterestContract(instrument, candidates, choice);
                     if (found == null)
                     {
-                        string status = catalog.Error != null ? "Каталог недоступен" : candidates.Length > 1 ? "Выберите контракт" :
+                        string status = catalog.Error != null ? "Каталог недоступен" : candidates.Length > 0 ? "Выберите контракт" :
                             "Подтверждённого контракта нет";
                         interestLayers[venue] = new(venue, null, null, status);
                     }
                     else
                     {
-                        var reading = await api.OpenInterest(found, tf, ct);
+                        var reading = await api.OpenInterest(found, tf, ct, interestWindow);
                         ct.ThrowIfCancellationRequested();
+                        loadingHistory = reading.LoadingHistory;
                         interestLayers[venue] = new(venue, found, reading);
                     }
                 }
@@ -309,7 +333,8 @@ internal sealed partial class ChartCell
                     interestLayers[venue] = new(venue, null, null, "Данные недоступны");
                 }
                 PublishIndicators(instrument);
-                await Task.Delay(55_000, ct);
+                try { await change.WaitAsync(TimeSpan.FromMilliseconds(loadingHistory ? 650 : 55_000), ct); }
+                catch (TimeoutException) { }
             }
         }
 
@@ -407,8 +432,9 @@ internal sealed partial class ChartCell
     private void PublishIndicators(Market instrument)
     {
         if (market?.Key != instrument.Key || !IsVisible || !active) return;
-        plot.UpdateIndicators(new(instrument, indicatorOptions, tradeTape, liquidationTape, profileStatus,
-            liquidationStatus, interestLayers.Values.OrderBy(layer => layer.Venue).ToArray()));
+        var panes = (indicatorOptions.Interest?.Keys.AsEnumerable() ?? []).Reverse()
+            .Where(interestLayers.ContainsKey).Select(venue => interestLayers[venue]).ToArray();
+        plot.UpdateIndicators(new(instrument, indicatorOptions, tradeTape, liquidationTape, profileStatus, liquidationStatus, panes));
     }
 
     internal static string PeriodLabel(int period) => period == 0 ? "с момента сбора" : "шаг " + MainWindow.WindowName(period);

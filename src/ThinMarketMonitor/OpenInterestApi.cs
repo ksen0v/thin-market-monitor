@@ -1,75 +1,13 @@
-using System.Collections.Concurrent;
 using System.Text.Json;
 
 namespace ThinMarketMonitor;
 
 internal sealed partial class ExchangeApi
 {
-    private const int InterestPoints = 240;
-    private const long InterestPollMs = 55_000;
-    private sealed class InterestCache
-    {
-        public readonly SemaphoreSlim Gate = new(1, 1);
-        public long Touched;
-        public long Checked;
-        public InterestReading? Reading;
-    }
-    private sealed record InterestRequest(int Period, string Unit, Func<int, long, string> Url);
-    private readonly ConcurrentDictionary<(string Market, int Period), InterestCache> interests = new();
+    private sealed record InterestRequest(int Period, string Unit, int PageSize, Func<int, long, string> Latest,
+        Func<long, long, string>? History = null);
 
     public static bool SupportsOpenInterest(Market market) => InterestRoute(market, 60) != null;
-
-    public async Task<InterestReading> OpenInterest(Market market, int frame, CancellationToken ct)
-    {
-        if (InterestRoute(market, frame) is not { } route)
-            return new("", 0, [], "Публичные данные для контракта недоступны");
-        long now = Environment.TickCount64;
-        if (interests.Count > 256)
-            foreach (var item in interests.Where(item => now - Volatile.Read(ref item.Value.Touched) > 600_000))
-                interests.TryRemove(item);
-        var cache = interests.GetOrAdd((market.Key, route.Period), _ => new());
-        Volatile.Write(ref cache.Touched, now);
-        await cache.Gate.WaitAsync(ct);
-        try
-        {
-            if (cache.Reading != null && Environment.TickCount64 - cache.Checked < InterestPollMs) return cache.Reading;
-            try
-            {
-                int limit = cache.Reading?.Points.Length > 0 ? 8 : 200;
-                long receivedAt = CandleNow;
-                JsonElement root;
-                if (market.Venue == Venue.Hyperliquid)
-                {
-                    string dex = market.Symbol.Contains(':') ? market.Symbol.Split(':', 2)[0] : "";
-                    (root, receivedAt) = await CachedTicker("hyperliquid:perp-contexts:" + dex,
-                        token => HyperInfo("metaAndAssetCtxs", token, dex: dex), ct);
-                }
-                else if (market.Venue == Venue.Lighter)
-                    (root, receivedAt) = await TickerBatch(route.Url(limit, receivedAt), ct);
-                else
-                {
-                    await PaceHistory(market.Venue, ct);
-                    root = await Get(route.Url(limit, receivedAt), ct);
-                    receivedAt = CandleNow;
-                }
-                ct.ThrowIfCancellationRequested();
-                var points = DecodeInterest(market, root, route.Period, receivedAt);
-                var previous = cache.Reading?.Points ?? [];
-                cache.Reading = new(route.Unit, route.Period, points.Reverse().Concat(previous).DistinctBy(p => p.Time)
-                    .OrderBy(p => p.Time).TakeLast(InterestPoints).ToArray(),
-                    points.Length == 0 ? "Биржа не вернула данные" : null);
-            }
-            catch (Exception ex) when (!ct.IsCancellationRequested &&
-                ex is System.Net.Http.HttpRequestException or System.IO.IOException or JsonException or OperationCanceledException
-                    or InvalidOperationException or FormatException or KeyNotFoundException)
-            {
-                cache.Reading = new(route.Unit, route.Period, cache.Reading?.Points ?? [], "Данные биржи недоступны");
-            }
-            cache.Checked = Environment.TickCount64;
-            return cache.Reading;
-        }
-        finally { cache.Gate.Release(); }
-    }
 
     private static InterestRequest? InterestRoute(Market market, int tf)
     {
@@ -82,36 +20,57 @@ internal sealed partial class ExchangeApi
         string bybitInterval = step < 3600 ? minuteInterval : interval;
         int htxStep = Math.Max(3600, step);
         string htxInterval = htxStep switch { 3600 => "60min", 14400 => "4hour", _ => "1day" };
+        string kuCoinInterest = $"https://api.kucoin.com/api/ua/v2/market/open-interest?symbol={symbol}&interval={minuteInterval}";
+        string gateInterest = GateContract + $"{product}/contract_stats?contract={symbol}&interval={interval}";
+        string krakenInterest = $"https://futures.kraken.com/api/charts/v1/analytics/{symbol}/open-interest?interval={step}";
         return market.Venue switch
         {
-            Venue.Binance when product == "usdm" => new(step, basis, (n, _) =>
-                $"https://fapi.binance.com/futures/data/openInterestHist?symbol={symbol}&period={interval}&limit={n}"),
-            Venue.Binance when product == "coinm" && market.Symbol.EndsWith("_PERP", StringComparison.Ordinal) => new(step, "контр.", (n, _) =>
-                $"https://dapi.binance.com/futures/data/openInterestHist?pair={symbol[..^5]}&contractType=PERPETUAL&period={interval}&limit={n}"),
-            Venue.Binance when product == "coinm" => new(0, "контр.", (_, _) => Coinm + $"openInterest?symbol={symbol}"),
-            Venue.Bybit when contract.Perpetual => new(step, product == "inverse" ? market.Quote : basis, (n, _) =>
-                Bybit + $"open-interest?category={product}&symbol={symbol}&intervalTime={bybitInterval}&limit={n}"),
-            Venue.Okx => new(Math.Min(step, 14400), "контр.", (n, _) => Okx +
-                $"rubik/stat/contracts/open-interest-history?instId={symbol}&period={(step >= 14400 ? "4H" : step == 3600 ? "1H" : interval)}&limit={Math.Min(n, 100)}"),
-            Venue.Bitget when product is "USDT-FUTURES" or "USDC-FUTURES" => new(step, basis, (_, _) =>
-                $"https://api.bitget.com/api/v3/market/open-interest-history?symbol={symbol}&period={interval}"),
-            Venue.Bitget => new(0, basis, (_, _) =>
+            Venue.Binance when product == "usdm" => Bounded(step, basis, 300,
+                $"https://fapi.binance.com/futures/data/openInterestHist?symbol={symbol}&period={interval}"),
+            Venue.Binance when product == "coinm" && market.Symbol.EndsWith("_PERP", StringComparison.Ordinal) =>
+                Bounded(step, "контр.", 300,
+                    $"https://dapi.binance.com/futures/data/openInterestHist?pair={symbol[..^5]}&contractType=PERPETUAL&period={interval}"),
+            Venue.Binance when product == "coinm" => Current("контр.", Coinm + $"openInterest?symbol={symbol}"),
+            Venue.Bybit when product is "linear" or "inverse" => Bounded(step, product == "inverse" ? market.Quote : basis, 180,
+                Bybit + $"open-interest?category={product}&symbol={symbol}&intervalTime={bybitInterval}"),
+            Venue.Okx => OkxHistory(),
+            Venue.Bitget when product is "USDT-FUTURES" or "USDC-FUTURES" =>
+                new(step, basis, 30, (_, _) => $"https://api.bitget.com/api/v3/market/open-interest-history?symbol={symbol}&period={interval}"),
+            Venue.Bitget => Current(basis,
                 $"https://api.bitget.com/api/v3/market/open-interest?category={product}&symbol={symbol}"),
-            Venue.Mexc => new(0, "контр.", (_, _) => MexcContract + $"ticker?symbol={symbol}"),
-            Venue.KuCoin => new(step, "контр.", (n, _) =>
-                $"https://api.kucoin.com/api/ua/v1/market/open-interest?symbol={symbol}&interval={minuteInterval}&pageSize={Math.Min(n, 100)}"),
-            Venue.Gate when product.StartsWith("futures/", StringComparison.Ordinal) => new(step, "контр.", (n, _) =>
-                GateContract + $"{product}/contract_stats?contract={symbol}&interval={interval}&limit={Math.Min(n, 100)}"),
-            Venue.Htx when product is "linear" or "inverse" => new(htxStep, "контр.", (n, _) => HtxContract +
+            Venue.Mexc => Current("контр.", MexcContract + $"ticker?symbol={symbol}"),
+            Venue.KuCoin => new(step, "контр.", 100, (n, _) => kuCoinInterest + $"&pageSize={n}",
+                (from, until) => kuCoinInterest + $"&startAt={from}&endAt={until - 1}&pageSize=100"),
+            Venue.Gate when product.StartsWith("futures/", StringComparison.Ordinal) => new(step, "контр.", 100,
+                (n, _) => gateInterest + $"&limit={n}",
+                (from, until) => gateInterest + $"&from={from / 1000}&to={(until - 1) / 1000}&limit=100"),
+            Venue.Htx when product is "linear" or "inverse" => new(htxStep, "контр.", 200, (n, _) => HtxContract +
                 $"{(product == "linear" ? "linear-swap-api" : "swap-api")}/v1/swap_his_open_interest?contract_code={symbol}&period={htxInterval}&amount_type=1&size={n}"),
-            Venue.Htx when product == "delivery" => new(0, "контр.", (_, _) => HtxContract + $"api/v1/contract_open_interest?contract_code={symbol}"),
-            Venue.Kraken => new(step, "контр.", (n, now) => "https://futures.kraken.com/api/charts/v1/analytics/" +
-                $"{symbol}/open-interest?interval={step}&since={now / 1000 - (long)step * n}"),
-            Venue.Weex => new(0, "контр.", (_, _) => WeexFutures + $"openInterest?symbol={symbol}"),
-            Venue.Lighter => new(0, "USD", (_, _) => Lighter + $"orderBookDetails?market_id={symbol}"),
-            Venue.Hyperliquid => new(0, basis, (_, _) => ""),
+            Venue.Htx when product == "delivery" => Current("контр.", HtxContract + $"api/v1/contract_open_interest?contract_code={symbol}"),
+            Venue.Kraken => new(step, contract.Unit == QuantityUnit.Quote ? "контр." : basis, 180,
+                (n, now) => krakenInterest + $"&since={now / 1000 - (long)step * n}",
+                (from, until) => krakenInterest + $"&since={from / 1000}&to={(until - 1) / 1000}"),
+            Venue.Weex => Current("контр.", WeexFutures + $"openInterest?symbol={symbol}"),
+            Venue.Lighter => Current("USD", Lighter + $"orderBookDetails?market_id={symbol}"),
+            Venue.Hyperliquid => Current(basis, ""),
             _ => null
         };
+
+        InterestRequest OkxHistory()
+        {
+            int period = Math.Min(step, 14400);
+            string bar = period >= 3600 ? (period == 3600 ? "1H" : "4H") : interval;
+            string url = Okx + $"rubik/stat/contracts/open-interest-history?instId={symbol}&period={bar}";
+            // OKX's begin and end are exclusive.
+            return new(period, "контр.", 100, (n, _) => url + $"&limit={n}",
+                (from, until) => url + $"&begin={from - 1}&end={until}&limit=100");
+        }
+
+        static InterestRequest Bounded(int period, string unit, int count, string url) => new(period, unit, count,
+            (n, _) => url + $"&limit={n}",
+            (from, until) => url + $"&startTime={from}&endTime={until - 1}&limit={count}");
+
+        static InterestRequest Current(string unit, string url) => new(0, unit, 1, (_, _) => url);
     }
 
     internal static InterestPoint[] DecodeInterest(Market market, JsonElement root, int period, long observedAt)
@@ -119,28 +78,36 @@ internal sealed partial class ExchangeApi
         string symbol = market.Symbol;
         IEnumerable<InterestPoint> points = market.Venue switch
         {
-            Venue.Binance when period == 0 => root.Optional("symbol") == symbol ? [Point(root, "time", "openInterest")] : [],
+            Venue.Binance when period == 0 => root.Optional("symbol") == symbol
+                ? [Native("time", "openInterest", root, FaceValue(root.Number("openInterest")))] : [],
             Venue.Binance => root.EnumerateArray().Where(row => market.Contract?.Product == "coinm"
                 ? row.Optional("pair") + "_PERP" == symbol && row.Optional("contractType") == "PERPETUAL"
-                : row.Optional("symbol") == symbol).Select(row => Point(row, "timestamp", "sumOpenInterest")),
+                : row.Optional("symbol") == symbol).Select(row => Native("timestamp", "sumOpenInterest", row,
+                    market.Contract?.Product == "coinm" ? FaceValue(row.Number("sumOpenInterest")) :
+                    QuoteValue(row.Number("sumOpenInterestValue")))),
             Venue.Bybit => MatchedBybit(),
-            Venue.Okx => Envelope(root, "0").EnumerateArray().Where(row => row.ValueKind == JsonValueKind.Array && row.GetArrayLength() == 4)
-                .Select(row => new InterestPoint(row[0].Int(), row[1].Num())),
+            Venue.Okx => Envelope(root, "0").EnumerateArray().Where(row => row.ValueKind == JsonValueKind.Array && row.GetArrayLength() >= 4)
+                .Select(row => new InterestPoint(row[0].Int(), row[1].Num(), ValidUsd(row[3].Num()))),
             Venue.Bitget => BitgetInterest(),
             Venue.Mexc => MexcInterest(),
-            Venue.KuCoin => Envelope(root, "200000").EnumerateArray().Select(row => Point(row, "ts", "openInterest")),
-            Venue.Gate => root.EnumerateArray().Select(row => Point(row, "time", "open_interest", 1000)),
+            Venue.KuCoin => Envelope(root, "200000").EnumerateArray()
+                .Select(row => Native("ts", "openInterest", row, FaceValue(row.Number("openInterest")))),
+            Venue.Gate => root.EnumerateArray().Select(row => Native("time", "open_interest", row,
+                QuoteValue(row.Number("open_interest_usd")) ?? FaceValue(row.Number("open_interest")), scale: 1000)),
             Venue.Htx => HtxInterest(),
             Venue.Kraken => KrakenInterest(),
-            Venue.Weex => root.Optional("symbol") == symbol ? [Point(root, "time", "openInterest")] : [],
+            Venue.Weex => root.Optional("symbol") == symbol ? [Native("time", "openInterest", root)] : [],
             Venue.Lighter => Named(LighterField(root, "order_book_details"), "market_id")
                 .Where(row => row.Optional("market_type") == "perp")
-                .Select(row => new InterestPoint(observedAt, row.Number("open_interest_usd"))),
+                .Select(row => new InterestPoint(observedAt, row.Number("open_interest_usd"), ValidUsd(row.Number("open_interest_usd")))),
             Venue.Hyperliquid => HyperInterest(),
             _ => []
         };
         return points.Where(point => point.Time > 0 && point.Time <= observedAt + 3000 &&
-            double.IsFinite(point.Value) && point.Value >= 0).ToArray();
+            double.IsFinite(point.Value) && point.Value >= 0).DistinctBy(point => point.Time).OrderBy(point => point.Time).ToArray();
+
+        double? QuoteValue(double value) => UsdInterestQuote(market) ? ValidUsd(value) : null;
+        double? FaceValue(double size) => OiFaceValue(market, size);
 
         IEnumerable<JsonElement> Named(JsonElement container, string field) =>
             container.EnumerateArray().Where(row => row.Optional(field) == symbol);
@@ -148,8 +115,15 @@ internal sealed partial class ExchangeApi
         IEnumerable<InterestPoint> MatchedBybit()
         {
             var data = BybitResult(root);
-            return data.Optional("symbol") == symbol && data.Optional("category") == market.Contract?.Product
-                ? data.GetProperty("list").EnumerateArray().Select(row => Point(row, "timestamp", "singleOpenInterest")) : [];
+            if (data.Optional("symbol") != symbol || data.Optional("category") != market.Contract?.Product) return [];
+            return data.GetProperty("list").EnumerateArray().Select(row =>
+            {
+                // Both-sided size is twice the single-sided open interest.
+                double single = row.Number("singleOpenInterest");
+                double amount = single >= 0 && double.IsFinite(single) ? single : row.Number("openInterest") / 2;
+                return new InterestPoint((long)row.Number("timestamp"), amount,
+                    market.Contract?.Product == "inverse" ? QuoteValue(amount) : null);
+            });
         }
 
         IEnumerable<InterestPoint> BitgetInterest()
@@ -157,23 +131,25 @@ internal sealed partial class ExchangeApi
             var data = Envelope(root, "00000");
             return Named(data.GetProperty("list"), "symbol").Select(row => period == 0
                 ? new InterestPoint((long)data.Number("ts"), row.Number("openInterest"))
-                : Point(row, "timestamp", "openInterest"));
+                : Native("timestamp", "openInterest", row, QuoteValue(row.Number("openInterestValue"))));
         }
 
         IEnumerable<InterestPoint> MexcInterest()
         {
             var data = Envelope(root, "0");
-            return data.Optional("symbol") == symbol ? [Point(data, "timestamp", "holdVol")] : [];
+            return data.Optional("symbol") == symbol
+                ? [Native("timestamp", "holdVol", data, EstimateOi(market, data.Number("holdVol"), data.Number("fairPrice")), estimated: true)] : [];
         }
 
         IEnumerable<InterestPoint> HtxInterest()
         {
             var data = HtxField(root, "data");
             if (period == 0)
-                return Named(data, "contract_code").Select(row => new InterestPoint((long)root.Number("ts"), row.Number("volume")));
+                return Named(data, "contract_code").Select(row => new InterestPoint((long)root.Number("ts"), row.Number("volume"), FaceValue(row.Number("volume"))));
             return data.Optional("contract_code") == symbol
                 ? data.GetProperty("tick").EnumerateArray().Where(row => row.Optional("amount_type") == "1")
-                    .Select(row => Point(row, "ts", "volume")) : [];
+                    .Select(row => Native("ts", "volume", row, market.Contract?.Product == "linear"
+                        ? QuoteValue(row.Number("value")) : FaceValue(row.Number("volume")))) : [];
         }
 
         IEnumerable<InterestPoint> KrakenInterest()
@@ -182,9 +158,12 @@ internal sealed partial class ExchangeApi
             var timestamp = result.GetProperty("timestamp");
             var data = result.GetProperty("data");
             if (timestamp.GetArrayLength() != data.GetArrayLength()) throw new JsonException("Несогласованные данные Kraken");
-            // In the OHLC response use the opening reading at the bucket timestamp, not the later close.
+            // This is the opening reading in the bucket, paired with the opening mark price.
             return Enumerable.Range(0, timestamp.GetArrayLength()).Select(i =>
-                new InterestPoint(timestamp[i].Int() * 1000, data[i].ValueKind == JsonValueKind.Array ? data[i][0].Num() : data[i].Num()));
+            {
+                double amount = data[i].ValueKind == JsonValueKind.Array ? data[i][0].Num() : data[i].Num();
+                return new InterestPoint(timestamp[i].Int() * 1000, amount, FaceValue(amount));
+            });
         }
 
         IEnumerable<InterestPoint> HyperInterest()
@@ -193,10 +172,30 @@ internal sealed partial class ExchangeApi
             var contexts = root[1];
             if (universe.GetArrayLength() != contexts.GetArrayLength()) throw new JsonException("Несогласованные данные Hyperliquid");
             return Enumerable.Range(0, universe.GetArrayLength()).Where(i => universe[i].Optional("name") == symbol)
-                .Select(i => new InterestPoint(observedAt, contexts[i].Number("openInterest")));
+                .Select(i =>
+                {
+                    double amount = contexts[i].Number("openInterest");
+                    return new InterestPoint(observedAt, amount, EstimateOi(market, amount, contexts[i].Number("markPx")), true);
+                });
         }
     }
 
-    private static InterestPoint Point(JsonElement row, string time, string number, int scale = 1) =>
-        new((long)(row.Number(time) * scale), row.Number(number));
+    private static InterestPoint Native(string time, string number, JsonElement row, double? usd = null, bool estimated = false, int scale = 1) =>
+        new((long)(row.Number(time) * scale), row.Number(number), usd, estimated && usd.HasValue);
+
+    private static bool UsdInterestQuote(Market market) =>
+        UsdQuotes.Supported(market.Quote) && market.Identifiers?.TrustedUsdQuote != false;
+
+    private static double? ValidUsd(double value) => value >= 0 && double.IsFinite(value) ? value : null;
+
+    private static double? OiFaceValue(Market market, double count) =>
+        market.Contract is { Unit: QuantityUnit.Quote, Multiplier: > 0 } contract && UsdInterestQuote(market)
+            ? ValidUsd(count * contract.Multiplier) : null;
+
+    private static double? EstimateOi(Market market, double value, double price)
+    {
+        if (!UsdInterestQuote(market) || !double.IsFinite(price) || price <= 0) return null;
+        double multiplier = market.Venue is Venue.KuCoin or Venue.Mexc ? market.Contract?.Multiplier ?? 0 : 1;
+        return multiplier > 0 ? ValidUsd(value * multiplier * price) : null;
+    }
 }

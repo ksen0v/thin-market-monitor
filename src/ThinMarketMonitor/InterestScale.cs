@@ -22,10 +22,8 @@ internal readonly record struct InterestScale(double Low, double High, double St
             low = Math.Max(0, low - margin);
             high += margin;
         }
-        double raw = (high - low) / intervals;
-        double order = Math.Pow(10, Math.Floor(Math.Log10(raw)));
-        if (!(order > 0) || !double.IsFinite(high)) return null;
-        double step = order * (raw <= order ? 1 : raw <= 2 * order ? 2 : raw <= 5 * order ? 5 : 10);
+        double step = NiceStep(high - low, intervals);
+        if (!(step > 0) || !double.IsFinite(high)) return null;
         double first = Math.Floor(low / step) * step;
         double last = Math.Ceiling(high / step) * step;
         return double.IsFinite(last) && last > first ? new(first, last, step) : null;
@@ -33,8 +31,22 @@ internal readonly record struct InterestScale(double Low, double High, double St
 
     internal IEnumerable<double> Ticks()
     {
-        int count = (int)Math.Round((High - Low) / Step);
-        for (int i = 0; i <= count; i++) yield return Low + Step * i;
+        double first = Math.Ceiling(Low / Step - 1e-9) * Step;
+        int count = (int)Math.Floor((High - first) / Step + 1e-9);
+        for (int i = 0; i <= count; i++) yield return first + Step * i;
+    }
+
+    internal static InterestScale? Fixed(double low, double high, int intervals)
+    {
+        double step = NiceStep(high - low, Math.Max(3, intervals));
+        return double.IsFinite(low) && double.IsFinite(high) && step > 0 ? new(low, high, step) : null;
+    }
+
+    private static double NiceStep(double span, int intervals)
+    {
+        double raw = span / intervals;
+        double order = Math.Pow(10, Math.Floor(Math.Log10(raw)));
+        return order * (raw <= order ? 1 : raw <= 2 * order ? 2 : raw <= 5 * order ? 5 : 10);
     }
 
     internal string Label(double value) => Format(value, High, Step);

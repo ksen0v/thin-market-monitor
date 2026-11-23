@@ -1,7 +1,7 @@
 namespace ThinMarketMonitor;
 
 internal sealed record ChartIndicatorOptions(bool Volume = true, bool Profile = false, bool Liquidations = false,
-    Dictionary<Venue, string>? Interest = null)
+    Dictionary<Venue, string>? Interest = null, bool InterestUsd = false)
 {
     public static ChartIndicatorOptions Default { get; } = new();
     public static ChartIndicatorOptions Off { get; } = new(Volume: false);
@@ -15,8 +15,12 @@ internal sealed record ChartIndicatorOptions(bool Volume = true, bool Profile = 
     };
 }
 
-internal readonly record struct InterestPoint(long Time, double Value);
-internal sealed record InterestReading(string Unit, int Period, InterestPoint[] Points, string? Status = null);
+internal readonly record struct InterestPoint(long Time, double Value, double? Usd = null, bool Estimated = false)
+{
+    public double InUnit(bool usd) => usd ? Usd ?? double.NaN : Value;
+}
+internal readonly record struct InterestWindow(long From, long Until);
+internal sealed record InterestReading(string Unit, int Period, InterestPoint[] Points, string? Status = null, bool LoadingHistory = false);
 internal sealed record InterestLayer(Venue Venue, Market? Market, InterestReading? Reading, string? Status = null);
 internal enum LiquidationSide { Unknown, Long, Short }
 internal readonly record struct ChartExecution(long Time, double Price, double Size, string? Id = null,

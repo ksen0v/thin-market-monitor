@@ -31,7 +31,7 @@ internal sealed class ChartFeatures(Settings settings, ExchangeApi api, Func<Mar
 
     public void SetOptions(string key, ChartIndicatorOptions options)
     {
-        if (options.Volume && !options.HasDetails) settings.ChartIndicators.Remove(key);
+        if (options.Volume && !options.HasDetails && !options.InterestUsd) settings.ChartIndicators.Remove(key);
         else settings.ChartIndicators[key] = options;
         save();
         IndicatorsChanged?.Invoke(key);
@@ -85,10 +85,24 @@ internal sealed class ChartFeatures(Settings settings, ExchangeApi api, Func<Mar
             return ExchangeApi.SupportsOpenInterest(chart) ? [chart] : [];
         if (chart.Contract is { Perpetual: false }) return [];
         return catalog.Where(market => market.Venue == venue && market.Contract is { Perpetual: true } &&
-                market.ListingAsset == chart.ListingAsset && market.Quote == chart.Quote &&
-                Inverse(market) == Inverse(chart) && ExchangeApi.SupportsOpenInterest(market))
-            .DistinctBy(market => market.Key).OrderBy(market => market.Symbol, StringComparer.Ordinal).ToArray();
+                market.ListingAsset == chart.ListingAsset &&
+                (UsdDenominated(market) || (market.Quote == chart.Quote && !UsdQuotes.Supported(market.Quote))) &&
+                ExchangeApi.SupportsOpenInterest(market))
+            .DistinctBy(market => market.Key).OrderBy(market => Inverse(market) != Inverse(chart))
+            .ThenBy(market => market.Quote != chart.Quote).ThenBy(market => market.Symbol, StringComparer.Ordinal).ToArray();
     }
+
+    internal static Market? ChooseInterestContract(Market chart, Market[] candidates, string choice)
+    {
+        if (choice.Length > 0) return candidates.FirstOrDefault(market => market.Key == choice);
+        var sameKind = candidates.Where(market => Inverse(market) == Inverse(chart)).ToArray();
+        var exactQuote = sameKind.Where(market => market.Quote == chart.Quote).ToArray();
+        if (exactQuote.Length > 0) return exactQuote.Length == 1 ? exactQuote[0] : null;
+        return sameKind.Length == 1 ? sameKind[0] : null;
+    }
+
+    private static bool UsdDenominated(Market market) => UsdQuotes.Supported(market.Quote) &&
+        market.Identifiers?.TrustedUsdQuote != false;
 
     private static bool Inverse(Market market) => market.Contract?.Unit == QuantityUnit.Quote ||
         market is { Venue: Venue.Bitget, Contract.Product: "COIN-FUTURES" };
