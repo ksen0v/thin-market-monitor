@@ -151,6 +151,10 @@ public partial class MainWindow : Window, IDisposable
             e.Handled = true;
         };
         Deactivated += (_, _) => CancelChartGestures();
+        StateChanged += (_, _) =>
+        {
+            if (WindowState == WindowState.Minimized) CancelChartGestures();
+        };
         Closing += (_, e) => { if (settingsPanel?.Installing == true) e.Cancel = true; };
         Closed += (_, _) => Dispose();
     }

@@ -6,6 +6,8 @@ using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Threading;
 using ThinMarketMonitor;
 
@@ -166,6 +168,12 @@ internal static class ChartFeatureChecks
             var bars = new[] { new Candle(time - 60_000, 10, 12, 9, 11, 50), new Candle(time, 11, 13, 10, 12, 75) };
             var plot = cell.Plot;
             plot.Set(bars);
+            var cursor = CheckCrosshair(plot);
+            SetCrosshair(plot, new Point(plot.ActualWidth - 2, cursor.Y));
+            Check(!HasCrosshair(plot), "the crosshair hides over the price scale");
+            SetCrosshair(plot, cursor);
+            plot.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, Environment.TickCount) { RoutedEvent = Mouse.MouseLeaveEvent });
+            Check(!HasCrosshair(plot), "leaving a signal chart clears the crosshair");
             typeof(CandlePlot).GetMethod("SetPrice", Private)!.Invoke(plot, [-20d, 40d]);
             var view = typeof(CandlePlot).GetMethod("CurrentView", Private)!.Invoke(plot, null)!;
             var bounds = (Rect)view.GetType().GetProperty("Plot")!.GetValue(view)!;
@@ -269,7 +277,12 @@ internal static class ChartFeatureChecks
                 !HeaderButtons(overviewChart).Any(button => Equals(button.Content, "Выбрать")) &&
                 !HeaderButtons(overviewChart).Contains(Field<Button>(overviewChart, "pin")),
                 "choose and pin are present in Signals only");
+            overviewChart.Assign(Bitcoin with { Symbol = "ETHUSDT", Base = "ETH",
+                Contract = Bitcoin.Contract! with { Streaming = false } }, false);
+            overviewChart.Plot.Set(bars);
+            CheckCrosshair(overviewChart.Plot);
             Click(signals);
+            Check(!HasCrosshair(overviewChart.Plot), "hiding a chart clears its cursor overlay");
             Check(!settings.Overview && cell.Choice is { Key: var key, Pinned: true } && key == Bitcoin.Key,
                 "switching back restores the signal grid and selection");
 
@@ -277,8 +290,11 @@ internal static class ChartFeatureChecks
             window.UpdateLayout();
             Check(button.IsVisible && rail.IsVisible && featureMenu.IsVisible && bottom.Visibility == Visibility.Collapsed,
                 "fullscreen expands the drawing tools and keeps indicators available");
+            plot.Set(bars);
+            CheckCrosshair(plot);
             typeof(MainWindow).GetMethod("ExitFullscreen", Private)!.Invoke(window, null);
-            Check(rail.Visibility == Visibility.Collapsed, "leaving fullscreen restores the compact signal toolbar");
+            Check(rail.Visibility == Visibility.Collapsed && !HasCrosshair(plot),
+                "leaving fullscreen restores the compact toolbar and clears the old crosshair");
             cell.Assign(Bitcoin with { Symbol = "ETHUSDT", Base = "ETH", Contract = Bitcoin.Contract! with { Streaming = false } }, true);
             Check(Field<ChartDrawing[]>(plot, "drawings").Length == 0 && (Field<IndicatorDisplay?>(plot, "indicators")?.Interest.Length ?? 0) == 0,
                 "a different market shows its own annotations and indicator setup");
@@ -299,6 +315,35 @@ internal static class ChartFeatureChecks
 
     private static Button[] HeaderButtons(ChartCell chart) => ((DockPanel)Field<Border>(chart, "headerFrame").Child)
         .Children.OfType<StackPanel>().SelectMany(panel => panel.Children.OfType<Button>()).ToArray();
+
+    private static Point CheckCrosshair(CandlePlot plot, Rect? pane = null)
+    {
+        plot.UpdateLayout();
+        var view = typeof(CandlePlot).GetMethod("CurrentView", Private)!.Invoke(plot, null)!;
+        var graph = pane ?? (Rect)view.GetType().GetProperty("Plot")!.GetValue(view)!;
+        var cursor = new Point(graph.Left + graph.Width / 3, graph.Top + graph.Height / 3);
+        foreach (var at in new[] { cursor, new Point(cursor.X + 5, cursor.Y + 3) })
+        {
+            SetCrosshair(plot, at);
+            var lines = Lines(CrosshairVisual(plot).Drawing).ToArray();
+            Check(lines.Any(line => line.StartPoint == at && line.EndPoint == new Point(graph.Left, at.Y)) &&
+                lines.Any(line => line.StartPoint == at && line.EndPoint.X == at.X && line.EndPoint.Y < at.Y) &&
+                plot.IsArrangeValid, "both guides follow the cursor without invalidating layout of the plot");
+        }
+        return cursor;
+
+        static IEnumerable<LineGeometry> Lines(Drawing? drawing) => drawing switch
+        {
+            DrawingGroup group => group.Children.SelectMany(Lines),
+            GeometryDrawing { Geometry: LineGeometry line, Pen.DashStyle.Dashes.Count: > 0 } => [line],
+            _ => []
+        };
+    }
+
+    private static DrawingVisual CrosshairVisual(CandlePlot plot) => (DrawingVisual)VisualTreeHelper.GetChild(plot, 0);
+    private static bool HasCrosshair(CandlePlot plot) => CrosshairVisual(plot).Drawing is { Children.Count: > 0 };
+    private static void SetCrosshair(CandlePlot plot, Point? at) =>
+        typeof(CandlePlot).GetMethod("SetCrosshairPosition", Private)!.Invoke(plot, [at]);
 
     private static void CheckPaneResize(Window window, CandlePlot plot, ChartSurface surface, Settings settings)
     {
@@ -349,6 +394,9 @@ internal static class ChartFeatureChecks
         var graphs = panes.Select(pane => (Rect)pane.GetType().GetProperty("Graph")!.GetValue(pane)!).ToArray();
         Check(graphs.Length == 2 && graphs[0].Bottom < graphs[1].Top && graphs.All(rect => rect.Height >= 20),
             "the two OI series have separately usable panes in a compact 3×3 chart");
+        var at = CheckCrosshair(plot, graphs[1]);
+        SetCrosshair(plot, new Point(at.X, (graphs[0].Bottom + graphs[1].Top) / 2));
+        Check(!HasCrosshair(plot), "the chart crosshair hides between OI panes");
         var ruler = typeof(CandlePlot).GetMethod("RulerViewport", Private)!;
         var (upper, upperScale) = Ruler(0, "USD");
         var (_, lowerScale) = Ruler(1, "USD");

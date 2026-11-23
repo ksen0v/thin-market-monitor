@@ -485,7 +485,7 @@ internal sealed partial class ChartCell : Border
     }
 }
 
-internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : FrameworkElement
+internal sealed partial class CandlePlot : FrameworkElement
 {
     private const double Left = 7, Top = 7, TimeAxisHeight = 17;
     internal const int DefaultVisibleBars = 220;
@@ -505,6 +505,7 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
     private readonly Pen rulerLine = new(Terminal.Brush("Accent"), 1);
     private readonly Pen lastPriceLine = new(Terminal.Brush("Accent"), 1) { DashStyle = DashStyles.Dash };
     private readonly Brush onAccent = Terminal.Brush("OnAccent");
+    private readonly Func<ChartGesture> gesture;
     private readonly Typeface typeface = new(new FontFamily("Cascadia Mono, Consolas"),
         FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
     private static readonly CultureInfo Russian = CultureInfo.GetCultureInfo("ru-RU");
@@ -524,6 +525,16 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
         public double X(double time) => Plot.Left + (time - Start) / (End - Start) * Plot.Width;
         public double Y(double price) => Plot.Top + (High - price) / Span * Plot.Height;
         public Point Bound(Point point) => new(Math.Clamp(point.X, Plot.Left, Plot.Right), Math.Clamp(point.Y, Plot.Top, Plot.Bottom));
+    }
+
+    public CandlePlot(Func<ChartGesture> gesture)
+    {
+        this.gesture = gesture;
+        AddVisualChild(crosshair);
+        IsVisibleChanged += (_, e) =>
+        {
+            if (e.NewValue is false) SetCrosshairPosition(null);
+        };
     }
 
     public void Set(Candle[] value, bool reset = false)
@@ -593,7 +604,9 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
     protected override void OnRender(DrawingContext dc)
     {
         dc.DrawRectangle(background, null, new Rect(0, 0, ActualWidth, ActualHeight));
-        if (CurrentView() is not { } view) { SummarizeIndicators(null); return; }
+        var currentView = CurrentView();
+        UpdateCrosshairPanes(currentView);
+        if (currentView is not { } view) { SummarizeIndicators(null); return; }
         var plot = view.Plot;
         double step = plot.Width * BarTime / (view.End - view.Start);
         double body = Math.Max(.12, step * .67);
@@ -688,7 +701,11 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
     protected override void OnMouseWheel(MouseWheelEventArgs e)
     {
         if (drag != null || CurrentView() is not { } view) return;
-        if (Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) && indicators?.Interest.Length > 1) return;
+        if (Keyboard.Modifiers.HasFlag(ModifierKeys.Shift) && indicators?.Interest.Length > 1)
+        {
+            SetCrosshairPosition(null);
+            return;
+        }
         double fraction = Math.Clamp((e.GetPosition(this).X - Left) / view.Plot.Width, 0, 1);
         double count = ClampCount(visible * Math.Pow(e.Delta > 0 ? .78 : 1.28, Math.Abs(e.Delta) / 120d));
         if (manualEnd.HasValue)
@@ -707,6 +724,7 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
         bool inPlot = view.Plot.Contains(at);
         if (inPlot && e.ChangedButton == MouseButton.Left && DrawingClick(at, view))
         {
+            if (IsMouseCaptured) SetCrosshairPosition(null);
             Focus();
             e.Handled = true;
             return;
@@ -746,7 +764,9 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
 
     public void EndKeyboardRuler()
     {
-        if (drag is { Mode: Operation.Ruler, Button: null }) CancelGesture();
+        if (drag is not { Mode: Operation.Ruler, Button: null }) return;
+        CancelGesture();
+        if (IsMouseOver) SetCrosshairPosition(Mouse.GetPosition(this));
     }
 
     internal static double PriceChange(double start, double end) =>
@@ -757,15 +777,20 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
         if (!CaptureMouse()) return false;
         drag = new(mode, at, view, visible, button, interest);
         rulerEnd = at;
+        SetCrosshairPosition(null);
         InvalidateVisual();
         return true;
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
-        if (drag == null && MoveDrawing(e.GetPosition(this))) return;
-        if (drag is not { } move) return;
         Point point = e.GetPosition(this);
+        if (drag is not { } move)
+        {
+            SetCrosshairPosition(IsMouseCaptured ? null : point);
+            MoveDrawing(point);
+            return;
+        }
         var view = move.View;
         double dx = (point.X - move.Start.X) / view.Plot.Width;
         double dy = (point.Y - move.Start.Y) / view.Plot.Height;
@@ -801,9 +826,12 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
 
     protected override void OnMouseUp(MouseButtonEventArgs e)
     {
-        if (e.ChangedButton == MouseButton.Left && ReleaseDrawing()) { e.Handled = true; return; }
-        if (drag?.Button != e.ChangedButton) return;
-        CancelGesture();
+        if (e.ChangedButton != MouseButton.Left || !ReleaseDrawing())
+        {
+            if (drag?.Button != e.ChangedButton) return;
+            CancelGesture();
+        }
+        if (IsMouseOver) SetCrosshairPosition(e.GetPosition(this));
         e.Handled = true;
     }
 
@@ -812,6 +840,7 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
         drag = null;
         movingAnchor = null;
         if (IsMouseCaptured) ReleaseMouseCapture();
+        SetCrosshairPosition(null);
         InvalidateVisual();
     }
 
@@ -819,6 +848,7 @@ internal sealed partial class CandlePlot(Func<ChartGesture> gesture) : Framework
     {
         drag = null;
         movingAnchor = null;
+        SetCrosshairPosition(null);
         InvalidateVisual();
     }
 
