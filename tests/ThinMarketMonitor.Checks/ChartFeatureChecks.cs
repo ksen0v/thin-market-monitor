@@ -138,11 +138,15 @@ internal static class ChartFeatureChecks
         CheckPriceAndTimeTicks();
         CheckRulerTurnover();
         CheckOverviewIndicatorSettings();
+        CheckCandleRenderingData();
         Console.WriteLine("Chart drawing, grid marks, profiles, live volume joins, ruler turnover and saved indicator options passed.");
     }
 
     private static void CheckRulerTurnover()
     {
+        Check(new[] { 0, .001, 995, 12_500, 3_450_000, 1_230_000_000, 999_999 }
+            .Select(value => ChartVolume.CompactUsd(value)).SequenceEqual(["0", "<0,01", "995", "12,5k", "3,45M", "1,23B", "1M"]),
+            "ruler turnover abbreviates thousands, millions and billions using the chart's number format");
         const long interval = 60_000;
         Candle[] bars =
         [
@@ -216,9 +220,37 @@ internal static class ChartFeatureChecks
         var begin = new DateTimeOffset(2026, 1, 17, 0, 0, 0, TimeSpan.Zero);
         var end = new DateTimeOffset(2026, 5, 22, 0, 0, 0, TimeSpan.Zero);
         var months = ChartAxis.TimeTicks(begin.ToUnixTimeMilliseconds(), end.ToUnixTimeMilliseconds(), 86_400_000, 4, TimeZoneInfo.Utc);
-        Check(months.Select(mark => mark.Label).SequenceEqual(["03.26", "05.26"]) &&
+        Check(months.Select(mark => mark.Label).SequenceEqual(["Mar'26", "May'26"]) &&
             months.All(mark => DateTimeOffset.FromUnixTimeMilliseconds(mark.Time).Day == 1),
             "multi-month marks land on calendar boundaries");
+        var moment = new DateTimeOffset(2026, 11, 23, 13, 41, 15, TimeSpan.FromHours(3));
+        Check(ChartAxis.DateLabel(moment) == "Mon 23 Nov'26 13:41" && ChartAxis.DateLabel(moment, true) == "Mon 23 Nov'26 13:41:15",
+            "timestamp labels match the requested English date format and retain seconds on short timeframes");
+    }
+
+    private static void CheckCandleRenderingData()
+    {
+        var oi = InterestCandle.Build([new(60_000, 12), new(90_000, 11), new(120_000, 18), new(145_000, 14),
+            new(240_000, 8)], 60_000, 65_000);
+        Check(oi is [{ Open: 12, High: 12, Low: 11, Close: 11 }, { Open: 11, High: 18, Low: 11, Close: 14 },
+            { Time: 240_000, Open: 8, Close: 8 }], "OI candles contain actual sampled extrema and leave missing periods empty");
+        var pixels = new CandlePixels();
+        pixels.Reset(.2, 2);
+        pixels.Add(new(1.01, 10, 12, 9, 11, 3, false));
+        pixels.Add(new(1.22, 11, 15, 8, 13, 7, true));
+        pixels.Add(new(1.51, 13, 14, 12, 14, null, false));
+        Check(pixels.Columns is [{ Open: 10, High: 15, Low: 8, Close: 13, Volume: 10, Observed: true }, { Volume: null }]
+            && pixels.Known == 2 && pixels.Total == 3, "dense display columns preserve actual extrema, open, close and volume");
+        pixels.Reset(.15, 1);
+        for (int i = 0; i < 6000; i++) pixels.Add(new(i * .15, 1, 2, .5, 1, null, false));
+        Check(pixels.Total == 6000 && pixels.Columns.Count <= 901, "far zoom limits the rendered bars to device pixels");
+        var live = new LiveCandles(60);
+        live.Add(new("BTCUSDT", 61_000, 2));
+        var display = live.DisplaySnapshot();
+        var retained = live.Snapshot();
+        live.Add(new("BTCUSDT", 62_000, 3));
+        Check(ReferenceEquals(display, live.DisplaySnapshot()) && display[0].Close == 3 && retained[0].Close == 2,
+            "a live tick replaces only the updated bar in the display while independent snapshots stay immutable");
     }
 
     public static async Task Ui()
@@ -305,25 +337,36 @@ internal static class ChartFeatureChecks
             featureMenu.ContextMenu.IsOpen = false;
 
             Click(featureMenu);
-            ClickMenu(featureMenu.ContextMenu.Items.OfType<MenuItem>().First(item => Equals(item.Header, "Binance")));
+            var binanceItem = featureMenu.ContextMenu.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "Binance"));
+            Check(binanceItem.Icon is Image && !featureMenu.ContextMenu.Items.OfType<MenuItem>()
+                .Any(item => Equals(item.Header, "Открытый интерес в USD")), "the indicator menu shows source logos and leaves currency to the panes");
+            ClickMenu(binanceItem);
             featureMenu.ContextMenu.IsOpen = false;
             await requests.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
             Check(settings.ChartIndicators[Bitcoin.Key].Volume && settings.ChartIndicators[Bitcoin.Key].HasInterest &&
-                Field<TextBlock>(cell, "indicatorHint").IsVisible && plot.ActualHeight >= 48,
+                !Field<TextBlock>(cell, "indicatorHint").IsVisible && plot.ActualHeight >= 48,
                 "chart tools work in a 3×3 layout and start requests on demand");
             Click(button);
-            Click(featureMenu);
-            ClickMenu(featureMenu.ContextMenu.Items.OfType<MenuItem>().First(item => Equals(item.Header, "Открытый интерес в USD")));
-            featureMenu.ContextMenu.IsOpen = false;
-            Check(Settings.Deserialize(JsonSerializer.Serialize(settings)).ChartIndicators[Bitcoin.Key].InterestUsd,
-                "the chart's USD unit preference persists between sessions");
+            var surface = Field<ChartSurface>(cell, "chartSurface");
+            var currency = PaneButton(surface, "Единицы OI · Binance");
+            var style = PaneButton(surface, "Вид графика OI · Binance");
+            Check(AutomationProperties.GetItemStatus(style) == "Свечи", "new OI panes start with candles enabled");
+            var initialRun = Field<CancellationTokenSource>(cell, "indicatorRun");
+            Click(currency);
+            Click(style);
+            Check(Settings.Deserialize(JsonSerializer.Serialize(settings)).ChartIndicators[Bitcoin.Key].PresentationFor(Venue.Binance)
+                is { Usd: true, Candles: false } && AutomationProperties.GetItemStatus(style) == "Линия" &&
+                ReferenceEquals(initialRun, Field<CancellationTokenSource>(cell, "indicatorRun")),
+                "a pane toggles currency and plot style without restarting data requests and saves the selection");
+            Click(style);
             Click(featureMenu);
             ClickMenu(featureMenu.ContextMenu.Items.OfType<MenuItem>().First(item => Equals(item.Header, "Lighter")));
             featureMenu.ContextMenu.IsOpen = false;
             var sources = Field<IndicatorDisplay>(plot, "indicators").Interest;
             Check(sources.Select(layer => layer.Venue).SequenceEqual([Venue.Lighter, Venue.Binance]),
                 "the newest enabled exchange is stacked above the previous OI pane");
-            var surface = Field<ChartSurface>(cell, "chartSurface");
+            Check(AutomationProperties.GetItemStatus(PaneButton(surface, "Единицы OI · Lighter")) == "Единицы контракта",
+                "other OI panes keep their own unit setting");
             var run = Field<CancellationTokenSource>(cell, "indicatorRun");
             var less = PaneButton(surface, "Опустить панель OI · Lighter");
             Check(less.IsEnabled && !PaneButton(surface, "Поднять панель OI · Lighter").IsEnabled,
@@ -347,8 +390,8 @@ internal static class ChartFeatureChecks
                 "the close button removes just that OI pane and remembers its layout settings for reopening");
 
             Click(preferences);
-            Check(AutomationProperties.GetItemStatus(preferences) == "Активный раздел" &&
-                ((TextBlock)window.FindName("CatalogStatus")).IsVisible, "bottom settings opens with the network status still visible");
+            Check(AutomationProperties.GetItemStatus(preferences) == "Активный раздел", "bottom navigation marks the settings as active");
+            CheckDiagnostics(window, settings);
             Click(overview);
             await requests.Canceled.Task.WaitAsync(TimeSpan.FromSeconds(5));
             await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
@@ -362,9 +405,11 @@ internal static class ChartFeatureChecks
                 !HeaderButtons(overviewChart).Any(button => Equals(button.Content, "Выбрать")) &&
                 !HeaderButtons(overviewChart).Contains(Field<Button>(overviewChart, "pin")),
                 "choose and pin are present in Signals only");
+            CheckQuickSources(window, settings);
             var overviewEth = new Market(Venue.Gate, "ETH_USDT", "ETH", "USDT", new("futures/usdt", Streaming: false, Perpetual: true));
             overviewChart.Assign(overviewEth, false);
             overviewChart.Plot.Set(bars);
+            CheckPriceLabelsOnMove(overviewChart.Plot, bars);
             CheckCrosshair(overviewChart.Plot);
             var overviewTools = Field<Button>(overviewChart, "indicatorTools");
             ToggleOverview("Объём свечей");
@@ -375,12 +420,13 @@ internal static class ChartFeatureChecks
                 [overviewView, CandleCenter(bars[0]), CandleCenter(bars[1])])! == "Оборот 125 USD",
                 "ruler turnover uses the visible selection even when the volume overlay is disabled");
             ToggleOverview("Профиль по сделкам");
-            ToggleOverview("Открытый интерес в USD");
             ToggleOverview("Binance");
+            Click(PaneButton(Field<ChartSurface>(overviewChart, "chartSurface"), "Единицы OI · Binance"));
             ToggleOverview("Lighter");
             overviewChart.Assign(Bitcoin with { Contract = Bitcoin.Contract! with { Streaming = false } }, false);
             var overviewDisplay = Field<IndicatorDisplay>(overviewChart.Plot, "indicators");
-            Check(overviewDisplay.Market.Key == Bitcoin.Key && overviewDisplay.Options is { Volume: false, Profile: true, InterestUsd: true } &&
+            Check(overviewDisplay.Market.Key == Bitcoin.Key && overviewDisplay.Options is { Volume: false, Profile: true } &&
+                overviewDisplay.Options.PresentationFor(Venue.Binance).Usd && !overviewDisplay.Options.PresentationFor(Venue.Lighter).Usd &&
                 overviewDisplay.Interest.Select(layer => layer.Venue).SequenceEqual([Venue.Lighter, Venue.Binance]) &&
                 settings.ChartIndicators[Bitcoin.Key] is { Volume: true, Profile: false },
                 "Overview settings follow the next instrument without affecting a Signals chart of the same market");
@@ -443,6 +489,102 @@ internal static class ChartFeatureChecks
     private static Button[] HeaderButtons(ChartCell chart) => ((DockPanel)Field<Border>(chart, "headerFrame").Child)
         .Children.OfType<StackPanel>().SelectMany(panel => panel.Children.OfType<Button>()).ToArray();
 
+    private static void CheckDiagnostics(MainWindow window, Settings settings)
+    {
+        window.UpdateLayout();
+        var panel = Field<SettingsPanel>(window, "settingsPanel");
+        var nav = Field<Button[]>(panel, "navigation");
+        var pages = Field<FrameworkElement[]>(panel, "pages");
+        var mode = ((StackPanel)pages[10]).Children.OfType<CheckBox>().Single();
+        var formula = Field<List<TextBlock>>(panel, "diagnosticCopy").Single(block => block.Text.StartsWith("Спред ="));
+        var catalog = (TextBlock)window.FindName("CatalogStatus");
+        var log = Field<TextBlock>(panel, "result");
+        var integration = (Border)window.FindName("IntegrationStatusHost");
+        var colibri = Field<ColibriBridge>(window, "colibri");
+        var report = typeof(ColibriBridge).GetMethod("Report", Private)!;
+        var overview = Field<OverviewPanel>(window, "overviewPanel");
+        var overviewStatus = Field<TextBlock>(overview, "status");
+        overview.SetSource([Bitcoin], false, details: "Техническая причина");
+        settings.ColibriEnabled = true;
+        report.Invoke(colibri, ["Стакан переключён", false]);
+        typeof(MainWindow).GetMethod("ShowCatalogStatus", Private)!.Invoke(window, ["26 монет после фильтра", "Детали источника", null]);
+        Check(GroupOf(nav[0]) == "Сигналы" && GroupOf(nav[5]) == "Обзор" && GroupOf(nav[6]) == "Общие" &&
+            pages[0].IsVisible && formula.Visibility == Visibility.Collapsed && !catalog.IsVisible && !integration.IsVisible &&
+            overviewStatus.Visibility == Visibility.Collapsed && overviewStatus.ToolTip == null && !log.IsVisible,
+            "normal mode hides routine diagnostics and settings are grouped by workspace");
+
+        nav[10].RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Toggle(true);
+        nav[0].RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Check(settings.DebugMode && Settings.Deserialize(JsonSerializer.Serialize(settings)).DebugMode &&
+            catalog.IsVisible && catalog.Text == "26 монет после фильтра" &&
+            ((TextBlock)window.FindName("StreamStatus")).IsVisible && integration.IsVisible && log.IsVisible && formula.IsVisible &&
+            overviewStatus.Visibility == Visibility.Visible && Equals(overviewStatus.ToolTip, "Техническая причина"),
+            "the settings switch immediately restores diagnostics and survives reload");
+        nav[5].RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Check(!log.IsVisible, "the Overview settings do not display diagnostic counters from Signals");
+        nav[10].RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Toggle(false);
+        report.Invoke(colibri, ["Точное соответствие не найдено", true]);
+        Check(!settings.DebugMode && !catalog.IsVisible && integration.IsVisible && formula.Visibility == Visibility.Collapsed,
+            "turning diagnostics off preserves actionable integration errors");
+        settings.ColibriEnabled = false;
+        report.Invoke(colibri, ["", false]);
+
+        void Toggle(bool enabled)
+        {
+            mode.IsChecked = enabled;
+            mode.RaiseEvent(new RoutedEventArgs(CheckBox.ClickEvent));
+            window.UpdateLayout();
+        }
+        static string GroupOf(Button button) => AutomationProperties.GetName(((FrameworkElement)button.Parent).Parent);
+    }
+
+    private static void CheckQuickSources(MainWindow window, Settings settings)
+    {
+        var bar = (WrapPanel)window.FindName("OverviewQuickSources");
+        Check(bar.Children.OfType<Button>().Select(item => (Venue)item.Tag)
+            .SequenceEqual([Venue.Binance, Venue.Okx, Venue.Bybit, Venue.Gate, Venue.Mexc]), "the quick row initially has five major exchanges");
+        var overview = Field<OverviewPanel>(window, "overviewPanel");
+        overview.SelectSource(new(Venue.KuCoin, Segment.Futures));
+        var button = bar.Children.OfType<Button>().Single(item => Equals(item.Tag, Venue.Bybit));
+        settings.OverviewFuturesRules[Venue.Gate] = ListingRule.Exclude;
+        settings.OverviewSpotRules[Venue.Htx] = ListingRule.Require;
+        button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Check(settings.OverviewSource == new MarketSource(Venue.Bybit, Segment.Futures)
+            && AutomationProperties.GetItemStatus(button) == "Текущий источник"
+            && settings.OverviewFuturesRules[Venue.Gate] == ListingRule.Exclude && settings.OverviewSpotRules[Venue.Htx] == ListingRule.Require,
+            "a quick button changes source in the current segment and preserves both sets of listing rules");
+        overview.SelectSource(new(Venue.Kraken, Segment.Futures));
+        overview.SelectSource(new(Venue.Bybit, Segment.Futures));
+        var reopened = Settings.Deserialize(JsonSerializer.Serialize(settings));
+        Check(reopened.QuickOverviewVenues().First() == Venue.Bybit && reopened.QuickOverviewVenues().Contains(Venue.Kraken),
+            "source selection in either menu affects the persisted top five");
+    }
+
+    private static void CheckPriceLabelsOnMove(CandlePlot plot, Candle[] bars)
+    {
+        typeof(CandlePlot).GetMethod("SetPrice", Private)!.Invoke(plot, [8d, 8d]);
+        (Point Origin, string Text)[]? baseline = null;
+        foreach (double price in new[] { 12.4, 12.01, 12, 11.99, 11.6, 12.04 })
+        {
+            plot.Set([bars[0], bars[1] with { Close = price }]);
+            plot.UpdateLayout();
+            var view = typeof(CandlePlot).GetMethod("CurrentView", Private)!.Invoke(plot, null)!;
+            var graph = (Rect)view.GetType().GetProperty("Plot")!.GetValue(view)!;
+            var current = Drawings(VisualTreeHelper.GetDrawing(plot)).ToArray();
+            var grid = current.OfType<GlyphRunDrawing>()
+                .Where(run => run.GlyphRun.BaselineOrigin.X > graph.Right && run.GlyphRun.BaselineOrigin.Y <= graph.Bottom)
+                .Select(run => (run.GlyphRun.BaselineOrigin, string.Join(",", run.GlyphRun.GlyphIndices))).ToArray();
+            var badge = current.OfType<GeometryDrawing>().Select(item => item.Geometry).OfType<RectangleGeometry>()
+                .Single(rect => Math.Abs(rect.Rect.Right - graph.Right + 1) < .001).Rect;
+            Check(grid.Length >= 3 && badge.Right < graph.Right && (baseline == null || grid.SequenceEqual(baseline)),
+                "grid labels and the market-price badge remain visible when consecutive live ticks cross a grid value");
+            baseline ??= grid;
+        }
+        plot.Set(bars, reset: true);
+    }
+
     private static Point CheckCrosshair(CandlePlot plot, Rect? pane = null)
     {
         plot.UpdateLayout();
@@ -458,7 +600,7 @@ internal static class ChartFeatureChecks
             Check(lines.Any(line => line.StartPoint == at && line.EndPoint == new Point(graph.Left, at.Y)) &&
                 lines.Any(line => line.StartPoint == at && line.EndPoint.X == at.X && line.EndPoint.Y < at.Y) &&
                 badges.Any(badge => badge.Rect.Bottom == plot.ActualHeight && badge.Rect.Left <= at.X && at.X <= badge.Rect.Right) &&
-                badges.Any(badge => IsValueBadge(badge.Rect, graph) && badge.Rect.Top <= at.Y && at.Y <= badge.Rect.Bottom) &&
+                badges.Any(badge => badge.Rect.Left == graph.Right && badge.Rect.Top <= at.Y && at.Y <= badge.Rect.Bottom) &&
                 drawings.OfType<GlyphRunDrawing>().Count() >= 2 &&
                 plot.IsArrangeValid, "both guides follow the cursor without invalidating layout of the plot");
         }
@@ -482,11 +624,11 @@ internal static class ChartFeatureChecks
         long time = ticks[^1].Time;
         Check(GridLine(X(before), true) && GridLine(Y(before), false), "the plot draws the price and time grid at the round scale marks");
         var marketBadge = Drawings(VisualTreeHelper.GetDrawing(plot)).OfType<GeometryDrawing>()
-            .Select(item => item.Geometry).OfType<RectangleGeometry>().Single(rect => rect.Rect.Left == graph.Right).Rect;
+            .Select(item => item.Geometry).OfType<RectangleGeometry>().Single(rect => Math.Abs(rect.Rect.Right - graph.Right + 1) < .001).Rect;
         SetCrosshair(plot, new Point(anchor.X, marketBadge.Top + marketBadge.Height / 2));
         var cursorBadges = Drawings(CrosshairVisual(plot).Drawing).OfType<GeometryDrawing>()
             .Select(item => item.Geometry).OfType<RectangleGeometry>().Select(rect => rect.Rect).ToArray();
-        Check(cursorBadges.Any(rect => IsValueBadge(rect, graph) && !rect.IntersectsWith(marketBadge)),
+        Check(cursorBadges.Any(rect => rect.Left == graph.Right && !rect.IntersectsWith(marketBadge)),
             $"cursor and live-price labels remain readable when their price levels coincide ({graph}, {marketBadge}, {string.Join(" | ", cursorBadges)})");
 
         double dx = -.12 * graph.Width, dy = .12 * graph.Height;
@@ -523,9 +665,6 @@ internal static class ChartFeatureChecks
         string GlyphSignature() => string.Join(",", Drawings(CrosshairVisual(plot).Drawing).OfType<GlyphRunDrawing>()
             .SelectMany(run => run.GlyphRun.GlyphIndices));
     }
-
-    private static bool IsValueBadge(Rect badge, Rect plot) =>
-        badge.Left == plot.Right || Math.Abs(badge.Right - plot.Right + 1) < .001;
 
     private static IEnumerable<Drawing> Drawings(Drawing? drawing) => drawing switch
     {
@@ -605,6 +744,29 @@ internal static class ChartFeatureChecks
         var onScale = new Point(graphs[0].Right + 5, Center(0).Y);
         Check((bool)typeof(CandlePlot).GetMethod("StartInterestAxisDrag", Private)!.Invoke(plot, [onScale, view, true])! &&
             Ruler(0, "USD").Scale == upperScale, "a double click on an OI scale restores auto on that pane");
+
+        var priceView = view;
+        var pan = ruler.Invoke(plot, [Center(0), view])!;
+        var interestView = Field<object>(pan, "Item1", BindingFlags.Public | BindingFlags.Instance);
+        var mode = Enum.Parse(typeof(CandlePlot).GetNestedType("Operation", BindingFlags.NonPublic)!, "InterestPan");
+        var drag = typeof(CandlePlot).GetNestedType("Drag", BindingFlags.NonPublic)!.GetConstructors().Single()
+            .Invoke([mode, Center(0), interestView, (double)CandlePlot.DefaultVisibleBars, MouseButton.Left, upper]);
+        var move = typeof(CandlePlot).GetMethod("MoveGesture", Private)!;
+        var priorScale = Ruler(0, "USD").Scale;
+        double dy = -graphs[0].Height * 4;
+        double dx = -graphs[0].Width * .05;
+        move.Invoke(plot, [drag, Center(0) + new Vector(dx, dy)]);
+        view = typeof(CandlePlot).GetMethod("CurrentView", Private)!.Invoke(plot, null)!;
+        var viewType = view.GetType();
+        var shifted = Ruler(0, "USD").Scale;
+        Check(shifted.Low < priorScale.Low && Math.Abs((shifted.High - shifted.Low) - (priorScale.High - priorScale.Low)) < .01 &&
+            Ruler(1, "USD").Scale == lowerScale && Equals(viewType.GetProperty("Low")!.GetValue(view), viewType.GetProperty("Low")!.GetValue(priceView)) &&
+            (double)viewType.GetProperty("End")!.GetValue(view)! > (double)viewType.GetProperty("End")!.GetValue(priceView)!,
+            "dragging an OI pane moves its value range and the common time axis while preserving the other vertical scales");
+        move.Invoke(plot, [drag, Center(0)]);
+        view = typeof(CandlePlot).GetMethod("CurrentView", Private)!.Invoke(plot, null)!;
+        Check(Math.Abs(Ruler(0, "USD").Scale.Low - priorScale.Low) < .01, "dragging back restores the initial OI range");
+        typeof(CandlePlot).GetMethod("StartInterestAxisDrag", Private)!.Invoke(plot, [onScale, view, true]);
         plot.UpdateIndicators(display with { Options = options with { InterestUsd = false } });
         Check(Ruler(1, "BTC").Scale.High < 200_000, "switching back uses the original contract units");
         plot.UpdateIndicators(display with { Interest = [lighter with { Reading = null }, binance] });

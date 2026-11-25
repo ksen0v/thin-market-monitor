@@ -18,7 +18,7 @@ internal sealed class ChartFeatures(Settings settings, ExchangeApi api, Func<Mar
     public System.Windows.Input.ModifierKeys Magnet => settings.ChartMagnet;
     public event Action<string>? DrawingsChanged;
     public event Action<string, bool>? IndicatorsChanged;
-    public event Action<string, bool>? InterestOrderChanged;
+    public event Action<string, bool>? IndicatorPresentationChanged;
     public event Action<string>? PaneWeightsChanged;
     public ChartDrawing[] Drawings(string key) => settings.ChartDrawings.GetValueOrDefault(key) ?? [];
     public ChartIndicatorOptions Options(string key, bool overview)
@@ -40,13 +40,14 @@ internal sealed class ChartFeatures(Settings settings, ExchangeApi api, Func<Mar
         DrawingsChanged?.Invoke(key);
     }
 
-    public void SetOptions(string key, bool overview, ChartIndicatorOptions options, bool orderOnly = false)
+    public void SetOptions(string key, bool overview, ChartIndicatorOptions options, bool presentationOnly = false)
     {
         if (overview) SetOverviewOptions(key, options);
-        else if (options.Volume && !options.HasDetails && !options.InterestUsd) settings.ChartIndicators.Remove(key);
+        else if (options.Volume && !options.HasDetails && !options.InterestUsd && options.InterestPresentation is not { Count: > 0 })
+            settings.ChartIndicators.Remove(key);
         else settings.ChartIndicators[key] = options;
         save();
-        (orderOnly ? InterestOrderChanged : IndicatorsChanged)?.Invoke(key, overview);
+        (presentationOnly ? IndicatorPresentationChanged : IndicatorsChanged)?.Invoke(key, overview);
     }
 
     private void SetOverviewOptions(string key, ChartIndicatorOptions options)

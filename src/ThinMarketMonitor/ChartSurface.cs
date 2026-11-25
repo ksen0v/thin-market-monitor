@@ -9,26 +9,31 @@ namespace ThinMarketMonitor;
 internal sealed class ChartSurface : Panel
 {
     private const double ButtonWidth = 22;
-    internal const double ControlsWidth = 3 * ButtonWidth;
+    internal const double ControlsWidth = 5 * ButtonWidth;
     private readonly CandlePlot plot;
     private readonly Action<Venue, int> move;
     private readonly Action<Venue> close;
     private readonly Action<ChartPaneWeights?> save;
+    private readonly Action<Venue> toggleCurrency;
+    private readonly Action<Venue> toggleStyle;
     private readonly Dictionary<Venue, PaneControls> controls = [];
     private string? marketKey;
     private Venue[] order = [];
     private ChartPaneWeights? weights, preview;
     private ResizeGesture? resize;
 
-    private sealed record PaneControls(Thumb Divider, StackPanel Buttons, Button Up, Button Down);
+    private sealed record PaneControls(Thumb Divider, StackPanel Buttons, Button Up, Button Down, Button Currency, Button Style);
     private sealed record ResizeGesture(Thumb Divider, int Boundary, double StartY, double[] Heights);
 
-    internal ChartSurface(CandlePlot plot, Action<Venue, int> move, Action<Venue> close, Action<ChartPaneWeights?> save)
+    internal ChartSurface(CandlePlot plot, Action<Venue, int> move, Action<Venue> close, Action<ChartPaneWeights?> save,
+        Action<Venue> toggleCurrency, Action<Venue> toggleStyle)
     {
         this.plot = plot;
         this.move = move;
         this.close = close;
         this.save = save;
+        this.toggleCurrency = toggleCurrency;
+        this.toggleStyle = toggleStyle;
         Children.Add(plot);
         plot.InterestPanesChanged += UpdatePanes;
     }
@@ -57,10 +62,14 @@ internal sealed class ChartSurface : Panel
         save(value);
     }
 
-    private void UpdatePanes(string? key, InterestLayer[] layers)
+    private void UpdatePanes(string? key, InterestLayer[] layers, ChartIndicatorOptions options)
     {
         if (key == marketKey && order.Length == layers.Length &&
-            !order.Where((venue, index) => venue != layers[index].Venue).Any()) return;
+            !order.Where((venue, index) => venue != layers[index].Venue).Any())
+        {
+            UpdatePresentation(options);
+            return;
+        }
         CancelResize();
         marketKey = key;
         order = layers.Select(layer => layer.Venue).ToArray();
@@ -82,7 +91,24 @@ internal sealed class ChartSurface : Panel
             KeyboardNavigation.SetTabIndex(pane.Divider, index * 2);
             KeyboardNavigation.SetTabIndex(pane.Buttons, index * 2 + 1);
         }
+        UpdatePresentation(options);
         InvalidateMeasure();
+    }
+
+    private void UpdatePresentation(ChartIndicatorOptions options)
+    {
+        foreach (var (venue, pane) in controls)
+        {
+            var presentation = options.PresentationFor(venue);
+            pane.Currency.Foreground = Terminal.Brush(presentation.Usd ? "Accent" : "Text");
+            pane.Currency.ToolTip = presentation.Usd ? "Показать в единицах контракта" : "Показать в USD";
+            AutomationProperties.SetItemStatus(pane.Currency, presentation.Usd ? "USD" : "Единицы контракта");
+            if (pane.Style.Tag is bool shown && shown == presentation.Candles) continue;
+            pane.Style.Tag = presentation.Candles;
+            pane.Style.Content = Terminal.Icon(presentation.Candles ? "candles" : "line-chart");
+            pane.Style.ToolTip = presentation.Candles ? "Свечи по замерам OI · переключить на линию" : "Переключить на свечи по замерам OI";
+            AutomationProperties.SetItemStatus(pane.Style, presentation.Candles ? "Свечи" : "Линия");
+        }
     }
 
     private PaneControls CreateControls(Venue venue)
@@ -127,13 +153,17 @@ internal sealed class ChartSurface : Panel
         Button up = ActionButton("chevron-up", $"Поднять панель OI · {source}", () => move(venue, -1));
         Button down = ActionButton("chevron", $"Опустить панель OI · {source}", () => move(venue, 1));
         Button remove = ActionButton("close", $"Закрыть панель OI · {source}", () => close(venue));
+        Button currency = ActionButton("dollar", $"Единицы OI · {source}", () => toggleCurrency(venue));
+        Button style = ActionButton("candles", $"Вид графика OI · {source}", () => toggleStyle(venue));
         var actions = new StackPanel { Orientation = Orientation.Horizontal };
+        actions.Children.Add(style);
+        actions.Children.Add(currency);
         actions.Children.Add(up);
         actions.Children.Add(down);
         actions.Children.Add(remove);
         Children.Add(divider);
         Children.Add(actions);
-        return new(divider, actions, up, down);
+        return new(divider, actions, up, down, currency, style);
     }
 
     private void PreviewResize(Thumb divider, double y)

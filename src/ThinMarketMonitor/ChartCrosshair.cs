@@ -12,7 +12,8 @@ internal sealed partial class CandlePlot
     private readonly Brush crosshairLabelText = Terminal.Brush("Text");
     private View? crosshairView;
     private double crosshairPriceStep;
-    private Rect lastPriceBadge = Rect.Empty;
+    private Rect crosshairPriceBadge = Rect.Empty;
+    private Geometry? crosshairPriceClip;
     private IReadOnlyList<InterestScale?> crosshairInterestScales = [];
     private (Rect Bounds, RectangleGeometry Clip)[] crosshairPanes = [];
     private Rect crosshairPricePane = Rect.Empty;
@@ -40,10 +41,16 @@ internal sealed partial class CandlePlot
     {
         crosshairView = view;
         crosshairPriceStep = priceStep;
-        lastPriceBadge = priceBadge;
         crosshairInterestScales = interestScales;
         var price = view?.Plot ?? Rect.Empty;
         var heights = view?.PaneHeights;
+        if (priceBadge != crosshairPriceBadge || price != crosshairPricePane)
+        {
+            crosshairPriceBadge = priceBadge;
+            crosshairPriceClip = priceBadge.IsEmpty ? null : new CombinedGeometry(GeometryCombineMode.Exclude,
+                new RectangleGeometry(price), new RectangleGeometry(priceBadge));
+            crosshairPriceClip?.Freeze();
+        }
         if (price != crosshairPricePane || !crosshairPaneHeights.AsSpan().SequenceEqual(heights.AsSpan()))
         {
             crosshairPricePane = price;
@@ -83,7 +90,7 @@ internal sealed partial class CandlePlot
         for (int i = 0; i < crosshairPanes.Length; i++)
         {
             var (bounds, clip) = crosshairPanes[i];
-            dc.PushClip(clip);
+            dc.PushClip(i == 0 ? crosshairPriceClip ?? clip : clip);
             dc.DrawLine(crosshairStroke, at, top);
             dc.DrawLine(crosshairStroke, at, bottom);
             if (i == active)
@@ -99,7 +106,7 @@ internal sealed partial class CandlePlot
     private void DrawCrosshairLabels(DrawingContext dc, View view, Point at, int active)
     {
         var moment = DateTimeOffset.FromUnixTimeMilliseconds((long)Math.Floor(view.Time(at.X))).ToLocalTime();
-        var time = Text(moment.ToString(Frame < 60 ? "dd.MM.yy HH:mm:ss" : "dd.MM.yy HH:mm", Russian), crosshairLabelText);
+        var time = Text(ChartAxis.DateLabel(moment, seconds: Frame < 60), crosshairLabelText);
         FitAxisLabel(time, view.Plot.Width - 8);
         double width = Math.Min(view.Plot.Width, time.Width + 8);
         double x = Math.Clamp(at.X - width / 2, view.Plot.Left, Math.Max(view.Plot.Left, view.Plot.Right - width));
@@ -120,26 +127,11 @@ internal sealed partial class CandlePlot
         }
         if (value == null) return;
         var number = Text(value, crosshairLabelText);
-        double numberX = pane.Right;
         double axisWidth = ActualWidth - pane.Right;
         FitAxisLabel(number, axisWidth - 7);
         double height = Math.Min(pane.Height, number.Height + 3);
         double y = Math.Clamp(at.Y - height / 2, pane.Top, Math.Max(pane.Top, pane.Bottom - height));
-        if (active == 0 && !lastPriceBadge.IsEmpty && y < lastPriceBadge.Bottom + 1 && y + height > lastPriceBadge.Top - 1)
-        {
-            double above = lastPriceBadge.Top - height - 1;
-            double below = lastPriceBadge.Bottom + 1;
-            if (above >= pane.Top && (at.Y <= lastPriceBadge.Top + lastPriceBadge.Height / 2 || below + height > pane.Bottom))
-                y = above;
-            else if (below + height <= pane.Bottom)
-                y = below;
-            else
-            {
-                axisWidth = Math.Min(pane.Width - 1, number.Width + 8);
-                numberX = pane.Right - axisWidth - 1;
-            }
-        }
-        DrawCrosshairLabel(dc, number, new Rect(numberX, y, axisWidth, height), centered: false);
+        DrawCrosshairLabel(dc, number, new Rect(pane.Right, y, axisWidth, height), centered: false);
     }
 
     private void DrawCrosshairLabel(DrawingContext dc, FormattedText label, Rect bounds, bool centered)

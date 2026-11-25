@@ -130,7 +130,8 @@ internal sealed class SignalListingsPanel : Border
         button.Background = Terminal.Brush(background);
         string label = $"{venue.Label} · {caption}";
         AutomationProperties.SetName(button, label);
-        button.ToolTip = catalogs.TryGetValue(venue, out var catalog) && catalog.Error != null
-            ? $"{label}\nКаталог недоступен · {catalog.Error}" : label;
+        if (catalogs.TryGetValue(venue, out var catalog) && catalog.Error != null)
+            label += settings.DebugMode ? $"\nКаталог недоступен · {catalog.Error}" : "\nКаталог недоступен";
+        button.ToolTip = label;
     }
 }

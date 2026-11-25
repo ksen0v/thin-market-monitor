@@ -9,8 +9,8 @@ internal sealed partial class SettingsPanel
     {
         var panel = new StackPanel();
         panel.Children.Add(Terminal.Heading("Чёрный список сигналов"));
-        panel.Children.Add(Terminal.Copy("Кнопка ⊘ в заголовке каждой ячейки исключает монету из сигналов и их списка инструментов. Исключение действует для всех бирж, пар, Spot и Futures этой монеты."));
-        panel.Children.Add(Terminal.Copy("Чтобы снова получать сигналы, удалите монету из списка ниже. Обзор остаётся доступен."));
+        panel.Children.Add(Terminal.Copy("Монеты, исключённые из сигналов на всех биржах."));
+        AddDiagnostic(panel, "Кнопка ⊘ на графике исключает монету во всех парах и сегментах. Удаление из списка возвращает сигналы.");
         var list = new StackPanel { Margin = new Thickness(0, 12, 0, 0) };
         panel.Children.Add(list);
         Render();

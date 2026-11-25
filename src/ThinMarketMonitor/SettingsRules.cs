@@ -22,7 +22,7 @@ internal sealed partial class SettingsPanel
         var panel = new StackPanel();
         panel.Children.Add(Terminal.Heading("Модули"));
         var price = ModuleButton("Импульс цены", () => settings.PriceModule, enabled => settings.PriceModule = enabled);
-        var migration = Terminal.Copy("Импульс объёма переведён из долларов в проценты. Ваши периоды и переключатели сохранены, новые стартовые пороги — +100% (вдвое среднего). Модуль выключен: проверьте пороги и включите его самостоятельно.");
+        var migration = Terminal.Copy("Для импульса объёма теперь используются проценты. Проверьте пороги перед включением.");
         migration.Foreground = Terminal.Brush("Accent");
         migration.Visibility = settings.VolumePercentMigrationPending ? Visibility.Visible : Visibility.Collapsed;
         panel.Children.Add(migration);
@@ -49,7 +49,8 @@ internal sealed partial class SettingsPanel
         var heading = Terminal.Copy(label, muted: false);
         heading.FontWeight = FontWeights.SemiBold;
         panel.Children.Add(heading);
-        panel.Children.Add(Terminal.Copy("Для импульсов цены и объёма на всех биржах. 0 — выключено."));
+        panel.Children.Add(Terminal.Copy("0 минут — без паузы."));
+        AddDiagnostic(panel, "Пауза действует для обоих типов импульсов по этой монете на всех биржах.");
         var row = new WrapPanel { Margin = new Thickness(0, 7, 0, 0) };
         panel.Children.Add(row);
         var entry = new TextBox
@@ -140,17 +141,19 @@ internal sealed partial class SettingsPanel
         string unit = filter ? "USD" : "%";
         panel.Children.Add(Terminal.Heading(kind switch
         {
-            RuleKind.Price => "Импульс цены", RuleKind.Volume => "Импульс объёма", _ => "Фильтры списка"
+            RuleKind.Price => "Импульс цены", RuleKind.Volume => "Импульс объёма", _ => "Фильтры сигналов"
         }));
         panel.Children.Add(Terminal.Copy(kind switch
         {
-            RuleKind.Price => "Рост цены в скользящем окне.",
-            RuleKind.Volume => "Рост оборота исполненных сделок относительно среднего: +100% = вдвое среднего. Покупки и продажи суммируются.",
-            _ => "Минимальный объём после фильтра листингов. Действуют все включённые условия. USD-стейблкоины ≈ $1."
+            RuleKind.Price => "Порог роста цены за выбранный период.",
+            RuleKind.Volume => "Порог роста оборота к среднему.",
+            _ => "Минимальный оборот за выбранный период."
         }));
+        if (price) AddDiagnostic(panel, "Рост цены считается в скользящем окне.");
+        if (kind == RuleKind.Volume) AddDiagnostic(panel, "+100% означает удвоение оборота. Покупки и продажи суммируются.");
         if (filter)
         {
-            panel.Children.Add(Terminal.Copy("24 ч — данные тикера. Остальные периоды — завершённые минутные свечи."));
+            AddDiagnostic(panel, "Должны выполняться все включённые условия. Оборот за 24 ч берётся из тикера, за остальные периоды — из завершённых минутных свечей. Стейблкоины оцениваются по номиналу.");
             var leveraged = new CheckBox { Content = "Исключать из сигналов токены с плечом (3L, 3S, 5L, 5S)",
                 IsChecked = settings.HideSignalLeveragedTokens, Margin = new Thickness(0, 8, 0, 0) };
             leveraged.Click += (_, _) =>
@@ -334,7 +337,7 @@ internal sealed partial class SettingsPanel
     {
         var panel = new StackPanel();
         panel.Children.Add(Terminal.Heading("Графики"));
-        panel.Children.Add(Terminal.Copy("ЛКМ в области графика сдвигает обе оси. ЛКМ на шкале меняет её масштаб."));
+        AddDiagnostic(panel, "ЛКМ в области графика сдвигает обе оси. ЛКМ на шкале меняет её масштаб.");
         var ruler = AddShortcut("Линейка цены", settings.Ruler.Label);
         var fullscreen = AddShortcut("Полный экран", settings.Fullscreen.ToString());
         var up = AddShortcut("Следующий таймфрейм", settings.FrameUp.ToString());
@@ -372,7 +375,7 @@ internal sealed partial class SettingsPanel
         }
         panel.Children.Add(Terminal.Copy("Кнопки таймфреймов в ячейках"));
         panel.Children.Add(frames);
-        panel.Children.Add(Terminal.Copy("Если линейка назначена на ЛКМ, она получает область графика. Шкалы и колесо остаются доступными."));
+        AddDiagnostic(panel, "Если линейка назначена на ЛКМ, она получает область графика. Шкалы и колесо остаются доступны.");
         shortcutStatus = Terminal.Copy("");
         shortcutStatus.Margin = new Thickness(0, 8, 0, 0);
         panel.Children.Add(shortcutStatus);
@@ -459,7 +462,7 @@ internal sealed partial class SettingsPanel
         };
         panel.Children.Add(hideLeveraged);
         panel.Children.Add(Terminal.Heading("Колонки обзора"));
-        panel.Children.Add(Terminal.Copy("Потяните границу заголовка, чтобы изменить ширину. Двойной щелчок возвращает автоширину. ATR% — средний истинный диапазон за период, делённый на последнюю цену закрытия. Спред% — текущая разница лучших ask и bid относительно их средней цены; период не нужен."));
+        AddDiagnostic(panel, "ATR в процентах — средний истинный диапазон к последней цене закрытия. Спред — разница лучших bid и ask к их средней цене.");
         var list = new StackPanel { Margin = new Thickness(0, 10, 0, 8) };
         panel.Children.Add(list);
         var addBar = new WrapPanel();

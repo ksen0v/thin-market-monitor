@@ -23,11 +23,11 @@ internal static class OverviewMetrics
     public static string Display(MetricKind kind, double number)
     {
         if (!double.IsFinite(number)) return "—";
-        if (kind == MetricKind.Turnover) return CompactTurnover(number);
+        if (kind == MetricKind.Turnover) return ChartVolume.CompactUsd(number, "K");
         if (kind == MetricKind.Change)
         {
-            double rounded = Math.Round(number, MidpointRounding.AwayFromZero);
-            return rounded == 0 ? "0%" : rounded.ToString("0", Russian) + "%";
+            double rounded = Math.Round(number, 2, MidpointRounding.AwayFromZero);
+            return rounded == 0 ? "0%" : rounded.ToString("0.##", Russian) + "%";
         }
         if (number is > 0 and < 0.01) return "<0,01%";
         return number.ToString("0.##", Russian) + "%";
@@ -39,20 +39,6 @@ internal static class OverviewMetrics
         if (kind == MetricKind.Turnover) return number.ToString("N2", Russian) + " USD";
         string format = Math.Abs(number) is > 0 and < 0.0000000001 ? "G10" : "0.##########";
         return number.ToString(format, Russian) + "%";
-    }
-
-    private static string CompactTurnover(double amount)
-    {
-        if (amount is > 0 and < 1) return "<1";
-        var (unit, suffix) = amount switch
-        {
-            >= 1e12 => (1e12, "T"),
-            >= 1e9 => (1e9, "B"),
-            >= 1e6 => (1e6, "M"),
-            >= 1e3 => (1e3, "K"),
-            _ => (1d, "")
-        };
-        return Math.Floor(amount / unit).ToString("0", Russian) + suffix;
     }
 
     public static double? Calculate(Market m, Candle[] bars, int frame, long end, OverviewColumn metric)
@@ -114,6 +100,8 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
     private Market[] markets = [];
     private MarketSource boundSource;
     private string? catalogDetails;
+    private string? catalogPending;
+    private bool catalogUnavailable;
     private string? spreadDetails;
     private bool loadingSelection;
     private bool shown;
@@ -231,20 +219,9 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
             };
             row.Click += (_, _) =>
             {
-                if (choosingSource)
-                {
-                    choosingSource = false;
-                    if (settings.OverviewSource == market) { UpdateSourceOptions(); return; }
-                    settings.OverviewSource = market;
-                    settings.OverviewChoice = null;
-                    loadedCatalog = false;
-                    UpdateSourceButton();
-                }
-                else
-                {
-                    if (settings.OverviewSource == market) return;
-                    settings.CycleListingRule(market, overview: true);
-                }
+                if (choosingSource) { SelectSource(market); return; }
+                if (settings.OverviewSource == market) return;
+                settings.CycleListingRule(market, overview: true);
                 UpdateSourceOptions();
                 changed();
             };
@@ -298,6 +275,16 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
             sourceMenu.IsOpen = true;
         };
         IsVisibleChanged += (_, _) => { if (!IsVisible) sourceMenu.IsOpen = false; };
+    }
+
+    internal void SelectSource(MarketSource market)
+    {
+        choosingSource = false;
+        if (!settings.SelectOverviewSource(market)) { UpdateSourceOptions(); return; }
+        loadedCatalog = false;
+        UpdateSourceButton();
+        UpdateSourceOptions();
+        changed();
     }
 
     private void UpdateSourceOptions()
@@ -421,10 +408,13 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
             throw new NotSupportedException();
     }
 
-    public void SetSource(IReadOnlyList<Market> next, bool visible, string? pending = null, string? details = null)
+    public void SetSource(IReadOnlyList<Market> next, bool visible, string? pending = null, string? details = null,
+        bool catalogUnavailable = false)
     {
         shown = visible;
         catalogDetails = details;
+        catalogPending = pending;
+        this.catalogUnavailable = catalogUnavailable;
         bool sameSource = loadedCatalog && boundSource == settings.OverviewSource;
         var matching = settings.OverviewQuotes == null && !settings.HideOverviewLeveragedTokens
             ? next : next.Where(settings.ShowsOverviewMarket).ToArray();
@@ -471,8 +461,7 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
         }
         else if (visible && worker == null && rows.Length > 0 && columns.Length > 0) Restart();
         else if (!visible) Cancel();
-        if (matching.Count == 0) status.Text = pending ?? "Нет инструментов по этим условиям";
-        UpdateStatusTip();
+        UpdateDiagnostics();
     }
 
     private Row GetCatalogRow(Market market, HashSet<Row> previouslyVisible)
@@ -622,7 +611,16 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
         }
     }
 
-    private void UpdateStatusTip() => status.ToolTip = catalogDetails == null ? spreadDetails :
+    internal void UpdateDiagnostics()
+    {
+        status.Visibility = settings.DebugMode || rows.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        if (rows.Length == 0)
+            status.Text = catalogPending == null ? "Нет инструментов по этим условиям" : settings.DebugMode ? catalogPending
+                : catalogUnavailable ? "Каталог недоступен" : "Загрузка инструментов…";
+        UpdateStatusTip();
+    }
+
+    private void UpdateStatusTip() => status.ToolTip = !settings.DebugMode ? null : catalogDetails == null ? spreadDetails :
         spreadDetails == null ? catalogDetails : $"{catalogDetails}\n{spreadDetails}";
 
     private async Task Load(Row[] entries, OverviewColumn[] metrics, CancellationToken ct)

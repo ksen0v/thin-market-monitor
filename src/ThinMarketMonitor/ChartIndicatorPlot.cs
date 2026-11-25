@@ -23,14 +23,22 @@ internal sealed partial class CandlePlot
         Ink(170, 204, 217), Ink(183, 142, 238), Ink(254, 118, 134), Ink(239, 239, 147), Ink(106, 224, 153)
     ];
     private IndicatorDisplay? indicators;
+    private bool debugMode;
     private (string Caption, string Detail) lastSummary;
     internal event Action<string, string>? IndicatorSummary;
-    internal event Action<string?, InterestLayer[]>? InterestPanesChanged;
+    internal event Action<string?, InterestLayer[], ChartIndicatorOptions>? InterestPanesChanged;
+
+    internal void SetDebugMode(bool enabled)
+    {
+        debugMode = enabled;
+        lastSummary = default;
+        InvalidateVisual();
+    }
 
     internal void UpdateIndicators(IndicatorDisplay? value)
     {
         if (drag?.Interest is { } measuring &&
-            (value == null || value.Market.Key != indicators?.Market.Key || value.Options.InterestUsd != indicators?.Options.InterestUsd ||
+            (value == null || value.Market.Key != indicators?.Market.Key || value.Options.PresentationFor(measuring.Venue).Usd != measuring.Usd ||
                 !value.Interest.Any(layer => InterestInstrument(layer) == measuring.Instrument)))
             CancelGesture();
         indicators = value;
@@ -41,39 +49,30 @@ internal sealed partial class CandlePlot
             lastSummary = default;
             lastInterestWindow = null;
         }
-        InterestPanesChanged?.Invoke(value?.Market.Key, value?.Interest ?? []);
+        InterestPanesChanged?.Invoke(value?.Market.Key, value?.Interest ?? [], value?.Options ?? ChartIndicatorOptions.Off);
         InvalidateVisual();
     }
 
-    private (int Known, int Total) DrawCandleVolume(DrawingContext dc, View view, double thickness)
+    private (int Known, int Total) DrawCandleVolume(DrawingContext dc, View view)
     {
-        if (indicators is not { Options.Volume: true } data) return default;
+        if (indicators is not { Options.Volume: true }) return default;
         double maximum = 0;
-        int total = 0, known = 0;
-        foreach (var candle in candles)
+        foreach (var bar in candlePixels.Columns)
+            if (bar.Volume is { } amount && double.IsFinite(amount)) maximum = Math.Max(maximum, amount);
+        if (maximum > 0)
         {
-            if (!Intersects(candle, view)) continue;
-            total++;
-            if (ChartVolume.Amount(data.Market, candle) is { } amount)
+            double limit = Math.Clamp(view.Plot.Height * .23, 8, 56);
+            double width = candlePixels.BodyWidth;
+            foreach (var bar in candlePixels.Columns)
             {
-                known++;
-                maximum = Math.Max(maximum, amount);
+                if (bar.Volume is not (> 0 and < double.PositiveInfinity and var amount)) continue;
+                double height = Math.Max(.8, limit * (amount / maximum));
+                Brush brush = bar.Observed ? observedVolume : bar.Rising ? volumeUp : volumeDown;
+                dc.DrawRectangle(brush, null, new Rect(bar.X - width / 2, view.Plot.Bottom - height, width, height));
             }
         }
-        if (!(maximum > 0)) return (known, total);
-        double height = Math.Clamp(view.Plot.Height * 0.23, 8, 56);
-        foreach (var candle in candles)
-        {
-            if (!Intersects(candle, view) || ChartVolume.Amount(data.Market, candle) is not (> 0 and var amount)) continue;
-            double bar = Math.Max(0.8, height * amount / maximum);
-            Brush brush = candle.ObservedVolume ? observedVolume : candle.Close >= candle.Open ? volumeUp : volumeDown;
-            dc.DrawRectangle(brush, null, new Rect(view.X(candle.Time + BarTime / 2d) - thickness / 2,
-                view.Plot.Bottom - bar, thickness, bar));
-        }
-        return (known, total);
+        return (candlePixels.Known, candlePixels.Total);
     }
-
-    private bool Intersects(Candle candle, View view) => candle.Time < view.End && candle.Time + BarTime > view.Start;
 
     private (ExecutionProfile? Volume, ExecutionProfile? Liquidations) DrawProfiles(DrawingContext dc, View view)
     {
@@ -119,10 +118,11 @@ internal sealed partial class CandlePlot
         ExecutionProfile? liquidations = null)
     {
         if (indicators is not { } data) return;
+        if (!debugMode && !data.Options.Profile && !data.Options.Liquidations) return;
         var shortParts = new List<string>();
         var details = new List<string>();
         string unit = ChartVolume.Unit(data.Market);
-        if (data.Options.Volume)
+        if (debugMode && data.Options.Volume)
         {
             shortParts.Add($"Объём {unit}");
             string coverage = volumeBars.Known > 0
@@ -132,36 +132,40 @@ internal sealed partial class CandlePlot
         }
         if (data.Options.Profile)
         {
-            shortParts.Add($"Профиль {unit} · {RangeLabel(profile)}");
-            details.Add($"{data.ProfileStatus} · {unit} · {RangeLabel(profile)}. Охват неполный.");
+            shortParts.Add($"Профиль {unit} · {CoverageLabel(profile)}");
+            details.Add(debugMode ? $"{data.ProfileStatus} · {unit} · {RangeLabel(profile)}. Охват неполный."
+                : "Охват исполненных сделок неполный.");
         }
         if (data.Options.Liquidations)
         {
             string liquidationUnit = data.Market.Venue == Venue.Gate ? "события" : unit;
-            shortParts.Add($"Ликв. {liquidationUnit} · {RangeLabel(liquidations)}");
-            details.Add($"{data.LiquidationStatus} · {liquidationUnit} · {RangeLabel(liquidations)}. Охват неполный. " +
-                "Красный — long, золотой — short, фиолетовый — сторона неизвестна.");
+            shortParts.Add($"Ликв. {liquidationUnit} · {CoverageLabel(liquidations)}");
+            const string sides = "Красный — long, золотой — short, фиолетовый — сторона неизвестна.";
+            details.Add(debugMode
+                ? $"{data.LiquidationStatus} · {liquidationUnit} · {RangeLabel(liquidations)}. Охват неполный. {sides}"
+                : sides);
         }
-        if (data.Options.HasInterest)
+        if (debugMode && data.Options.HasInterest)
         {
             shortParts.Add("OI · " + string.Join(", ", data.Interest.Select(layer => layer.Venue.Label())));
             details.Add("Открытый интерес · потяните границу панели для изменения высоты. Шкала справа управляет масштабом значений.");
-            if (data.Options.InterestUsd)
+            if (data.Interest.Any(layer => data.Options.PresentationFor(layer.Venue).Usd))
                 details.Add("USD · значения бирж и расчёт по цене того же контракта (≈). USDT и USDC оценены по номиналу.");
             foreach (var layer in data.Interest)
             {
                 string label = layer.Market == null ? layer.Venue.Label() : $"{layer.Venue.Label()} · {layer.Market.Symbol} · {layer.Market.Contract!.Product}";
                 var reading = layer.Reading;
                 if (reading == null) { details.Add($"{label} · {layer.Status ?? "Нет данных"}"); continue; }
-                var points = range is { } current ? VisibleInterest(reading, current) : [];
+                var points = range is { } current ? VisibleInterest(layer, current.Start, current.End) : [];
                 string coverage = points.Length == 0 ? "нет точек в диапазоне" :
                     $"{Stamp(points[0].Time)}–{Stamp(points[^1].Time)} · {points.Min(p => p.Value).ToString("G6", Russian)}–{points.Max(p => p.Value).ToString("G6", Russian)}";
-                string interestUnit = data.Options.InterestUsd ? (points.Any(p => p.Estimated) ? "≈ USD" : "USD") : reading.Unit;
+                string interestUnit = data.Options.PresentationFor(layer.Venue).Usd
+                    ? (points.Any(p => p.Estimated) ? "≈ USD" : "USD") : reading.Unit;
                 details.Add($"{label} · {interestUnit} · {ChartCell.PeriodLabel(reading.Period)} · {coverage}" +
                     (reading.Status == null ? "" : $" · {reading.Status}"));
             }
         }
-        if (range == null) shortParts.Add("ожидание свечей");
+        if (debugMode && range == null) shortParts.Add("ожидание свечей");
         var summary = (string.Join("   ·   ", shortParts), string.Join("\n", details));
         if (lastSummary == summary) return;
         lastSummary = summary;
@@ -169,11 +173,14 @@ internal sealed partial class CandlePlot
         {
             if (lastSummary == summary && indicators != null) IndicatorSummary?.Invoke(summary.Item1, summary.Item2);
         }, DispatcherPriority.Background);
+
+        string CoverageLabel(ExecutionProfile? events) => debugMode ? RangeLabel(events) :
+            events is { Count: > 0 } ? "неполные данные" : "нет данных";
     }
 
     private static string RangeLabel(ExecutionProfile? profile) => profile is { First: { } first, Last: { } last }
         ? $"{Stamp(first)}–{Stamp(last)}" : "нет сделок в диапазоне";
-    private static string Stamp(long time) => DateTimeOffset.FromUnixTimeMilliseconds(time).ToLocalTime().ToString("dd.MM HH:mm:ss");
+    private static string Stamp(long time) => ChartAxis.DateLabel(DateTimeOffset.FromUnixTimeMilliseconds(time).ToLocalTime(), seconds: true);
     private static Brush Ink(byte red, byte green, byte blue, byte alpha = 255)
     {
         var brush = new SolidColorBrush(Color.FromArgb(alpha, red, green, blue));

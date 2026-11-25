@@ -7,6 +7,7 @@ internal readonly record struct ChartTimeTick(long Time, string Label);
 internal static class ChartAxis
 {
     private static readonly CultureInfo Russian = CultureInfo.GetCultureInfo("ru-RU");
+    private static readonly CultureInfo English = CultureInfo.GetCultureInfo("en-US");
     private const long Day = 86_400_000;
     private static readonly int[] ClockSteps =
         [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10_800, 14_400, 21_600, 43_200];
@@ -45,6 +46,9 @@ internal static class ChartAxis
         return value.ToString($"F{(int)decimals}", Russian);
     }
 
+    internal static string DateLabel(DateTimeOffset time, bool seconds = false) =>
+        time.ToString(seconds ? "ddd dd MMM\\'yy HH:mm:ss" : "ddd dd MMM\\'yy HH:mm", English);
+
     internal static ChartTimeTick[] TimeTicks(double from, double to, long barTime, int intervals, TimeZoneInfo zone)
     {
         if (!(to > from) || from < DateTimeOffset.MinValue.ToUnixTimeMilliseconds() || to > DateTimeOffset.MaxValue.ToUnixTimeMilliseconds())
@@ -69,8 +73,8 @@ internal static class ChartAxis
                     var local = TimeZoneInfo.ConvertTime(DateTimeOffset.FromUnixTimeMilliseconds(stamp), zone);
                     if (local.Offset != offset) continue;
                     string format = step < 60_000 ? "HH:mm:ss" :
-                        local.TimeOfDay == TimeSpan.Zero && start.Date != end.Date ? "dd.MM" : "HH:mm";
-                    ticks.Add(new(stamp, local.ToString(format, Russian)));
+                        local.TimeOfDay == TimeSpan.Zero && start.Date != end.Date ? "dd MMM" : "HH:mm";
+                    ticks.Add(new(stamp, local.ToString(format, English)));
                 }
             }
         }
@@ -81,7 +85,7 @@ internal static class ChartAxis
             int step = DaySteps.First(value => value * Day >= wanted);
             long firstDay = start.Ticks / TimeSpan.TicksPerDay;
             long lastDay = end.Ticks / TimeSpan.TicksPerDay;
-            string format = to - from >= 365 * Day ? "dd.MM.yy" : "dd.MM";
+            string format = to - from >= 365 * Day ? "dd MMM\\'yy" : "dd MMM";
             for (long day = firstDay - firstDay % step; day <= lastDay; day += step)
                 AddCalendarTick(new DateTime(day * TimeSpan.TicksPerDay), format);
         }
@@ -90,7 +94,7 @@ internal static class ChartAxis
             int step = MonthSteps.FirstOrDefault(value => value * 30 * Day >= wanted, MonthSteps[^1]);
             int firstMonth = start.Year * 12 + start.Month - 1;
             int lastMonth = end.Year * 12 + end.Month - 1;
-            string format = step >= 12 ? "yyyy" : "MM.yy";
+            string format = step >= 12 ? "yyyy" : "MMM\\'yy";
             for (int month = Math.Max(12, firstMonth - firstMonth % step); month <= lastMonth; month += step)
                 AddCalendarTick(new DateTime(month / 12, month % 12 + 1, 1), format);
         }
@@ -100,7 +104,7 @@ internal static class ChartAxis
         {
             if (zone.IsInvalidTime(wallTime)) return;
             long stamp = new DateTimeOffset(wallTime, zone.GetUtcOffset(wallTime)).ToUnixTimeMilliseconds();
-            if (stamp >= from && stamp <= to) calendar.Add(new(stamp, wallTime.ToString(format, Russian)));
+            if (stamp >= from && stamp <= to) calendar.Add(new(stamp, wallTime.ToString(format, English)));
         }
     }
 }

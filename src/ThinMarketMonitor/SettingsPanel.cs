@@ -12,14 +12,15 @@ namespace ThinMarketMonitor;
 internal sealed partial class SettingsPanel : Border, IDisposable
 {
     private const int FiltersPage = 0, ModulesPage = 1, PricePage = 2, VolumePage = 3, ChartsPage = 4,
-        OverviewPage = 5, IntegrationsPage = 6, AboutPage = 7, BlacklistPage = 8, NotificationsPage = 9;
-    private const int PageCount = 10;
+        OverviewPage = 5, IntegrationsPage = 6, AboutPage = 7, BlacklistPage = 8, NotificationsPage = 9, InterfacePage = 10;
+    private const int PageCount = 11;
     private const double StandardHeight = 592;
     private readonly CancellationTokenSource stop = new();
     private readonly Grid layout = new();
     private readonly Button[] navigation = new Button[PageCount];
     private readonly Border[] indicators = new Border[PageCount];
     private readonly FrameworkElement[] pages = new FrameworkElement[PageCount];
+    private readonly List<TextBlock> diagnosticCopy = [];
     private readonly TextBlock result = Terminal.Copy("");
     private readonly TextBlock updateStatus = Terminal.Copy($"v{Updater.Current}");
     private readonly Button check = new() { Content = "Проверить версию" };
@@ -33,6 +34,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
     private readonly Action savePreferences;
     private readonly Action saveNotifications;
     private readonly Action saveOverview;
+    private readonly Action saveDiagnostics;
     private readonly Action<SignalTone> previewSound;
     private readonly RussianVoicePack? neuralVoice;
     private readonly Action<string> previewVoice;
@@ -41,13 +43,14 @@ internal sealed partial class SettingsPanel : Border, IDisposable
     private Release? update;
     private bool checkedOnOpen;
     private bool downloadingVoice;
+    private int currentPage;
     private SpeechTemplateEditor? speechEditor;
     public bool Installing { get; private set; }
 
     public SettingsPanel(Settings settings, Updater updater, ColibriBridge colibri,
         Action<bool> changed, Action close, Action restart, bool overview = false, Action? saveNotifications = null,
         Action? saveOverview = null, Action<SignalTone>? previewSound = null, RussianVoicePack? neuralVoice = null,
-        Action<string>? previewVoice = null, Action? savePreferences = null)
+        Action<string>? previewVoice = null, Action? savePreferences = null, Action? saveDiagnostics = null)
     {
         this.settings = settings;
         this.updater = updater;
@@ -56,6 +59,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         this.savePreferences = savePreferences ?? (() => changed(false));
         this.saveNotifications = saveNotifications ?? (() => changed(false));
         this.saveOverview = saveOverview ?? (() => changed(false));
+        this.saveDiagnostics = saveDiagnostics ?? this.savePreferences;
         this.previewSound = previewSound ?? (_ => { });
         this.neuralVoice = neuralVoice;
         this.previewVoice = previewVoice ?? (_ => { });
@@ -90,16 +94,14 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         rail.Child = new ScrollViewer { Content = nav, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
         body.Children.Add(rail);
-        AddNavigation(nav, FiltersPage, "Фильтры", "filter");
-        AddNavigation(nav, BlacklistPage, "Чёрный список", "ban");
-        AddNavigation(nav, ModulesPage, "Модули", "listings");
-        AddNavigation(nav, PricePage, "Импульс цены", "activity");
-        AddNavigation(nav, VolumePage, "Импульс объёма", "volume");
-        AddNavigation(nav, NotificationsPage, "Уведомления", "bell");
-        AddNavigation(nav, ChartsPage, "Графики", "candles");
-        AddNavigation(nav, OverviewPage, "Обзор", "volume");
-        AddNavigation(nav, IntegrationsPage, "Интеграции", "external");
-        AddNavigation(nav, AboutPage, "О программе", "info");
+        AddNavigationGroup(nav, "Сигналы",
+            (FiltersPage, "Фильтры", "filter"), (BlacklistPage, "Чёрный список", "ban"),
+            (ModulesPage, "Модули", "listings"), (PricePage, "Импульс цены", "activity"),
+            (VolumePage, "Импульс объёма", "volume"), (NotificationsPage, "Уведомления", "bell"));
+        AddNavigationGroup(nav, "Обзор", (OverviewPage, "Инструменты", "overview-nav"));
+        AddNavigationGroup(nav, "Общие",
+            (InterfacePage, "Интерфейс", "settings"), (ChartsPage, "Графики", "candles"),
+            (IntegrationsPage, "Интеграции", "external"), (AboutPage, "О программе", "info"));
         var surface = new Border { Background = Terminal.Brush("Surface"), Padding = new Thickness(18, 16, 18, 16) };
         Grid.SetColumn(surface, 1);
         body.Children.Add(surface);
@@ -115,6 +117,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         pages[AboutPage] = About();
         pages[BlacklistPage] = BlacklistOptions();
         pages[NotificationsPage] = NotificationOptions();
+        pages[InterfacePage] = InterfaceOptions();
         foreach (var page in pages) pageHost.Children.Add(page);
 
         var footer = Terminal.Rule(new Thickness(0, 1, 0, 0));
@@ -142,16 +145,34 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         UpdateModuleNavigation();
         int openingPage = overview ? OverviewPage : FiltersPage;
         SelectPage(openingPage);
-        Loaded += (_, _) => navigation[openingPage].Focus();
+        UpdateDiagnostics();
+        Loaded += (_, _) =>
+        {
+            navigation[openingPage].BringIntoView();
+            navigation[openingPage].Focus();
+        };
+    }
+
+    private void AddNavigationGroup(Panel nav, string title, params (int Index, string Text, string Icon)[] entries)
+    {
+        var group = new StackPanel { Margin = new Thickness(0, 0, 0, 5) };
+        AutomationProperties.SetName(group, title);
+        group.Children.Add(new TextBlock
+        {
+            Text = title, Foreground = Terminal.Brush("Text"), FontSize = 11,
+            FontWeight = FontWeights.SemiBold, Margin = new Thickness(9, 3, 0, 4)
+        });
+        foreach (var (index, text, icon) in entries) AddNavigation(group, index, text, icon);
+        nav.Children.Add(group);
     }
 
     private void AddNavigation(Panel nav, int index, string text, string icon)
     {
         var marker = new Border { Width = 2, HorizontalAlignment = HorizontalAlignment.Left, IsHitTestVisible = false };
-        var row = new Grid { Margin = new Thickness(0, 0, 0, 4) };
+        var row = new Grid { Margin = new Thickness(0, 0, 0, 2) };
         var button = new Button
         {
-            Style = Terminal.Style("IconButton"), MinHeight = 34, Padding = new Thickness(9, 3, 9, 3),
+            Style = Terminal.Style("IconButton"), MinHeight = 30, Padding = new Thickness(9, 3, 9, 3),
             HorizontalContentAlignment = HorizontalAlignment.Left, Content = Terminal.LabelWithIcon(icon, text, 8)
         };
         AutomationProperties.SetName(button, text);
@@ -166,6 +187,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
     private void SelectPage(int index)
     {
         EndCapture();
+        currentPage = index;
         for (int i = 0; i < pages.Length; i++)
         {
             bool selected = i == index;
@@ -181,6 +203,40 @@ internal sealed partial class SettingsPanel : Border, IDisposable
             _ = Check();
         }
         if (index == NotificationsPage) _ = CheckVoice();
+        UpdateFilterVisibility();
+    }
+
+    private StackPanel InterfaceOptions()
+    {
+        var panel = new StackPanel();
+        panel.Children.Add(Terminal.Heading("Интерфейс"));
+        var mode = new CheckBox { Content = "Режим диагностики", IsChecked = settings.DebugMode, Margin = new Thickness(0, 5, 0, 8) };
+        AutomationProperties.SetName(mode, "Режим диагностики");
+        mode.Click += (_, _) =>
+        {
+            settings.DebugMode = mode.IsChecked == true;
+            UpdateDiagnostics();
+            saveDiagnostics();
+        };
+        panel.Children.Add(mode);
+        panel.Children.Add(Terminal.Copy("Показывает состояние потоков, счётчики и подробные пояснения."));
+        return panel;
+    }
+
+    private void AddDiagnostic(Panel panel, string text)
+    {
+        var block = Terminal.Copy(text);
+        diagnosticCopy.Add(block);
+        panel.Children.Add(block);
+    }
+
+    private void UpdateDiagnostics()
+    {
+        foreach (var block in diagnosticCopy)
+            block.Visibility = settings.DebugMode ? Visibility.Visible : Visibility.Collapsed;
+        ToolTipService.SetIsEnabled(updateStatus, settings.DebugMode);
+        ToolTipService.SetIsEnabled(voiceStatus, settings.DebugMode);
+        UpdateFilterVisibility();
     }
 
     private StackPanel NotificationOptions()
@@ -285,18 +341,18 @@ internal sealed partial class SettingsPanel : Border, IDisposable
     {
         if (neuralVoice?.IsReady == true)
         {
-            voiceStatus.Text = "Нейроголос «Дмитрий» готов. Озвучка работает без интернета.";
+            voiceStatus.Text = "Нейроголос «Дмитрий» готов.";
             voiceStatus.ToolTip = null;
             if (speechEditor != null) speechEditor.CanPreview = true;
             return;
         }
         if (downloadingVoice) return;
-        voiceStatus.Text = "Проверка русского голоса Windows…";
+        voiceStatus.Text = "";
         bool available = await Task.Run(WindowsSignalVoice.RussianVoiceAvailable);
         if (stop.IsCancellationRequested || downloadingVoice || neuralVoice?.IsReady == true) return;
         if (speechEditor != null) speechEditor.CanPreview = available;
         voiceStatus.Text = available
-            ? "Доступен русский голос Windows. Для нейроголоса нужна однократная загрузка."
+            ? "Доступен русский голос Windows."
             : "Загрузите русский нейроголос или добавьте русский голос в параметрах речи Windows.";
     }
 
@@ -304,8 +360,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
     {
         var panel = new StackPanel();
         panel.Children.Add(Terminal.Heading("Thin Market Monitor", accent: true));
-        panel.Children.Add(Terminal.Copy("Мониторинг спотовых и фьючерсных рынков для Windows."));
-        panel.Children.Add(Terminal.Copy(Updater.Installed ? "Установленная версия · обновляется через Setup" : "Portable · автономный EXE"));
+        AddDiagnostic(panel, Updater.Installed ? "Установленная версия · обновляется через Setup" : "Portable · автономный EXE");
         var section = Terminal.Rule(new Thickness(0, 1, 0, 0));
         section.Margin = new Thickness(0, 16, 0, 0);
         section.Padding = new Thickness(0, 13, 0, 0);
@@ -332,13 +387,20 @@ internal sealed partial class SettingsPanel : Border, IDisposable
     public void UpdateFilter(string status)
     {
         result.Text = status;
+        UpdateFilterVisibility();
     }
+
+    private void UpdateFilterVisibility() =>
+        result.Visibility = settings.DebugMode && result.Text.Length > 0 &&
+            currentPage is FiltersPage or ModulesPage or PricePage or VolumePage or BlacklistPage or NotificationsPage
+            ? Visibility.Visible : Visibility.Collapsed;
 
     private async Task Check()
     {
         check.IsEnabled = false;
         install.Visibility = Visibility.Collapsed;
         updateStatus.Text = $"v{Updater.Current} · проверка GitHub…";
+        updateStatus.ToolTip = null;
         try
         {
             update = await updater.Check(stop.Token);
@@ -348,7 +410,11 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         }
         catch (Exception ex)
         {
-            if (!stop.IsCancellationRequested) updateStatus.Text = $"v{Updater.Current} · ошибка проверки · {ex.Message}";
+            if (!stop.IsCancellationRequested)
+            {
+                updateStatus.Text = $"v{Updater.Current} · не удалось проверить обновления";
+                updateStatus.ToolTip = ex.Message;
+            }
         }
         finally { check.IsEnabled = true; }
     }
@@ -358,6 +424,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         if (update is not { } release) return;
         Installing = true;
         layout.IsEnabled = false;
+        updateStatus.ToolTip = null;
         try
         {
             await updater.Stage(release, new Progress<int>(p => updateStatus.Text = $"Загрузка и проверка v{release.Version} · {p}%"), stop.Token);
@@ -366,7 +433,8 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         }
         catch (Exception ex)
         {
-            updateStatus.Text = $"Ошибка обновления · {ex.Message}";
+            updateStatus.Text = "Не удалось обновить приложение";
+            updateStatus.ToolTip = ex.Message;
         }
         finally
         {

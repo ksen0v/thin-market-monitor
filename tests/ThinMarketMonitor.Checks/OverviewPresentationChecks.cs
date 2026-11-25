@@ -35,22 +35,23 @@ internal static class OverviewPresentationChecks
         var row = new OverviewPanel.Row(market, columns);
         row.Set([296_801.23, 64.09, 1.507, null], columns);
         row.SetSpread(new(0.00001234, 1000));
-        Check(row[0] == "296K" && row[1] == "64%" && row[2] == "1,51%" && row[3] == "<0,01%" &&
-            row.SpreadDisplayToolTip == "0,00001234%", "table cells abbreviate turnover, show whole changes and retain small spread values in the tooltip");
+        Check(row[0] == "296,8K" && row[1] == "64,09%" && row[2] == "1,51%" && row[3] == "<0,01%" &&
+            row.SpreadDisplayToolTip == "0,00001234%", "turnover and change display up to two decimals and small spread retains its exact tooltip");
         row.SetSpread(null);
         Check(row[3] == "<0,01%*" && row.SpreadDisplayToolTip.Contains("Свежих bid/ask нет"),
             "the compact spread keeps its stale marker and explanation");
-        Check(OverviewMetrics.Display(MetricKind.Turnover, 4_900) == "4K" &&
-            OverviewMetrics.Display(MetricKind.Turnover, 107.99) == "107" &&
+        Check(OverviewMetrics.Display(MetricKind.Turnover, 4_900) == "4,9K" &&
+            OverviewMetrics.Display(MetricKind.Turnover, 107.99) == "107,99" &&
+            OverviewMetrics.Display(MetricKind.Turnover, .26) == "0,26" &&
             OverviewMetrics.Display(MetricKind.Turnover, 1_000) == "1K" &&
             OverviewMetrics.Display(MetricKind.Turnover, 1_000_000) == "1M" &&
             OverviewMetrics.Display(MetricKind.Turnover, 1_000_000_000) == "1B" &&
-            OverviewMetrics.Display(MetricKind.Change, -64.09) == "-64%" &&
-            OverviewMetrics.Display(MetricKind.Change, -0.1) == "0%" &&
+            OverviewMetrics.Display(MetricKind.Change, -64.09) == "-64,09%" &&
+            OverviewMetrics.Display(MetricKind.Change, -0.1) == "-0,1%" &&
             OverviewMetrics.Display(MetricKind.Spread, 0) == "0%" &&
             OverviewMetrics.Display(MetricKind.Atr, double.NaN) == "—", "compact metrics cover boundaries, zero and unavailable values");
         var other = new OverviewPanel.Row(market with { Symbol = "ADA_USDT", Base = "ADA" }, columns);
-        other.Set([296_800.99, 64.08, null, null], columns);
+        other.Set([296_800.99, 64.089, null, null], columns);
         Check(row[0] == other[0] && row[1] == other[1] &&
             new OverviewPanel.RowComparer(0, true).Compare(row, other) < 0 &&
             new OverviewPanel.RowComparer(1, true).Compare(row, other) < 0, "equal compact text still sorts by the underlying numbers");

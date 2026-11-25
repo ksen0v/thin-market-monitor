@@ -51,7 +51,11 @@
                             <ColumnDefinition x:Name="OverviewDividerColumn" Width="10"/>
                             <ColumnDefinition x:Name="OverviewDrawerColumn" Width="0.55*"/>
                         </Grid.ColumnDefinitions>
-                        <ContentControl x:Name="OverviewChartHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
+                        <DockPanel>
+                            <WrapPanel x:Name="OverviewQuickSources" DockPanel.Dock="Top" Margin="0,0,0,3"
+                                       AutomationProperties.Name="Быстрый выбор биржи"/>
+                            <ContentControl x:Name="OverviewChartHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
+                        </DockPanel>
                         <GridSplitter x:Name="OverviewDivider" Grid.Column="1" Width="10" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
                                       ResizeDirection="Columns" ResizeBehavior="PreviousAndNext" DragCompleted="OverviewDividerCompleted"
                                       ShowsPreview="True" KeyboardIncrement="16" DragIncrement="1" Cursor="SizeWE"
@@ -103,13 +107,17 @@
                                 AutomationProperties.Name="Настройки" Click="OpenSettings"/>
                     </StackPanel>
                 </Border>
-                <StackPanel Grid.Column="2" Margin="12,0,0,0" VerticalAlignment="Center">
-                    <TextBlock x:Name="CatalogStatus" Text="Обновление каталогов…" TextTrimming="CharacterEllipsis" FontSize="11"/>
-                    <DockPanel>
-                        <Ellipse x:Name="StreamLed" DockPanel.Dock="Left" Width="6" Height="6" Fill="{StaticResource Muted}" Margin="0,0,6,0"/>
-                        <TextBlock x:Name="StreamStatus" Foreground="{StaticResource Muted}" FontSize="11" TextTrimming="CharacterEllipsis"/>
-                    </DockPanel>
-                </StackPanel>
+                <Grid Grid.Column="2" Margin="12,0,0,0" VerticalAlignment="Center">
+                    <TextBlock x:Name="MonitorNotice" Visibility="Collapsed" Foreground="{StaticResource Muted}"
+                               TextTrimming="CharacterEllipsis" FontSize="11"/>
+                    <StackPanel x:Name="MonitorDiagnostics" Visibility="Collapsed">
+                        <TextBlock x:Name="CatalogStatus" Text="Обновление каталогов…" TextTrimming="CharacterEllipsis" FontSize="11"/>
+                        <DockPanel>
+                            <Ellipse x:Name="StreamLed" DockPanel.Dock="Left" Width="6" Height="6" Fill="{StaticResource Muted}" Margin="0,0,6,0"/>
+                            <TextBlock x:Name="StreamStatus" Foreground="{StaticResource Muted}" FontSize="11" TextTrimming="CharacterEllipsis"/>
+                        </DockPanel>
+                    </StackPanel>
+                </Grid>
             </Grid>
         </Border>
     </Grid>

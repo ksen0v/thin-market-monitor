@@ -189,10 +189,15 @@
                                 <TextBlock x:Name="Mark" DockPanel.Dock="Right" Width="13" Margin="8,0,0,0"
                                            Text="✓" FontFamily="Segoe UI Symbol" Foreground="{StaticResource Accent}"
                                            Visibility="Hidden" VerticalAlignment="Center"/>
+                                <ContentPresenter x:Name="EntryIcon" Content="{TemplateBinding Icon}" DockPanel.Dock="Left"
+                                                  Margin="0,0,7,0" VerticalAlignment="Center"/>
                                 <ContentPresenter ContentSource="Header" VerticalAlignment="Center"/>
                             </DockPanel>
                         </Border>
                         <ControlTemplate.Triggers>
+                            <Trigger Property="Icon" Value="{x:Null}">
+                                <Setter TargetName="EntryIcon" Property="Visibility" Value="Collapsed"/>
+                            </Trigger>
                             <Trigger Property="IsChecked" Value="True">
                                 <Setter TargetName="Mark" Property="Visibility" Value="Visible"/>
                                 <Setter TargetName="Row" Property="Background" Value="{StaticResource AccentSurface}"/>

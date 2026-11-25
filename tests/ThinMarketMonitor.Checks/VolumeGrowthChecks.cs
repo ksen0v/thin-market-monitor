@@ -221,7 +221,7 @@ internal static class VolumeGrowthChecks
         void Page(int index) { typeof(SettingsPanel).GetMethod("SelectPage", Flags)!.Invoke(panel, [index]); window.UpdateLayout(); }
         T Find<T>(string name) where T : FrameworkElement => Descendants(panel).OfType<T>().Single(e => e.IsVisible && AutomationProperties.GetName(e) == name);
         Page(1);
-        Check(Descendants(panel).OfType<TextBlock>().Any(t => t.IsVisible && t.Text.Contains("новые стартовые пороги")), "migration notice is visible");
+        Check(Descendants(panel).OfType<TextBlock>().Any(t => t.IsVisible && t.Text.Contains("Проверьте пороги")), "migration notice is visible");
         Find<Button>("Импульс объёма").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         Check(settings.VolumeModule && !settings.VolumePercentMigrationPending, "user explicitly enables migrated percent module");
         Page(3);
@@ -245,8 +245,11 @@ internal static class VolumeGrowthChecks
         var cell = new ChartCell(new ExchangeApi(http), 1, () => { }, () => { }, () => 1, () => new(System.Windows.Input.Key.None), () => [60]);
         cell.Assign(Market, false, new(Market, Time(75), 15, 100, SignalModule.Volume, 50, 25, 3600));
         string tooltip = Field<TextBlock>(cell, "label").ToolTip.ToString()!;
-        Check(tooltip.Contains("100") && tooltip.Contains("50") && tooltip.Contains("25") && tooltip.Contains("без текущего окна"),
-            "signal tooltip exposes percentage, current and average turnover");
+        Check(tooltip.Contains("100") && tooltip.Contains("50") && tooltip.Contains("25") && !tooltip.Contains("без текущего окна"),
+            "signal tooltip exposes percentage and turnover in normal mode");
+        cell.SetDebugMode(true);
+        Check(Field<TextBlock>(cell, "label").ToolTip.ToString()!.Contains("без текущего окна"),
+            "diagnostics include the volume signal baseline");
 
         RemoveDefaults(2, Settings.Defaults);
         Check(settings.Thresholds.Length == 0 && settings.VolumeGrowthThresholds.Length == 5,

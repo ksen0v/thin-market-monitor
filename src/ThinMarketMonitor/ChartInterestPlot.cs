@@ -11,7 +11,11 @@ internal sealed partial class CandlePlot
     internal event Action<InterestWindow>? InterestRangeChanged;
 
     private readonly record struct InterestPane(InterestLayer Layer, Rect Header, Rect Graph);
-    private sealed record InterestAxis(string Instrument, Venue Venue, string Unit, InterestScale Scale, bool Estimated);
+    private sealed record InterestAxis(string Instrument, Venue Venue, string Unit, InterestScale Scale, bool Estimated, bool Usd);
+    private readonly record struct InterestSeries(InterestPoint[] Points, InterestCandle[]? Candles, long Interval)
+    {
+        public bool HasData => (Candles?.Length ?? Points.Length) > 0;
+    }
 
     internal void SetPaneWeights(ChartPaneWeights? weights)
     {
@@ -72,35 +76,41 @@ internal sealed partial class CandlePlot
     private static string InterestInstrument(InterestLayer layer) => layer.Market?.Key ?? layer.Venue.ToString();
     private static int InterestIntervals(Rect graph) => Math.Clamp((int)(graph.Height / 23), 1, 6);
 
-    private InterestAxis? GetInterestAxis(InterestPane pane, InterestPoint[] points)
+    private InterestAxis? GetInterestAxis(InterestPane pane, View view) =>
+        GetInterestAxis(pane, ReadInterestSeries(pane.Layer, view));
+
+    private InterestAxis? GetInterestAxis(InterestPane pane, InterestSeries series)
     {
         string instrument = InterestInstrument(pane.Layer);
         if (drag is { Mode: Operation.Ruler, Interest: { } measuring } && measuring.Instrument == instrument)
             return measuring;
-        if (pane.Layer.Reading is not { } reading || points.Length == 0) return null;
-        bool usd = indicators?.Options.InterestUsd == true;
+        if (pane.Layer.Reading is not { } reading) return null;
+        bool usd = InterestMode(pane.Layer.Venue).Usd;
         int intervals = InterestIntervals(pane.Graph);
         var scale = interestRanges.TryGetValue((instrument, usd), out var fixedRange)
             ? InterestScale.Fixed(fixedRange.Low, fixedRange.High, intervals)
-            : InterestScale.Create(points, intervals);
+            : series.Candles is { Length: > 0 } bars ? InterestScale.Create(bars.Min(bar => bar.Low), bars.Max(bar => bar.High), intervals)
+            : InterestScale.Create(series.Points, intervals);
         return scale is { } value ? new(instrument, pane.Layer.Venue, usd ? "USD" : reading.Unit, value,
-            usd && points.Any(point => point.Estimated)) : null;
+            usd && (series.Candles?.Any(bar => bar.Estimated) ?? series.Points.Any(point => point.Estimated)), usd) : null;
     }
 
     private void SetInterestRange(InterestAxis scale, double low, double span)
     {
         double high = low + span;
         if (InterestScale.Fixed(low, high, 4).HasValue)
-            interestRanges[(scale.Instrument, indicators?.Options.InterestUsd == true)] = (low, high);
+            interestRanges[InterestRangeKey(scale)] = (low, high);
     }
+
+    private static (string Instrument, bool Usd) InterestRangeKey(InterestAxis axis) => (axis.Instrument, axis.Usd);
 
     private bool StartInterestAxisDrag(Point at, View view, bool reset)
     {
         if (InterestPaneAt(at, view, axisOnly: true) is not { } pane ||
-            GetInterestAxis(pane, VisibleInterest(pane.Layer.Reading, view)) is not { } measure) return false;
+            GetInterestAxis(pane, view) is not { } measure) return false;
         if (reset)
         {
-            interestRanges.Remove((measure.Instrument, indicators?.Options.InterestUsd == true));
+            interestRanges.Remove(InterestRangeKey(measure));
             InvalidateVisual();
             return true;
         }
@@ -110,11 +120,27 @@ internal sealed partial class CandlePlot
     private static View InterestView(View chart, InterestPane pane, InterestScale scale) =>
         new(pane.Graph, chart.Start, chart.End, scale.Low, scale.High);
 
-    private InterestPoint[] VisibleInterest(InterestReading? reading, View view)
+    private InterestPresentation InterestMode(Venue venue) => indicators?.Options.PresentationFor(venue) ?? new();
+
+    private InterestSeries ReadInterestSeries(InterestLayer layer, View view)
     {
-        if (reading == null) return [];
-        bool usd = indicators?.Options.InterestUsd == true;
-        return reading.Points.Where(point => point.Time >= view.Start && point.Time < view.End)
+        if (!InterestMode(layer.Venue).Candles || layer.Reading is not { } reading)
+            return new(VisibleInterest(layer, view.Start, view.End), null, 0);
+        long cadence = reading.Period == 0 ? 60_000 : reading.Period * 1000L;
+        long interval = Math.Max(cadence, BarTime);
+        long first = ExchangeApi.CandleStart((long)Math.Floor(view.Start), interval);
+        double end = Math.Ceiling(view.End / interval) * interval;
+        var points = VisibleInterest(layer, first - interval, end);
+        var bars = InterestCandle.Build(points, interval, cadence + cadence / 3)
+            .Where(bar => bar.Time >= first && bar.Time < view.End).ToArray();
+        return new([], bars, interval);
+    }
+
+    private InterestPoint[] VisibleInterest(InterestLayer layer, double from, double until)
+    {
+        if (layer.Reading is not { } reading) return [];
+        bool usd = InterestMode(layer.Venue).Usd;
+        return reading.Points.Where(point => point.Time >= from && point.Time < until)
             .Select(point => point with { Value = point.InUnit(usd) }).Where(point => point.Value >= 0 && double.IsFinite(point.Value)).ToArray();
     }
 
@@ -126,17 +152,19 @@ internal sealed partial class CandlePlot
         foreach (var pane in InterestPanes(view))
         {
             var graph = pane.Graph;
-            var points = VisibleInterest(pane.Layer.Reading, view);
-            var numeric = GetInterestAxis(pane, points);
+            var data = ReadInterestSeries(pane.Layer, view);
+            var numeric = GetInterestAxis(pane, data);
             scales.Add(numeric?.Scale);
             var color = InterestBrush(pane.Layer.Venue);
             DrawInterestTitle(dc, pane, numeric, color);
             DrawTimeGrid(dc, view, graph, timeTicks);
-            if (numeric == null)
+            if (!data.HasData || numeric == null)
             {
-                DrawText(dc, "—", graph.Right + 5, graph.Top + 1);
-                string local = pane.Layer.Status ?? (pane.Layer.Reading is { Points.Length: 0 } reading ? reading.Status : null)
-                    ?? (indicators?.Options.InterestUsd == true && pane.Layer.Reading is { Points.Length: > 0 } set &&
+                if (numeric == null) DrawText(dc, "—", graph.Right + 5, graph.Top + 1);
+                else DrawInterestGrid(dc, InterestView(view, pane, numeric.Scale), numeric.Scale, color);
+                string local = pane.Layer.Status ?? (pane.Layer.Reading is { Points.Length: 0 } reading
+                    ? debugMode ? reading.Status ?? "Нет данных" : "Нет данных" : null)
+                    ?? (InterestMode(pane.Layer.Venue).Usd && pane.Layer.Reading is { Points.Length: > 0 } set &&
                         !set.Points.Any(point => point.Usd.HasValue) ? "Нет оценки в USD" : "Нет точек в диапазоне");
                 dc.PushClip(new RectangleGeometry(graph));
                 DrawText(dc, local, graph.Left + 5, graph.Top + Math.Max(0, (graph.Height - 12) / 2));
@@ -147,17 +175,27 @@ internal sealed partial class CandlePlot
             var series = InterestView(view, pane, numeric.Scale);
             DrawInterestGrid(dc, series, numeric.Scale, color);
             dc.PushClip(new RectangleGeometry(graph));
-            var line = new Pen(color, 1.45);
-            Point? previous = null;
-            long last = 0;
-            int period = pane.Layer.Reading!.Period;
-            long spacing = period == 0 ? 85_000 : period * 1300L;
-            foreach (var point in points)
+            if (data.Candles is { } bars)
             {
-                var at = new Point(series.X(point.Time), series.Y(point.Value));
-                if (previous is { } before && point.Time - last <= spacing) dc.DrawLine(line, before, at);
-                else dc.DrawEllipse(color, null, at, 1.7, 1.7);
-                (previous, last) = (at, point.Time);
+                candlePixels.Reset(series.Plot.Width * data.Interval / (series.End - series.Start), VisualTreeHelper.GetDpi(this).DpiScaleX);
+                foreach (var bar in bars)
+                    candlePixels.Add(new(series.X(bar.Time + data.Interval / 2.0), bar.Open, bar.High, bar.Low, bar.Close, null, false));
+                DrawCandleSeries(dc, series);
+            }
+            else
+            {
+                var line = new Pen(color, 1.45);
+                Point? previous = null;
+                long last = 0;
+                int period = pane.Layer.Reading!.Period;
+                long spacing = period == 0 ? 85_000 : period * 1300L;
+                foreach (var point in data.Points)
+                {
+                    var at = new Point(series.X(point.Time), series.Y(point.Value));
+                    if (previous is { } before && point.Time - last <= spacing) dc.DrawLine(line, before, at);
+                    else dc.DrawEllipse(color, null, at, 1.7, 1.7);
+                    (previous, last) = (at, point.Time);
+                }
             }
             dc.Pop();
         }
@@ -168,16 +206,20 @@ internal sealed partial class CandlePlot
     {
         var header = pane.Header;
         dc.DrawLine(gridLine, header.TopLeft, header.TopRight);
-        string unit = numeric == null ? (indicators?.Options.InterestUsd == true ? "USD" : pane.Layer.Reading?.Unit ?? "") :
+        string unit = numeric == null ? (InterestMode(pane.Layer.Venue).Usd ? "USD" : pane.Layer.Reading?.Unit ?? "") :
             numeric.Estimated ? "≈ USD" : numeric.Unit;
         string source = pane.Layer.Venue.Label();
         string? symbol = pane.Layer.Market?.Symbol;
         string ending = (unit.Length == 0 ? "" : " · " + unit) + (pane.Layer.Reading?.LoadingHistory == true ? " · загрузка…" : "");
         var caption = Text($"OI · {source}" + (symbol == null ? "" : " " + symbol) + ending, color);
-        double available = Math.Max(0, header.Width - ChartSurface.ControlsWidth - 6);
-        if (caption.Width > available) caption = Text($"OI · {source}{ending}", color);
-        dc.PushClip(new RectangleGeometry(new Rect(header.Location, new Size(available, header.Height))));
-        dc.DrawText(caption, new(header.Left + 4, header.Top + 3));
+        double contentWidth = Math.Max(0, header.Width - ChartSurface.ControlsWidth - 6);
+        double available = Math.Max(0, contentWidth - 21);
+        if (caption.Width > available) caption = Text($"{source}{ending}", color);
+        if (caption.Width > available) caption = Text(source, color);
+        FitAxisLabel(caption, available);
+        dc.PushClip(new RectangleGeometry(new Rect(header.Location, new Size(contentWidth, header.Height))));
+        dc.DrawImage(Terminal.VenueLogoSource(pane.Layer.Venue), new Rect(header.Left + 4, header.Top + 4, 13, 13));
+        dc.DrawText(caption, new(header.Left + 21, header.Top + 3));
         dc.Pop();
     }
 

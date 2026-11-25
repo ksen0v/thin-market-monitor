@@ -10,7 +10,7 @@ internal sealed partial class CandlePlot
     private ChartTimeTick[] TimeGridTicks(View view) => ChartAxis.TimeTicks(view.Start, view.End, BarTime,
         Math.Max(2, (int)(view.Plot.Width / 82)), TimeZoneInfo.Local);
 
-    private void DrawPriceGrid(DrawingContext dc, View view, double priceStep, Rect priceBadge)
+    private void DrawPriceGrid(DrawingContext dc, View view, double priceStep)
     {
         var plot = view.Plot;
         double lastBottom = double.NegativeInfinity;
@@ -22,8 +22,7 @@ internal sealed partial class CandlePlot
             FitAxisLabel(label, ActualWidth - plot.Right - 7);
             double labelY = Math.Clamp(y - label.Height / 2, plot.Top, Math.Max(plot.Top, plot.Bottom - label.Height));
             double labelBottom = labelY + label.Height;
-            if ((!priceBadge.IsEmpty && labelBottom + 2 >= priceBadge.Top && labelY - 2 <= priceBadge.Bottom)
-                || labelY < lastBottom + 2) continue;
+            if (labelY < lastBottom + 2) continue;
             dc.DrawText(label, new Point(plot.Right + 5, labelY));
             lastBottom = labelBottom;
         }

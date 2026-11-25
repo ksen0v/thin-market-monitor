@@ -9,11 +9,11 @@ internal sealed partial class SettingsPanel
     private StackPanel VolumeBaselineOptions()
     {
         var panel = new StackPanel { Margin = new Thickness(0, 8, 0, 4) };
-        panel.Children.Add(Terminal.Copy("Средний оборот окна = оборот предыдущей базы × длительность окна / длительность базы. Текущее окно в базу не входит."));
+        AddDiagnostic(panel, "Средний оборот окна = оборот предыдущей базы × длительность окна / длительность базы. Текущее окно в базу не входит.");
         var row = new WrapPanel { Margin = new Thickness(0, 7, 0, 5) };
         row.Children.Add(new TextBlock { Text = "Базовый период", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) });
         var minutes = new TextBox { Width = 65, Text = (settings.VolumeReferenceSeconds / 60).ToString(), TextAlignment = TextAlignment.Right };
-        minutes.ToolTip = "По умолчанию 60 минут. Допустимо от 1 до 60 минут.";
+        minutes.ToolTip = "От 1 до 60 минут";
         AutomationProperties.SetName(minutes, "База импульса объёма, минуты");
         row.Children.Add(minutes);
         row.Children.Add(new TextBlock { Text = "мин", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(5, 0, 8, 0) });
@@ -33,8 +33,7 @@ internal sealed partial class SettingsPanel
             settings.VolumeReferenceSeconds = value * 60;
             changed(true);
         };
-        panel.Children.Add(Terminal.Copy("После запуска или разрыва нужно накопить базу и окно из потока сделок. При нулевой базе сигналов нет."));
-        panel.Children.Add(Terminal.Copy("Проверка раз в секунду с задержкой 6 с. Длинные окна готовы позже коротких."));
+        AddDiagnostic(panel, "Для расчёта нужна непрерывная история базы и окна. Проверка выполняется раз в секунду с задержкой 6 с.");
         return panel;
     }
 }

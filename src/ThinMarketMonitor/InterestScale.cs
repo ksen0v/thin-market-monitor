@@ -15,7 +15,12 @@ internal readonly record struct InterestScale(double Low, double High, double St
             low = Math.Min(low, point.Value);
             high = Math.Max(high, point.Value);
         }
-        if (!double.IsFinite(low)) return null;
+        return Create(low, high, intervals);
+    }
+
+    internal static InterestScale? Create(double low, double high, int intervals)
+    {
+        if (!double.IsFinite(low) || !double.IsFinite(high) || high < low) return null;
         if (high == low)
         {
             double margin = high > 0 ? high * .02 : 1;

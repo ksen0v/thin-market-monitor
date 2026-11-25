@@ -84,6 +84,8 @@ internal enum BookmarkColor { Gold, Green, Blue, Pink, Violet }
 
 internal sealed class Settings
 {
+    // Top supported venues by combined spot and derivatives volume in CoinMarketCap's September 2026 report.
+    private static readonly Venue[] DefaultOverviewSources = [Venue.Binance, Venue.Okx, Venue.Bybit, Venue.Gate, Venue.Mexc];
     private const int EditableSignalPeriodsVersion = 1;
     private const int DefaultChartVolumeVersion = 2;
     internal const int MaxModuleSeconds = 3600;
@@ -94,6 +96,7 @@ internal sealed class Settings
     internal static readonly Threshold[] Defaults = [new(15, true, 4), new(60, true, 5), new(300, true, 12), new(900, true, 20)];
     internal static readonly Threshold[] DefaultVolumeGrowth = [new(15, true, 100), new(60, true, 100), new(300, true, 100), new(900, true, 100)];
     public int SchemaVersion { get; set; } = DefaultChartVolumeVersion;
+    public bool DebugMode { get; set; }
     public Dictionary<Venue, ListingRule> Rules { get; set; } = new() { [Venue.KuCoin] = ListingRule.Require };
     public Dictionary<Venue, ListingRule> FuturesRules { get; set; } = [];
     public ListingRule Rule(MarketSource source) => ListingRules(source.Segment).GetValueOrDefault(source.Venue);
@@ -104,6 +107,7 @@ internal sealed class Settings
     public bool OverviewDrawer { get; set; } = true;
     public double OverviewDrawerWidth { get; set; } = 390;
     public MarketSource OverviewSource { get; set; } = new(Venue.KuCoin);
+    public Dictionary<Venue, int> OverviewSourceVisits { get; set; } = [];
     public Dictionary<Venue, ListingRule> OverviewSpotRules { get; set; } = [];
     public Dictionary<Venue, ListingRule> OverviewFuturesRules { get; set; } = [];
     public ListingRule OverviewRule(MarketSource source) => ListingRules(source.Segment, overview: true).GetValueOrDefault(source.Venue);
@@ -115,6 +119,24 @@ internal sealed class Settings
     public bool ShowsOverviewMarket(Market market) => ShowsOverviewQuote(market.Quote) &&
         (!HideOverviewLeveragedTokens || !market.IsLeveragedToken);
     public CellChoice? OverviewChoice { get; set; }
+    internal IEnumerable<Venue> QuickOverviewVenues() => DefaultOverviewSources.Concat(OverviewSourceVisits.Keys).Distinct()
+        .OrderByDescending(venue => OverviewSourceVisits.GetValueOrDefault(venue)).Take(DefaultOverviewSources.Length);
+
+    internal bool SelectOverviewSource(MarketSource source)
+    {
+        if (source == OverviewSource || !MarketSource.All.Contains(source)) return false;
+        OverviewSource = source;
+        OverviewChoice = null;
+        int visits = OverviewSourceVisits.GetValueOrDefault(source.Venue);
+        if (visits < int.MaxValue) OverviewSourceVisits[source.Venue] = visits + 1;
+        return true;
+    }
+
+    internal MarketSource QuickOverviewSource(Venue venue)
+    {
+        var source = new MarketSource(venue, OverviewSource.Segment);
+        return MarketSource.All.Contains(source) ? source : new(venue);
+    }
     public int OverviewFrame { get; set; } = 60;
     public OverviewColumn[] OverviewColumns { get; set; } = [new(MetricKind.Turnover, 1440), new(MetricKind.Change, 1440)];
     public Dictionary<string, double> OverviewColumnWidths { get; set; } = new(StringComparer.Ordinal);
@@ -220,6 +242,8 @@ internal sealed class Settings
             .Select(CoinKey).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
         settings.FrameButtons = (settings.FrameButtons ?? [15, 60, 300]).Where(Frames.All.Contains).Distinct().Order().ToArray();
         if (!MarketSource.All.Contains(settings.OverviewSource)) settings.OverviewSource = new(Venue.KuCoin);
+        settings.OverviewSourceVisits = (settings.OverviewSourceVisits ?? []).Where(entry => Enum.IsDefined(entry.Key) && entry.Value > 0)
+            .ToDictionary(entry => entry.Key, entry => entry.Value);
         if (!Frames.All.Contains(settings.OverviewFrame)) settings.OverviewFrame = 60;
         if (settings.OverviewDrawerWidth is < 230 or > 1600) settings.OverviewDrawerWidth = 390;
         settings.OverviewColumnWidths = (settings.OverviewColumnWidths ?? [])

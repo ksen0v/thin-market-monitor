@@ -11,6 +11,7 @@ namespace ThinMarketMonitor;
 
 internal static class Terminal
 {
+    private static readonly Dictionary<string, BitmapImage> Logos = new(StringComparer.Ordinal);
     public static Brush Brush(string key) => (Brush)Application.Current.FindResource(key);
     public static Style Style(string key) => (Style)Application.Current.FindResource(key);
 
@@ -21,6 +22,8 @@ internal static class Terminal
             Data = Geometry.Parse(name switch
             {
                 "candles" => "M9 5 L9 3 M9 19 L9 21 M17 5 L17 3 M17 19 L17 21 M7 5 H11 V19 H7 Z M15 5 H19 V19 H15 Z",
+                "line-chart" => "M3 17 L8 11 L13 14 L21 5",
+                "dollar" => "M12 2 V22 M17 6 H10 A3 3 0 0 0 10 12 H14 A3 3 0 0 1 14 18 H7",
                 "settings" => "M20 7 H10 M14 17 H4 M4 7 H6 M18 17 H20 M6 7 A2 2 0 1 0 10 7 A2 2 0 1 0 6 7 M14 17 A2 2 0 1 0 18 17 A2 2 0 1 0 14 17",
                 "pin" => "M16 9 V4 H8 V9 A4 4 0 0 1 4 13 V15 H20 V13 A4 4 0 0 1 16 9 Z M12 15 V22",
                 "pin-off" => "M2 2 L22 22 M12 15 V22 M5 15 H15 M9 4 H16 V9 Q16 11 18 12",
@@ -79,16 +82,28 @@ internal static class Terminal
     }
 
     public static FrameworkElement VenueLogo(Venue venue, double size) =>
-        AssetLogo((venue == Venue.Alpha ? Venue.Binance : venue).ToString().ToLowerInvariant(), size);
+        Logo(VenueLogoSource(venue), size);
 
-    public static FrameworkElement AssetLogo(string asset, double size)
+    public static ImageSource VenueLogoSource(Venue venue) =>
+        AssetLogoSource((venue == Venue.Alpha ? Venue.Binance : venue).ToString().ToLowerInvariant());
+
+    public static FrameworkElement AssetLogo(string asset, double size) => Logo(AssetLogoSource(asset), size);
+
+    private static ImageSource AssetLogoSource(string asset)
     {
-        return new Image
+        if (!Logos.TryGetValue(asset, out var image))
         {
-            Source = new BitmapImage(new Uri($"pack://application:,,,/ThinMarketMonitor;component/Assets/{asset}.png")),
-            Width = size, Height = size, Stretch = Stretch.Uniform, VerticalAlignment = VerticalAlignment.Center
-        };
+            image = new BitmapImage(new Uri($"pack://application:,,,/ThinMarketMonitor;component/Assets/{asset}.png"));
+            image.Freeze();
+            Logos.Add(asset, image);
+        }
+        return image;
     }
+
+    private static Image Logo(ImageSource source, double size) => new()
+    {
+        Source = source, Width = size, Height = size, Stretch = Stretch.Uniform, VerticalAlignment = VerticalAlignment.Center
+    };
 
     public static void AttachMenu(Button button, IEnumerable<MenuItem> items, double minWidth)
     {

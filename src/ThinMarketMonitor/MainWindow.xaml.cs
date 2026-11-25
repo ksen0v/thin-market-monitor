@@ -4,6 +4,7 @@ using System.Net.Http;
 using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Interop;
@@ -129,6 +130,7 @@ public partial class MainWindow : Window, IDisposable
         RebuildGrid();
         RefreshOverview();
         UpdateIntegration();
+        RefreshDiagnostics();
         if (startMonitoring) Loaded += async (_, _) =>
         {
             if (!watchingNetwork)
@@ -339,6 +341,7 @@ public partial class MainWindow : Window, IDisposable
         OverviewSpace.Visibility = settings.Overview ? Visibility.Visible : Visibility.Collapsed;
         GridSwitch.Visibility = SignalListingsButton.Visibility = settings.Overview ? Visibility.Collapsed : Visibility.Visible;
         UpdateNavigation();
+        if (settings.Overview) UpdateOverviewQuickSources();
         DrawerSwitch.Content = Terminal.Icon(settings.OverviewDrawer ? "drawer-open" : "drawer-closed");
         DrawerSwitch.Foreground = Terminal.Brush(settings.OverviewDrawer ? "Accent" : "Muted");
         string drawerLabel = settings.OverviewDrawer ? "Скрыть инструменты" : "Показать инструменты";
@@ -356,8 +359,52 @@ public partial class MainWindow : Window, IDisposable
         if (overviewChart.Choice?.Key != settings.OverviewChoice?.Key) overviewChart.Choice = settings.OverviewChoice;
         overviewChart.Resolve(result.Markets.FirstOrDefault(m => m.Key == settings.OverviewChoice?.Key && settings.ShowsOverviewMarket(m)));
         overviewChart.Activate(settings.Overview);
-        overviewPanel.SetSource(result.Markets, settings.Overview && settings.OverviewDrawer, pending, details);
+        overviewPanel.SetSource(result.Markets, settings.Overview && settings.OverviewDrawer, pending, details,
+            catalogUnavailable: unavailable > 0);
         settingsPanel?.UpdateQuoteChoices(OverviewSourceQuotes());
+    }
+
+    private void UpdateOverviewQuickSources()
+    {
+        var venues = settings.QuickOverviewVenues().ToArray();
+        var buttons = OverviewQuickSources.Children.OfType<Button>();
+        if (!buttons.Select(button => (Venue)button.Tag).SequenceEqual(venues))
+        {
+            var existing = buttons.ToDictionary(button => (Venue)button.Tag);
+            var focused = buttons.FirstOrDefault(button => button.IsKeyboardFocused);
+            OverviewQuickSources.Children.Clear();
+            foreach (var venue in venues)
+                OverviewQuickSources.Children.Add(existing.TryGetValue(venue, out var button) ? button : QuickButton(venue));
+            if (focused?.Parent == OverviewQuickSources) focused.Focus();
+        }
+        foreach (var button in buttons)
+        {
+            var market = settings.QuickOverviewSource((Venue)button.Tag);
+            bool active = market == settings.OverviewSource;
+            button.ToolTip = market.Label;
+            button.BorderBrush = Terminal.Brush(active ? "Accent" : "Outline");
+            button.Background = Terminal.Brush(active ? "AccentSurface" : "Surface");
+            button.Foreground = Terminal.Brush(active ? "Accent" : "Text");
+            System.Windows.Automation.AutomationProperties.SetName(button, market.Label);
+            System.Windows.Automation.AutomationProperties.SetItemStatus(button, active ? "Текущий источник" : "");
+        }
+
+        Button QuickButton(Venue venue)
+        {
+            var content = new StackPanel { Orientation = Orientation.Horizontal };
+            content.Children.Add(Terminal.VenueLogo(venue, 15));
+            content.Children.Add(new TextBlock
+            {
+                Text = venue.Label(), Margin = new Thickness(5, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center
+            });
+            var button = new Button
+            {
+                Tag = venue, Content = content, MinHeight = 25, Padding = new Thickness(7, 1, 7, 1),
+                Margin = new Thickness(0, 0, 4, 3)
+            };
+            button.Click += (_, _) => overviewPanel.SelectSource(settings.QuickOverviewSource(venue));
+            return button;
+        }
     }
 
     private void OverviewBodySizeChanged(object sender, SizeChangedEventArgs e)
@@ -579,7 +626,10 @@ public partial class MainWindow : Window, IDisposable
         string? tooltip = string.Join("\n", errors.Select(x => $"{x.Key.Label} — {x.Value.Error}")
             .Concat(spreadFilter == null ? [] : new[] { spreadFilter.Coverage(now) }));
         if (tooltip.Length == 0) tooltip = null;
-        if (CatalogStatus.Text != status || !Equals(CatalogStatus.ToolTip, tooltip)) ShowCatalogStatus(status, tooltip);
+        string? notice = missing.Any(source => catalogs.GetValueOrDefault(source)?.Error != null)
+            ? "Сигналы · каталог недоступен" : null;
+        if (CatalogStatus.Text != status || !Equals(CatalogStatus.ToolTip, tooltip) || MonitorNotice.Text != (notice ?? ""))
+            ShowCatalogStatus(status, tooltip, notice);
         if (!markets.SequenceEqual(next))
         {
             markets = next;
@@ -596,10 +646,12 @@ public partial class MainWindow : Window, IDisposable
         }
     }
 
-    private void ShowCatalogStatus(string status, string? tooltip = null)
+    private void ShowCatalogStatus(string status, string? tooltip = null, string? notice = null)
     {
         CatalogStatus.Text = status;
         CatalogStatus.ToolTip = tooltip;
+        MonitorNotice.Text = notice ?? "";
+        MonitorNotice.Visibility = notice != null && !settings.DebugMode ? Visibility.Visible : Visibility.Collapsed;
         settingsPanel?.UpdateFilter(status);
     }
 
@@ -644,6 +696,7 @@ public partial class MainWindow : Window, IDisposable
 
     private void ShowCoverage()
     {
+        if (!settings.DebugMode) return;
         if (streams == null)
         {
             StreamLed.Fill = Terminal.Brush("Muted");
@@ -709,7 +762,7 @@ public partial class MainWindow : Window, IDisposable
         if (DialogHost.Content != null) CloseDialog();
         settingsPanel = new SettingsPanel(settings, new Updater(http), colibri, SettingsChanged, CloseDialog, Close, settings.Overview,
             () => { notifications.SettingsChanged(); Save(); }, () => { RefreshOverview(); Save(); }, notifications.PreviewSound,
-            neuralVoice, notifications.PreviewVoice, Save);
+            neuralVoice, notifications.PreviewVoice, Save, () => { RefreshDiagnostics(); Save(); });
         settingsPanel.UpdateQuoteChoices(OverviewSourceQuotes());
         settingsPanel.UpdateFilter(CatalogStatus.Text);
         ShowDialog(settingsPanel);
@@ -724,6 +777,17 @@ public partial class MainWindow : Window, IDisposable
         if (settingsPanel == null || Overlay.ActualWidth == 0 || Overlay.ActualHeight == 0) return;
         settingsPanel.MaxWidth = Math.Max(0, Overlay.ActualWidth - DialogHost.Margin.Left - DialogHost.Margin.Right);
         settingsPanel.MaxHeight = Math.Max(0, Overlay.ActualHeight - DialogHost.Margin.Top - DialogHost.Margin.Bottom);
+    }
+
+    private void RefreshDiagnostics()
+    {
+        MonitorDiagnostics.Visibility = settings.DebugMode ? Visibility.Visible : Visibility.Collapsed;
+        MonitorNotice.Visibility = !settings.DebugMode && MonitorNotice.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        foreach (var cell in cells) cell.SetDebugMode(settings.DebugMode);
+        overviewChart.SetDebugMode(settings.DebugMode);
+        overviewPanel.UpdateDiagnostics();
+        ShowIntegrationStatus();
+        ShowCoverage();
     }
 
     private void OpenSignalListings(object sender, RoutedEventArgs e)
@@ -791,7 +855,7 @@ public partial class MainWindow : Window, IDisposable
         try { settings.Save(); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            ShowCatalogStatus("Настройки не сохранены", ex.Message);
+            ShowCatalogStatus("Настройки не сохранены", ex.Message, "Настройки не сохранены");
         }
     }
 
@@ -805,10 +869,11 @@ public partial class MainWindow : Window, IDisposable
 
     private void ShowIntegrationStatus()
     {
-        IntegrationStatusHost.Visibility = settings.ColibriEnabled && colibri.Status.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        IntegrationStatusHost.Visibility = settings.ColibriEnabled && colibri.Status.Length > 0 &&
+            (settings.DebugMode || colibri.HasError) ? Visibility.Visible : Visibility.Collapsed;
         IntegrationStatus.Text = "Colibri · " + colibri.Status;
         IntegrationStatus.Foreground = Terminal.Brush(colibri.HasError ? "Falling" : "Muted");
-        IntegrationStatus.ToolTip = colibri.Status;
+        IntegrationStatus.ToolTip = settings.DebugMode ? colibri.Status : null;
     }
 
     public void Dispose()

@@ -5,6 +5,9 @@ internal sealed class LiveCandles(int frame, long offset = 0, bool volumeInBase 
     public const int MaxBars = 12_000;
     private readonly long interval = frame * 1000L;
     private readonly SortedDictionary<long, Bar> bars = new();
+    private readonly HashSet<long> changed = [];
+    private Candle[] display = [];
+    private bool structureChanged;
     private HashSet<string>? volumeIds;
     private Queue<string>? volumeIdOrder;
 
@@ -15,7 +18,11 @@ internal sealed class LiveCandles(int frame, long offset = 0, bool volumeInBase 
         if (trade.Time <= 0 || trade.Price <= 0 || !double.IsFinite(trade.Price)) return;
         long time = ExchangeApi.CandleStart(trade.Time, interval, offset);
         var bar = GetBar(time);
-        if (!bar.Closed) bar.Add(trade, NewVolume(trade.Id, volume));
+        if (!bar.Closed)
+        {
+            bar.Add(trade, NewVolume(trade.Id, volume));
+            changed.Add(time);
+        }
         Trim();
     }
 
@@ -37,21 +44,63 @@ internal sealed class LiveCandles(int frame, long offset = 0, bool volumeInBase 
             bar.HistoryRequestedAt = requestedAt;
             // Give REST time to publish the final bar. An earlier response may still describe an open bar.
             bar.Closed = candle.Time + interval + 2000 <= requestedAt;
+            changed.Add(candle.Time);
         }
         Trim();
     }
 
-    public Candle[] Snapshot() => bars.Select(entry => entry.Value.CandleAt(entry.Key, volumeInBase)).ToArray();
+    public Candle[] Snapshot() => (Candle[])DisplaySnapshot().Clone();
+
+    // Chart loading, updates and drawing all run on the same dispatcher.
+    internal Candle[] DisplaySnapshot()
+    {
+        if (structureChanged)
+        {
+            display = new Candle[bars.Count];
+            int index = 0;
+            foreach (var (time, bar) in bars) display[index++] = bar.CandleAt(time, volumeInBase);
+            structureChanged = false;
+        }
+        else
+        {
+            foreach (long time in changed)
+            {
+                int first = 0, last = display.Length - 1;
+                while (first <= last)
+                {
+                    int middle = first + (last - first) / 2;
+                    long candidate = display[middle].Time;
+                    if (candidate < time) first = middle + 1;
+                    else if (candidate > time) last = middle - 1;
+                    else
+                    {
+                        display[middle] = bars[time].CandleAt(time, volumeInBase);
+                        break;
+                    }
+                }
+            }
+        }
+        changed.Clear();
+        return display;
+    }
 
     private Bar GetBar(long time)
     {
-        if (!bars.TryGetValue(time, out var bar)) bars[time] = bar = new();
+        if (!bars.TryGetValue(time, out var bar))
+        {
+            bars[time] = bar = new();
+            structureChanged = true;
+        }
         return bar;
     }
 
     private void Trim()
     {
-        while (bars.Count > MaxBars) bars.Remove(bars.First().Key);
+        while (bars.Count > MaxBars)
+        {
+            bars.Remove(bars.First().Key);
+            structureChanged = true;
+        }
     }
 
     private sealed class Bar

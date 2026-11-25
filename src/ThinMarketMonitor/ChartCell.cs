@@ -37,6 +37,7 @@ internal sealed partial class ChartCell : Border
     private int frame = 60;
     private bool olderRequested;
     private bool autoAssigned;
+    private bool debugMode;
     public int Frame => frame;
     public Market? Instrument => market;
     public event Action<int>? FrameChanged;
@@ -62,7 +63,9 @@ internal sealed partial class ChartCell : Border
         this.nextOrder = nextOrder;
         this.frameButtons = frameButtons;
         plot = new CandlePlot(gesture) { Focusable = true };
-        chartSurface = new(plot, MoveInterestPane, CloseInterestPane, SavePaneWeights);
+        chartSurface = new(plot, MoveInterestPane, CloseInterestPane, SavePaneWeights,
+            venue => ChangeInterestPresentation(venue, mode => mode with { Usd = !mode.Usd }),
+            venue => ChangeInterestPresentation(venue, mode => mode with { Candles = !mode.Candles }));
         KeyboardNavigation.SetIsTabStop(plot, false);
         plot.OlderRequested += () => olderRequested = true;
         Margin = new Thickness(0, 0, 1, 1);
@@ -71,6 +74,7 @@ internal sealed partial class ChartCell : Border
         detail.Foreground = Terminal.Brush("Muted");
         detail.MinHeight = 15;
         detail.Margin = new Thickness(7, 4, 7, 0);
+        ToolTipService.SetIsEnabled(detail, false);
         Child = layout;
         var header = new DockPanel { Margin = new Thickness(7, 2, 7, 2), MinHeight = 24 };
         headerFrame.Child = header;
@@ -191,7 +195,7 @@ internal sealed partial class ChartCell : Border
         $"{market?.Label}\n{(s.Module == SignalModule.Price ? "Импульс цены" : "Импульс объёма")} · " +
         (s.Module == SignalModule.Price ? $"+{s.Value:F2}%" : $"+{s.Value:N2}%") + $" за {MainWindow.WindowName(s.Seconds)}" +
         (s.Module == SignalModule.Volume ? $"\nОборот сейчас: {s.CurrentTurnover:G6} USD · средний за такое же окно: {s.AverageTurnover:G6} USD" +
-            $"\nБаза: предыдущие {MainWindow.WindowName(s.ReferenceSeconds ?? 3600)} без текущего окна. {VolumeImpulse.SettlementSeconds} с на доставку сделок." : "");
+            (debugMode ? $"\nБаза: предыдущие {MainWindow.WindowName(s.ReferenceSeconds ?? 3600)} без текущего окна. {VolumeImpulse.SettlementSeconds} с на доставку сделок." : "") : "");
 
     public void Resolve(Market? resolved)
     {
@@ -260,6 +264,20 @@ internal sealed partial class ChartCell : Border
         detail.Text = text;
         detail.ToolTip = hint;
         detail.Visibility = text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    internal void SetDebugMode(bool enabled)
+    {
+        if (debugMode == enabled) return;
+        debugMode = enabled;
+        ToolTipService.SetIsEnabled(detail, enabled);
+        label.ToolTip = InstrumentTooltip() ?? Choice?.Key;
+        signalIcon.ToolTip = latestSignal == null ? null : InstrumentTooltip();
+        indicatorHint.Text = "";
+        indicatorHint.ToolTip = null;
+        if (indicatorTools != null) indicatorTools.ToolTip = "Индикаторы графика";
+        UpdateIndicatorHint(active && IsVisible && market != null);
+        plot.SetDebugMode(enabled);
     }
 
     private void ResetFeed()
@@ -331,7 +349,7 @@ internal sealed partial class ChartCell : Border
         int queuedTrades = 0;
         bool finished = false;
         int emptyPages = 0;
-        string coverage = "";
+        var coverage = (Text: "", Diagnostic: (string?)null);
         long nextPage = Boundary(tf, offset);
         long nextTick = 0;
         bool historyLoaded = false;
@@ -381,11 +399,11 @@ internal sealed partial class ChartCell : Border
                         else if (++emptyPages >= 3)
                         {
                             finished = true;
-                            coverage = "Конец доступной истории · три участка без свечей";
+                            coverage = ("Конец доступной истории", "Три предыдущих участка без свечей.");
                         }
                         else
                         {
-                            coverage = "На предыдущем участке свечей нет";
+                            coverage = ("На предыдущем участке свечей нет", null);
                             olderRequested |= plot.MissingHistoryBars(nextPage) > 0;
                         }
                         loadingOlder = false;
@@ -397,15 +415,20 @@ internal sealed partial class ChartCell : Border
                         bool found = await Page(Boundary(tf, offset), initial ? CandlePlot.InitialHistoryBars(tf) : 4, prepend: false);
                         if (initial && found && tf < 60) olderRequested |= plot.MissingHistoryBars(nextPage) > 0;
                     }
-                    if (native && candles.Count >= LiveCandles.MaxBars) { finished = true; coverage = "Достигнут локальный предел 12 000 свечей"; }
-                    SetChartDetail(coverage.Length > 0 ? coverage : candles.Count == 0 ? "Биржа не вернула свечи" : "");
+                    if (native && candles.Count >= LiveCandles.MaxBars)
+                    {
+                        finished = true;
+                        coverage = ("Конец загруженной истории", $"Локальный предел {LiveCandles.MaxBars:N0} свечей.");
+                    }
+                    SetChartDetail(coverage.Text.Length > 0 ? coverage.Text : candles.Count == 0 ? "Биржа не вернула свечи" : "",
+                        coverage.Diagnostic);
                 }
                 catch (Exception ex) when (!ct.IsCancellationRequested)
                 {
                     if (loadingOlder) olderRequested = true;
-                    SetChartDetail(loadingOlder ? "История слева не загрузилась · повтор через 12 с" :
-                        !historyLoaded ? "История не загрузилась полностью · повтор через 12 с" :
-                        "Свечи не обновились · повтор через 12 с", ExchangeApi.ConnectionProblem(ex) ?? ex.Message);
+                    SetChartDetail(loadingOlder ? "История слева не загрузилась" :
+                        !historyLoaded ? "История не загрузилась полностью" : "Свечи не обновились",
+                        $"Повтор через 12 с\n{ExchangeApi.ConnectionProblem(ex) ?? ex.Message}");
                     await Task.Delay(12000, ct);
                 }
                 await Task.Delay(native ? 300 : 450, ct);
@@ -435,18 +458,18 @@ internal sealed partial class ChartCell : Border
             if (result.Length > 0)
             {
                 historyLoaded = true;
-                if (prepend || !finished && emptyPages == 0) coverage = "";
+                if (prepend || !finished && emptyPages == 0) coverage = ("", null);
                 candles.AddHistory(result, requestedAt);
                 Draw();
             }
             return result.Length > 0;
         }
 
-        void Draw() => plot.Set(candles.Snapshot());
+        void Draw() => plot.Set(candles.DisplaySnapshot());
 
         async Task LoadTradeHistory()
         {
-            coverage = "Сделки REST/WS · более ранняя история биржей не предоставляется";
+            coverage = ("Доступна короткая история", "Свечи построены из недавних сделок REST и WebSocket.");
             try
             {
                 var trades = features != null && indicatorOptions.Profile ? await features.Recent(instrument, ct) : await api.RecentTrades(instrument, ct);
@@ -455,7 +478,10 @@ internal sealed partial class ChartCell : Border
                     ? ChartVolume.TradeAmount(instrument, trade) : double.NaN);
                 Draw();
             }
-            catch (Exception) when (!ct.IsCancellationRequested) { coverage = "История сделок недоступна · только новые сделки"; }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                coverage = ("Доступны только новые сделки", ExchangeApi.ConnectionProblem(ex) ?? ex.Message);
+            }
         }
     }
 
@@ -588,10 +614,10 @@ internal sealed partial class CandlePlot : FrameworkElement
         var rect = new Rect(Left, Top, right - Left, paneHeights?[0] ?? ActualHeight - Top - TimeAxisHeight);
         double end = manualEnd ?? LiveEnd(visible);
         double start = end - visible * BarTime;
+        if (fixedPrice is { } range) return new(rect, start, end, range.Low, range.High, paneHeights);
         double low = double.MaxValue, high = 0;
-        foreach (var c in candles)
+        foreach (var c in VisibleCandles(start, end))
         {
-            if (c.Time + BarTime <= start || c.Time >= end) continue;
             low = Math.Min(low, c.Low);
             high = Math.Max(high, c.High);
         }
@@ -602,7 +628,7 @@ internal sealed partial class CandlePlot : FrameworkElement
             high = nearest.High;
         }
         double margin = Math.Max((high - low) * 0.08, high * 0.00015);
-        return new(rect, start, end, fixedPrice?.Low ?? low - margin, fixedPrice?.High ?? high + margin, paneHeights);
+        return new(rect, start, end, low - margin, high + margin, paneHeights);
     }
 
     protected override void OnRender(DrawingContext dc)
@@ -617,9 +643,6 @@ internal sealed partial class CandlePlot : FrameworkElement
         }
         var plot = view.Plot;
         double step = plot.Width * BarTime / (view.End - view.Start);
-        double body = Math.Max(.12, step * .67);
-        Pen risingWick = step < 1 ? new Pen(up, body) : upLine;
-        Pen fallingWick = step < 1 ? new Pen(down, body) : downLine;
         double priceStep = PriceGridStep(view);
         var timeTicks = TimeGridTicks(view);
         double lastPrice = candles[^1].Close;
@@ -630,24 +653,24 @@ internal sealed partial class CandlePlot : FrameworkElement
         if (priceLabel != null)
         {
             double height = Math.Min(plot.Height, priceLabel.Height + 4);
-            priceBadge = new Rect(plot.Right, Math.Clamp(priceY - height / 2, plot.Top, plot.Bottom - height),
-                ActualWidth - plot.Right, height);
+            double width = Math.Min(ActualWidth - plot.Right - 4, plot.Width - 2);
+            priceBadge = new Rect(plot.Right - width - 1, Math.Clamp(priceY - height / 2, plot.Top, plot.Bottom - height),
+                width, height);
         }
-        DrawPriceGrid(dc, view, priceStep, priceBadge);
+        DrawPriceGrid(dc, view, priceStep);
         DrawTimeGrid(dc, view, plot, timeTicks);
         DrawTimeScale(dc, view, timeTicks);
 
         dc.PushClip(new RectangleGeometry(plot));
-        var volumeBars = DrawCandleVolume(dc, view, body);
-        foreach (var c in candles)
+        candlePixels.Reset(step, VisualTreeHelper.GetDpi(this).DpiScaleX);
+        Market? volumeMarket = indicators is { Options.Volume: true } indicator ? indicator.Market : null;
+        foreach (var c in VisibleCandles(view.Start, view.End))
         {
-            if (c.Time + BarTime <= view.Start || c.Time >= view.End) continue;
-            double x = plot.Left + ((c.Time - view.Start) / (double)BarTime + 0.5) * step;
-            bool rising = c.Close >= c.Open;
-            dc.DrawLine(rising ? risingWick : fallingWick, new Point(x, view.Y(c.High)), new Point(x, view.Y(c.Low)));
-            dc.DrawRectangle(rising ? up : down, null,
-                new Rect(x - body / 2, Math.Min(view.Y(c.Open), view.Y(c.Close)), body, Math.Max(1, Math.Abs(view.Y(c.Close) - view.Y(c.Open)))));
+            candlePixels.Add(new(view.X(c.Time + BarTime / 2d), c.Open, c.High, c.Low, c.Close,
+                volumeMarket == null ? null : ChartVolume.Amount(volumeMarket, c), c.ObservedVolume));
         }
+        var volumeBars = DrawCandleVolume(dc, view);
+        DrawCandleSeries(dc, view);
         var (volume, liquidations) = DrawProfiles(dc, view);
         DrawAnnotations(dc, view);
         if (volumeBars.Known > 0 && indicators is { } data && plot.Width > 95 && plot.Height > 31)
@@ -663,7 +686,8 @@ internal sealed partial class CandlePlot : FrameworkElement
             double available = priceBadge.Width - 6;
             if (priceLabel.Width > available)
                 priceLabel = Text(lastPrice.ToString("G6", Russian), onAccent);
-            dc.DrawText(priceLabel, new Point(plot.Right + 3, priceBadge.Top + (priceBadge.Height - priceLabel.Height) / 2));
+            FitAxisLabel(priceLabel, available);
+            dc.DrawText(priceLabel, new Point(priceBadge.Right - priceLabel.Width - 3, priceBadge.Top + (priceBadge.Height - priceLabel.Height) / 2));
             dc.Pop();
         }
         if (drag is { Mode: Operation.Ruler } measure) DrawRuler(dc, measure);
@@ -701,9 +725,11 @@ internal sealed partial class CandlePlot : FrameworkElement
     private string RulerTurnover(View view, Point start, Point end)
     {
         if (Instrument == null) return "Оборот USD —";
-        var (total, estimated, partial) = ChartVolume.MeasureTurnover(Instrument, candles, BarTime, view.Time(start.X), view.Time(end.X));
+        double a = view.Time(start.X), b = view.Time(end.X);
+        var subset = VisibleCandles(Math.Min(a, b), Math.Max(a, b), includeEnd: true);
+        var (total, estimated, partial) = ChartVolume.MeasureTurnover(Instrument, subset, BarTime, a, b);
         if (total is not { } usd) return "Оборот USD —";
-        string amount = usd is > 0 and < .01 ? "<0,01" : usd.ToString("#,0.##", Russian);
+        string amount = ChartVolume.CompactUsd(usd);
         return $"Оборот {(estimated ? "≈ " : "")}{amount} USD{(partial ? " · частично" : "")}";
     }
 
@@ -747,7 +773,11 @@ internal sealed partial class CandlePlot : FrameworkElement
         if (StartInterestAxisDrag(at, view, reset: e.ClickCount == 2)) { e.Handled = true; return; }
         if (inPlot) Start(Operation.Pan, at, view, MouseButton.Left);
         else if (InterestPaneAt(at, view, axisOnly: false) is { } pane)
-            Start(Operation.InterestPan, at, view with { Plot = pane.Graph }, MouseButton.Left);
+        {
+            var interest = GetInterestAxis(pane, view);
+            Start(Operation.InterestPan, at, interest == null ? view with { Plot = pane.Graph } : InterestView(view, pane, interest.Scale),
+                MouseButton.Left, interest);
+        }
         else if (at.Y >= view.Plot.Bottom && at.X <= view.Plot.Right) Start(Operation.Time, at, view, MouseButton.Left);
         else if (at.X >= view.Plot.Right && at.Y >= view.Plot.Top && at.Y <= view.Plot.Bottom)
         {
@@ -775,7 +805,7 @@ internal sealed partial class CandlePlot : FrameworkElement
     {
         if (view.Plot.Contains(at)) return (view, null);
         if (InterestPaneAt(at, view, axisOnly: false) is not { } pane ||
-            GetInterestAxis(pane, VisibleInterest(pane.Layer.Reading, view)) is not { } interest) return null;
+            GetInterestAxis(pane, view) is not { } interest) return null;
         return (InterestView(view, pane, interest.Scale), interest);
     }
 
@@ -825,8 +855,13 @@ internal sealed partial class CandlePlot : FrameworkElement
                 if (Math.Abs(point.X - move.Start.X) > 1 || manualEnd.HasValue)
                     manualEnd = ClampEnd(PanEnd(view.End, dx, move.Visible, BarTime), move.Visible);
                 RequestOlder(dx > 0);
-                if (move.Mode == Operation.Pan && (Math.Abs(point.X - move.Start.X) > 1 ||
-                    Math.Abs(point.Y - move.Start.Y) > 4 || fixedPrice.HasValue))
+                bool moved = Math.Abs(point.X - move.Start.X) > 1 || Math.Abs(point.Y - move.Start.Y) > 4;
+                if (move.Interest is { } axis)
+                {
+                    if (moved || interestRanges.ContainsKey(InterestRangeKey(axis)))
+                        SetInterestRange(axis, view.Low + dy * view.Span, view.Span);
+                }
+                else if (move.Mode == Operation.Pan && (moved || fixedPrice.HasValue))
                     SetPrice(view.Low + dy * view.Span, view.Span);
                 break;
             case Operation.Time:

@@ -46,7 +46,7 @@ internal sealed partial class ChartCell
         {
             if (UsesOptions(key, overviewScope)) ResetChartTools();
         };
-        shared.InterestOrderChanged += (key, overviewScope) =>
+        shared.IndicatorPresentationChanged += (key, overviewScope) =>
         {
             if (market is not { } instrument || !UsesOptions(key, overviewScope)) return;
             indicatorOptions = shared.Options(instrument.Key, overview);
@@ -173,22 +173,23 @@ internal sealed partial class ChartCell
         string key = instrument.Key;
         yield return Item("Объём свечей", () => Change(o => o with { Volume = !o.Volume }), indicatorOptions.Volume);
         yield return Item("Профиль по сделкам", () => Change(o => o with { Profile = !o.Profile }), indicatorOptions.Profile,
-            hint: "Фактические сделки в видимом диапазоне. Доступная выборка может быть неполной.");
+            hint: "Исполненные сделки в видимом диапазоне");
         yield return Item("Фактические ликвидации", () => Change(o => o with { Liquidations = !o.Liquidations }),
             indicatorOptions.Liquidations, hint: LiquidationAvailability(instrument) ?? "Биржа публикует цены исполнений.");
 
-        yield return Item("Открытый интерес в USD", () => Change(o => o with { InterestUsd = !o.InterestUsd }),
-            indicatorOptions.InterestUsd, hint: "Единицы для шкал OI и линейки");
         yield return new MenuItem { Header = "Открытый интерес · источники", IsEnabled = false, Style = Terminal.Style("TerminalMenuItem") };
         foreach (var venue in Enum.GetValues<Venue>().Where(ChartIndicatorOptions.IsInterestSource))
         {
             var layer = interestLayers.GetValueOrDefault(venue);
             bool chosen = indicatorOptions.Interest?.ContainsKey(venue) == true;
             string label = layer?.Market == null ? venue.Label() : $"{venue.Label()} · {layer.Market.Symbol}";
-            string? status = layer?.Status ?? layer?.Reading?.Status;
+            string? status = layer?.Status ?? (debugMode ? layer?.Reading?.Status :
+                layer?.Reading is { Points.Length: 0 } ? "Нет данных" : null);
             if (chosen && status != null) label += $" · {status}";
-            yield return Item(label, () => SetInterest(venue, null), chosen,
-                hint: layer?.Reading is { } reading ? $"{reading.Unit} · {PeriodLabel(reading.Period)}" : status);
+            var item = Item(label, () => SetInterest(venue, null), chosen,
+                hint: layer?.Reading is { } reading ? debugMode ? $"{reading.Unit} · {PeriodLabel(reading.Period)}" : reading.Unit : status);
+            item.Icon = Terminal.VenueLogo(venue, 14);
+            yield return item;
             if (!chosen || interestCandidates.GetValueOrDefault(venue) is not { Length: > 0 } choices ||
                 (choices.Length == 1 && layer?.Market?.Key == choices[0].Key)) continue;
             foreach (var candidate in choices)
@@ -239,6 +240,12 @@ internal sealed partial class ChartCell
         AutomationProperties.SetItemStatus(indicatorTools, indicatorOptions.Empty ? "" : "Индикаторы включены");
     }
 
+    private void UpdateIndicatorHint(bool shown)
+    {
+        bool hasCaption = indicatorOptions.Profile || indicatorOptions.Liquidations || (debugMode && indicatorOptions.HasInterest);
+        indicatorHint.Visibility = shown && hasCaption ? Visibility.Visible : Visibility.Collapsed;
+    }
+
     private void SavePaneWeights(ChartPaneWeights? weights)
     {
         if (market is { } instrument) features?.SetPaneWeights(instrument.Key, weights);
@@ -259,7 +266,17 @@ internal sealed partial class ChartCell
         if (before < 0 || after < 0 || after >= topToBottom.Length) return;
         (topToBottom[before], topToBottom[after]) = (topToBottom[after], topToBottom[before]);
         var order = topToBottom.Reverse().ToDictionary(source => source, source => sources[source]);
-        features.SetOptions(instrument.Key, overview, indicatorOptions with { Interest = order }, orderOnly: true);
+        features.SetOptions(instrument.Key, overview, indicatorOptions with { Interest = order }, presentationOnly: true);
+    }
+
+    private void ChangeInterestPresentation(Venue venue, Func<InterestPresentation, InterestPresentation> change)
+    {
+        if (market is not { } instrument || features == null || indicatorOptions.Interest?.ContainsKey(venue) != true) return;
+        var mode = change(indicatorOptions.PresentationFor(venue));
+        var modes = new Dictionary<Venue, InterestPresentation>(indicatorOptions.InterestPresentation ?? []);
+        if (mode == new InterestPresentation(Usd: indicatorOptions.InterestUsd)) modes.Remove(venue);
+        else modes[venue] = mode;
+        features.SetOptions(instrument.Key, overview, indicatorOptions with { InterestPresentation = modes }, presentationOnly: true);
     }
 
     private void ResetChartTools()
@@ -289,7 +306,7 @@ internal sealed partial class ChartCell
             interestLayers.Remove(venue);
         bool shown = active && IsVisible && market != null && !indicatorOptions.Empty;
         bool details = shown && indicatorOptions.HasDetails;
-        indicatorHint.Visibility = details ? Visibility.Visible : Visibility.Collapsed;
+        UpdateIndicatorHint(shown);
         int minimum = !details ? 116 : indicatorOptions.HasInterest ? 186 : 165;
         if (MinimumGridHeight != minimum)
         {

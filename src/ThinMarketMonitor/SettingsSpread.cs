@@ -12,8 +12,8 @@ internal sealed partial class SettingsPanel
     {
         var panel = new StackPanel { Margin = new Thickness(0, 18, 0, 0) };
         panel.Children.Add(Terminal.Heading("Спред, %"));
-        panel.Children.Add(Terminal.Copy("(Лучший ask − лучший bid) / средняя цена bid и ask × 100%."));
-        panel.Children.Add(Terminal.Copy("Для сигналов и их списка инструментов. Пустая граница — без ограничения. Границы включаются в диапазон."));
+        panel.Children.Add(Terminal.Copy("Пустая граница — без ограничения."));
+        AddDiagnostic(panel, "Спред = (лучший ask − лучший bid) / средняя цена bid и ask × 100%. Границы включаются в диапазон.");
         var enabled = new CheckBox { Content = "Фильтровать по спреду", IsChecked = settings.SpreadFilter.Enabled,
             Margin = new Thickness(0, 10, 0, 7) };
         AutomationProperties.SetName(enabled, "Фильтровать по спреду");
@@ -40,7 +40,7 @@ internal sealed partial class SettingsPanel
         validation.Foreground = Terminal.Brush("Excluded");
         validation.Margin = new Thickness(0, 5, 0, 5);
         panel.Children.Add(validation);
-        panel.Children.Add(Terminal.Copy("Котировки обновляются для всех инструментов после листингов. Пока bid/ask отсутствуют или устарели, инструмент не проходит фильтр. При выключенном фильтре котировки нужны только для добавленной колонки спреда в открытом обзоре."));
+        AddDiagnostic(panel, "Для фильтра нужна свежая котировка. Колонка спреда в «Обзоре» обновляется отдельно.");
 
         bool Valid(out SpreadRule rule)
         {
