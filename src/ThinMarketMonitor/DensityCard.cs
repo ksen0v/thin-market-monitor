@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 
@@ -27,11 +28,15 @@ internal sealed class DensityCard : Border
     internal const double HeaderHeight = 29;
     internal const double RowHeight = 23;
     private readonly DensityRows rows;
-    private Market market;
+    private readonly Button terminal;
+    private readonly Action<Market> openInTerminal;
+    private DensityLevel[] levels;
 
-    public DensityCard(DensityCardKey key, DensityLevel[] levels, Action<Market> editCoin, Action<Market> blockCoin)
+    public DensityCard(DensityCardKey key, DensityLevel[] levels, Action<Market> editCoin, Action<Market> blockCoin,
+        Action<Market> openInTerminal)
     {
-        market = levels[0].Market;
+        this.levels = levels;
+        this.openInTerminal = openInTerminal;
         Background = Terminal.Brush("Plot");
         BorderBrush = Terminal.Brush("Outline");
         BorderThickness = new Thickness(1);
@@ -42,9 +47,14 @@ internal sealed class DensityCard : Border
         var panel = new DockPanel();
         var header = new DockPanel { Margin = new Thickness(6, 0, 3, 0) };
         var actions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        terminal = Terminal.IconButton("external", $"Открыть в Colibri · {key.Title}");
+        terminal.Content = Terminal.AssetLogo("colibri", 15);
+        terminal.Visibility = Visibility.Collapsed;
+        terminal.Click += (_, _) => OpenTerminal();
+        Unloaded += (_, _) => CloseTerminalMenu();
         var settings = Terminal.IconButton("settings-nav", $"Настройки монеты · {key.Title}");
         var blacklist = Terminal.IconButton("ban", $"В чёрный список плотностей · {key.Title}");
-        foreach (var button in new[] { settings, blacklist })
+        foreach (var button in new[] { terminal, settings, blacklist })
         {
             button.Width = 25;
             button.Height = 23;
@@ -53,8 +63,8 @@ internal sealed class DensityCard : Border
             button.Foreground = Terminal.Brush("Muted");
             actions.Children.Add(button);
         }
-        settings.Click += (_, _) => editCoin(market);
-        blacklist.Click += (_, _) => blockCoin(market);
+        settings.Click += (_, _) => editCoin(this.levels[0].Market);
+        blacklist.Click += (_, _) => blockCoin(this.levels[0].Market);
         DockPanel.SetDock(actions, Dock.Right);
         header.Children.Add(actions);
 
@@ -90,8 +100,55 @@ internal sealed class DensityCard : Border
 
     internal void Update(DensityLevel[] levels)
     {
-        market = levels[0].Market;
+        this.levels = levels;
         rows.Update(levels);
+    }
+
+    internal void SetColibriEnabled(bool enabled)
+    {
+        terminal.Visibility = enabled ? Visibility.Visible : Visibility.Collapsed;
+        if (!enabled) CloseTerminalMenu();
+    }
+
+    private void OpenTerminal()
+    {
+        if (terminal.Visibility != Visibility.Visible) return;
+        if (terminal.ContextMenu is { IsOpen: true }) { CloseTerminalMenu(); return; }
+        var markets = levels.Select(level => level.Market).DistinctBy(market => market.Key)
+            .OrderBy(market => market.Venue).ThenBy(market => market.Key, StringComparer.Ordinal).ToArray();
+        if (markets.Length == 1)
+        {
+            openInTerminal(markets[0]);
+            return;
+        }
+
+        var menu = new ContextMenu
+        {
+            Style = Terminal.Style("TerminalMenu"), PlacementTarget = terminal, Placement = PlacementMode.Bottom, MinWidth = 176
+        };
+        foreach (var market in markets)
+        {
+            var item = new MenuItem
+            {
+                Header = $"{market.Source.Label} · {market.Ticker}", Icon = Terminal.VenueLogo(market.Venue, 14),
+                Style = Terminal.Style("TerminalMenuItem")
+            };
+            item.Click += (_, _) =>
+            {
+                if (terminal.Visibility == Visibility.Visible &&
+                    levels.FirstOrDefault(level => level.Market.Key == market.Key) is { } current)
+                    openInTerminal(current.Market);
+            };
+            menu.Items.Add(item);
+        }
+        menu.Closed += (_, _) => { if (ReferenceEquals(terminal.ContextMenu, menu)) terminal.ContextMenu = null; };
+        terminal.ContextMenu = menu;
+        menu.IsOpen = true;
+    }
+
+    private void CloseTerminalMenu()
+    {
+        if (terminal.ContextMenu is { } menu) menu.IsOpen = false;
     }
 
     internal void SetViewport(double top, double bottom) => rows.SetViewport(top - HeaderHeight - 1, bottom - HeaderHeight - 1);

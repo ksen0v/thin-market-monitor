@@ -15,7 +15,7 @@ internal sealed class DensityPanel : DockPanel
     {
         public DensityCardKey Key { get; } = key;
         public DensityLevel[] Levels { get; set; } = levels;
-        public int Column { get; set; } = -1;
+        public int Column { get; set; }
         public double Top { get; set; }
         public double Height => DensityCard.HeaderHeight + DensityCard.RowHeight * Levels.Length + 2;
         public DensityCard? View { get; set; }
@@ -26,7 +26,8 @@ internal sealed class DensityPanel : DockPanel
     private readonly DensityOptions options;
     private readonly Action<Market> editCoin;
     private readonly Action<Market> blockCoin;
-    private readonly Canvas board = new();
+    private readonly Action<Market> openInTerminal;
+    private readonly Canvas board = new() { VerticalAlignment = VerticalAlignment.Top };
     private readonly ScrollViewer scroll = new()
     {
         HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Visible,
@@ -38,16 +39,17 @@ internal sealed class DensityPanel : DockPanel
     private readonly Dictionary<DensityCardKey, Card> cards = [];
     private readonly HashSet<Card> realized = [];
     private DensityLevel[] displayed = [];
-    private int columnCount;
     private double columnWidth;
     private double? pendingOffset;
+    private bool terminalEnabled;
 
     public DensityPanel(DensityOptions options, Action openSettings, Action openListings, Action<Market> editCoin,
-        Action<Market> blockCoin, Action selectionChanged)
+        Action<Market> blockCoin, Action<Market> openInTerminal, Action selectionChanged)
     {
         this.options = options;
         this.editCoin = editCoin;
         this.blockCoin = blockCoin;
+        this.openInTerminal = openInTerminal;
         Background = Terminal.Brush("Shell");
 
         var top = Terminal.Rule(new Thickness(0, 0, 0, 1));
@@ -124,6 +126,12 @@ internal sealed class DensityPanel : DockPanel
         RefreshSources();
     }
 
+    internal void SetColibriEnabled(bool enabled)
+    {
+        terminalEnabled = enabled;
+        foreach (var card in realized) card.View?.SetColibriEnabled(enabled);
+    }
+
     private void RefreshSources()
     {
         foreach (var (venue, (button, segments)) in sources)
@@ -192,7 +200,8 @@ internal sealed class DensityPanel : DockPanel
             }
         }
         foreach (var (key, items) in snapshots.Where(pair => !cards.ContainsKey(pair.Key))
-            .OrderBy(pair => pair.Key.Title, StringComparer.Ordinal).ThenBy(pair => pair.Key.Segment)
+            .OrderBy(pair => pair.Value.Min(level => level.FirstSeen))
+            .ThenBy(pair => pair.Key.Title, StringComparer.Ordinal).ThenBy(pair => pair.Key.Segment)
             .ThenBy(pair => pair.Key.Asset, StringComparer.Ordinal).ThenBy(pair => pair.Key.Delivery, StringComparer.Ordinal)
             .ThenBy(pair => pair.Key.Unit))
         {
@@ -223,24 +232,26 @@ internal sealed class DensityPanel : DockPanel
         double width = scroll.ViewportWidth;
         if (width < Gap * 2 + 1) return;
         int columns = Math.Max(1, (int)((width - Gap) / (TargetWidth + Gap)));
-        if (columns != columnCount)
-        {
-            columnCount = columns;
-            foreach (var card in ordered) card.Column = -1;
-        }
         columnWidth = (width - Gap * (columns + 1)) / columns;
-        var bottoms = Enumerable.Repeat(Gap, columns).ToArray();
-        foreach (var card in ordered)
+        double top = Gap, rowHeight = 0;
+        for (int i = 0; i < ordered.Count; i++)
         {
-            if (card.Column < 0) card.Column = Array.IndexOf(bottoms, bottoms.Min());
-            card.Top = bottoms[card.Column];
-            bottoms[card.Column] += card.Height + Gap;
+            var card = ordered[i];
+            card.Column = i % columns;
+            card.Top = top;
+            rowHeight = Math.Max(rowHeight, card.Height);
+            if (card.Column == columns - 1 || i == ordered.Count - 1)
+            {
+                top += rowHeight + Gap;
+                rowHeight = 0;
+            }
         }
-        board.Height = ordered.Count == 0 ? 0 : bottoms.Max();
+        board.Height = ordered.Count == 0 ? 0 : top;
         double position = pendingOffset ?? scroll.VerticalOffset;
         if (anchor is { } target)
             position = Math.Max(0, target.Card.Top + Math.Min(target.Offset, target.Card.Height - 1));
         position = Math.Clamp(position, 0, Math.Max(0, board.Height - scroll.ViewportHeight));
+        pendingOffset = null;
         if (Math.Abs(position - scroll.VerticalOffset) > .5)
         {
             pendingOffset = position;
@@ -261,7 +272,8 @@ internal sealed class DensityPanel : DockPanel
             if (!Visible(card) && card.View?.IsKeyboardFocusWithin != true) continue;
             if (card.View == null)
             {
-                card.View = new DensityCard(card.Key, card.Levels, editCoin, blockCoin);
+                card.View = new DensityCard(card.Key, card.Levels, editCoin, blockCoin, openInTerminal);
+                card.View.SetColibriEnabled(terminalEnabled);
                 board.Children.Add(card.View);
                 realized.Add(card);
             }

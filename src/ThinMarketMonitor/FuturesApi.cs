@@ -146,29 +146,40 @@ internal sealed partial class ExchangeApi
     private static string? UsStockListingAsset(string ticker) =>
         ticker is "AAPL" or "AMD" ? "equity:US:" + ticker : null;
 
-    // These aliases are for listing comparisons. Keep the exchange's price units and symbol.
-    private static string? DenominatedListingAsset(Venue venue, string asset) => (venue, asset) switch
+    private static string? DenominatedListingAsset(Venue venue, string asset) => ExtendedDenomination(venue, asset)?.Asset;
+
+    // Catalogs keep the exchange's symbols and prices. Only a chart overlay projects prices into another market's units.
+    private static (string Asset, int Units)? ExtendedDenomination(Venue venue, string asset) => (venue, asset) switch
     {
-        (Venue.Weex or Venue.Lighter, "1000PEPE") or (Venue.Hyperliquid, "kPEPE") => "PEPE",
-        (Venue.Weex or Venue.Lighter, "1000FLOKI") or (Venue.Hyperliquid, "kFLOKI") => "FLOKI",
-        (Venue.Weex or Venue.Lighter, "1000SHIB") or (Venue.Hyperliquid, "kSHIB") => "SHIB",
-        (Venue.Weex or Venue.Lighter or Venue.KuCoin or Venue.Mexc, "1000BONK") or (Venue.Hyperliquid, "kBONK") => "BONK",
+        (Venue.Weex or Venue.Lighter, "1000PEPE") or (Venue.Hyperliquid, "kPEPE") => ("PEPE", 1000),
+        (Venue.Weex or Venue.Lighter, "1000FLOKI") or (Venue.Hyperliquid, "kFLOKI") => ("FLOKI", 1000),
+        (Venue.Weex or Venue.Lighter, "1000SHIB") or (Venue.Hyperliquid, "kSHIB") => ("SHIB", 1000),
+        (Venue.Weex or Venue.Lighter or Venue.KuCoin or Venue.Mexc, "1000BONK") or (Venue.Hyperliquid, "kBONK") => ("BONK", 1000),
         _ => null
     };
 
     internal static string Underlying(Venue venue, string asset)
     {
         if (venue is Venue.KuCoin or Venue.Bitget && asset == "XBT") return "BTC";
-        // Explicit exchange denominations only. The original contract symbol and price units remain intact.
-        return (venue, asset) switch
-        {
-            (Venue.Binance or Venue.Bybit or Venue.Bitget or Venue.Gate, "1000SHIB") => "SHIB",
-            (Venue.Binance or Venue.Bybit or Venue.Bitget or Venue.Gate, "1000PEPE") => "PEPE",
-            (Venue.Binance or Venue.Bybit, "1000BONK") => "BONK",
-            (Venue.Binance or Venue.Bybit, "1000FLOKI") => "FLOKI",
-            (Venue.Binance or Venue.Bybit, "1000SATS") => "SATS",
-            (Venue.Bybit, "10000LADYS") => "LADYS",
-            _ => asset
-        };
+        return ContractDenomination(venue, asset)?.Asset ?? asset;
+    }
+
+    private static (string Asset, int Units)? ContractDenomination(Venue venue, string asset) => (venue, asset) switch
+    {
+        (Venue.Binance or Venue.Bybit or Venue.Bitget or Venue.Gate, "1000SHIB") => ("SHIB", 1000),
+        (Venue.Binance or Venue.Bybit or Venue.Bitget or Venue.Gate, "1000PEPE") => ("PEPE", 1000),
+        (Venue.Binance or Venue.Bybit, "1000BONK") => ("BONK", 1000),
+        (Venue.Binance or Venue.Bybit, "1000FLOKI") => ("FLOKI", 1000),
+        (Venue.Binance or Venue.Bybit, "1000SATS") => ("SATS", 1000),
+        (Venue.Bybit, "10000LADYS") => ("LADYS", 10000),
+        _ => null
+    };
+
+    internal static int PriceDenomination(Market market)
+    {
+        if (market.Contract is not { } contract) return 1;
+        string native = contract.NativeBase ?? (market.Venue == Venue.Hyperliquid ? market.Symbol : market.Base);
+        var denomination = ContractDenomination(market.Venue, native) ?? ExtendedDenomination(market.Venue, native);
+        return denomination is { } known && known.Asset == market.ListingAsset ? known.Units : 1;
     }
 }

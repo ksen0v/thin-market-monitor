@@ -30,16 +30,24 @@ public partial class MainWindow
 
     private void RefreshDensities()
     {
-        bool showSignals = settings.Densities.SignalsOverlay;
-        foreach (var cell in cells)
-            cell.Plot.SetDensityLevels(showSignals && cell.IsVisible ? densityMonitor.ForMarket(cell.Instrument) : []);
-        overviewChart.Plot.SetDensityLevels(settings.Densities.OverviewOverlay && overviewChart.IsVisible
-            ? densityMonitor.ForMarket(overviewChart.Instrument) : []);
-        if (!settings.DensityWorkspace || fullscreenCell != null) return;
+        var options = settings.Densities;
+        bool showBoard = settings.DensityWorkspace && fullscreenCell == null;
+        var charts = cells.Append(overviewChart).Select(cell => (Cell: cell, Market: OverlayMarket(cell))).ToArray();
+        var assets = charts.Select(chart => chart.Market?.ListingAsset).OfType<string>().ToHashSet(StringComparer.Ordinal);
+        var levels = showBoard || assets.Count != 0 ? densityMonitor.Visible(showBoard ? null : assets) : [];
+        var chartLevels = levels.Where(level => assets.Contains(level.Market.ListingAsset))
+            .ToLookup(level => level.Market.ListingAsset, StringComparer.Ordinal);
+        foreach (var (cell, market) in charts)
+            cell.Plot.SetDensityLevels(market == null ? [] : DensityChartLevel.ForMarket(market, chartLevels[market.ListingAsset]));
+        if (!showBoard) return;
 
         var pending = densityMonitor.PendingCatalogs
             .Select(source => (Source: source, Error: catalogs.GetValueOrDefault(source)?.Error))
             .ToArray();
-        densityPanel.Update(densityMonitor.Visible(), densityMonitor.Status(), pending, settings.DebugMode);
+        densityPanel.Update(levels, densityMonitor.Status(), pending, settings.DebugMode);
+
+        Market? OverlayMarket(ChartCell cell) =>
+            cell.IsVisible && (ReferenceEquals(cell, overviewChart) ? options.OverviewOverlay : options.SignalsOverlay)
+                ? cell.Instrument : null;
     }
 }

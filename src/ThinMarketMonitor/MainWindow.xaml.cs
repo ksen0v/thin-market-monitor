@@ -72,13 +72,13 @@ public partial class MainWindow : Window, IDisposable
         notifications = testNotifications ?? new(settings, Dispatcher, speak: neuralVoice.Speak);
         signalCooldown = new(signalClock ?? TimeProvider.System);
         api = new(http);
-        densityMonitor = new(api);
-        densityPanel = new(settings.Densities, () => ShowSettings(), OpenDensityListings, market => ShowSettings(market),
-            BlockDensityCoin, DensitySettingsChanged);
-        DensityHost.Content = densityPanel;
-        var chartFeatures = new ChartFeatures(settings, api, source => catalogs.GetValueOrDefault(source), Save);
         colibri = new(settings, colibriClient);
         colibri.StatusChanged += ShowIntegrationStatus;
+        densityMonitor = new(api);
+        densityPanel = new(settings.Densities, () => ShowSettings(), OpenDensityListings, market => ShowSettings(market),
+            BlockDensityCoin, market => colibri.Open(market), DensitySettingsChanged);
+        DensityHost.Content = densityPanel;
+        var chartFeatures = new ChartFeatures(settings, api, source => catalogs.GetValueOrDefault(source), Save);
         var mark = Terminal.Icon("candles");
         System.Windows.Documents.TextElement.SetForeground(mark, Terminal.Brush("Accent"));
         BrandMark.Child = mark;
@@ -903,6 +903,7 @@ public partial class MainWindow : Window, IDisposable
     {
         colibri.Configure();
         foreach (var cell in cells) cell.SetColibriEnabled(settings.ColibriEnabled);
+        densityPanel.SetColibriEnabled(settings.ColibriEnabled);
         overviewPanel.UpdateIntegration();
         ShowIntegrationStatus();
     }

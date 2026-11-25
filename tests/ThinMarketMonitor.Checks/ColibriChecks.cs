@@ -269,6 +269,21 @@ internal static class ColibriChecks
             sync.IsChecked = false;
             sync.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
             Ensure(!settings.ColibriOverviewSync, "overview toggle persists its setting");
+
+            var densityPanel = (DensityPanel)typeof(MainWindow).GetField("densityPanel", flags)!.GetValue(window)!;
+            ((Button)window.FindName("DensityButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            densityPanel.Update([new(hyundai, new(BookSide.Ask, 146), 20000, 1, now - 20_000, now, true, "#EFB863")],
+                [new(Venue.Weex, 1, 1, 0, 0, 4, null)], [], false);
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            var board = (Canvas)densityPanel.Children.OfType<ScrollViewer>().Single().Content;
+            var densityCard = board.Children.OfType<DensityCard>().Single();
+            var densityOpen = (Button)typeof(DensityCard).GetField("terminal", flags)!.GetValue(densityCard)!;
+            Ensure(densityOpen.IsVisible && densityOpen.Content is Image, "a density card uses the configured Colibri icon");
+            densityOpen.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await Until(() => server.CompletedWrites.Count == initial + 5);
+            CheckWeexWrite(server, "HYUNDAIUSDT");
+
             ((Button)window.FindName("SettingsButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             window.UpdateLayout();
             var options = (SettingsPanel)typeof(MainWindow).GetField("settingsPanel", flags)!.GetValue(window)!;
@@ -277,8 +292,8 @@ internal static class ColibriChecks
             Ensure(options.ActualHeight > 0, "integration settings render");
             settings.ColibriEnabled = false;
             typeof(MainWindow).GetMethod("UpdateIntegration", flags)!.Invoke(window, null);
-            Ensure(open.Visibility == Visibility.Collapsed && sync.Visibility == Visibility.Collapsed,
-                "disabling integration updates signal and overview controls");
+            Ensure(open.Visibility == Visibility.Collapsed && sync.Visibility == Visibility.Collapsed &&
+                densityOpen.Visibility == Visibility.Collapsed, "disabling integration updates all terminal controls");
             window.Close();
             await SpreadChecks.Ui();
             await OverviewSpreadChecks.Run();

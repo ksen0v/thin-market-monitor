@@ -57,10 +57,10 @@ internal sealed class DensityMonitor(ExchangeApi api) : IDisposable
         return scan.Levels(market.Key, Now);
     }
 
-    public DensityLevel[] Visible()
+    public DensityLevel[] Visible(IReadOnlySet<string>? assets = null)
     {
         long now = Now;
-        return scans.Values.SelectMany(s => s.Visible(now)).ToArray();
+        return scans.Values.SelectMany(s => s.Visible(now, assets)).ToArray();
     }
 
     public DensityVenueStatus[] Status() => scans.Values.Select(s => s.Status).ToArray();
@@ -151,10 +151,11 @@ internal sealed class DensityMonitor(ExchangeApi api) : IDisposable
         public DensityLevel[] Levels(string key, long now) =>
             active.TryGetValue(key, out var entry) && IsCurrent(entry, targetSet, now) ? entry.Levels : [];
 
-        public IEnumerable<DensityLevel> Visible(long now)
+        public IEnumerable<DensityLevel> Visible(long now, IReadOnlySet<string>? assets)
         {
             var targets = targetSet;
-            return active.Values.Where(entry => IsCurrent(entry, targets, now)).SelectMany(entry => entry.Levels);
+            return active.Values.Where(entry => (assets == null || assets.Contains(entry.Target.Market.ListingAsset)) &&
+                IsCurrent(entry, targets, now)).SelectMany(entry => entry.Levels);
         }
 
         private static bool IsCurrent(Active entry, TargetSet targets, long now) =>

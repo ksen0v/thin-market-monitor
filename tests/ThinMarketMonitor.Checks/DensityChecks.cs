@@ -115,6 +115,7 @@ internal static class DensityChecks
             "inverse contract quantities convert to quote value");
         Require(Settings.Deserialize("{}").Densities.Venues.Count == 0, "existing installs are opted out until sources are chosen");
         ListingRulesAndPersistence();
+        ChartPriceProjection();
 
         using var handler = new DepthHandler();
         using var http = new HttpClient(handler);
@@ -124,10 +125,13 @@ internal static class DensityChecks
             Popup = true, Venues = { [Venue.Bybit] = Rule with { MinSeconds = 0 } }
         };
         var other = Market with { Base = "OTHER", Symbol = "OTHERUSDT" };
+        var bybitPerp = Market with { Contract = new("linear", Perpetual: true) };
+        var binancePerp = bybitPerp with { Venue = Venue.Binance, Contract = new("usdm", Perpetual: true) };
         var catalogs = new Dictionary<MarketSource, Catalog>
         {
             [Market.Source] = new([Market, other]),
-            [new(Venue.Bybit, Segment.Futures)] = new([Market with { Contract = new("linear") }])
+            [bybitPerp.Source] = new([bybitPerp]),
+            [binancePerp.Source] = new([binancePerp])
         };
         monitor.Configure(options, catalogs);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(23));
@@ -154,10 +158,50 @@ internal static class DensityChecks
         while (monitor.ForMarket(Market).Length == 0) await Task.Delay(80, timeout.Token);
         Require(monitor.Visible().Single() is { Large: true } restoredLevel && restoredLevel.Market == Market,
             "venue thresholds keep applying after the coin override is cleared");
+
+        options.ToggleSource(bybitPerp.Source);
+        options.Venues[Venue.Binance] = Rule with { Spot = false, Futures = true, MinSeconds = 0 };
+        monitor.Configure(options, catalogs);
+        var assets = new HashSet<string>(StringComparer.Ordinal) { Market.ListingAsset };
+        while (monitor.Visible(assets).Length < 3) await Task.Delay(80, timeout.Token);
+        Require(DensityChartLevel.ForMarket(Market, monitor.Visible(assets)).Select(entry => entry.Level.Market.Source)
+            .ToHashSet().SetEquals([Market.Source, bybitPerp.Source, binancePerp.Source]),
+            "one chart receives selected spot and futures books across venues");
+        options.ToggleSource(bybitPerp.Source);
+        monitor.Configure(options, catalogs);
+        Require(monitor.Visible(assets).All(entry => entry.Market != bybitPerp),
+            "deselecting a market immediately removes its overlay");
         options.Venues.Clear();
         monitor.Configure(options, catalogs);
         Require(monitor.Visible().Length == 0 && monitor.Status().Length == 0, "disabled venue removes levels and scan");
         Console.WriteLine("Density source and listing rules, settings migration, per-coin thresholds, blacklist and adaptive depth passed.");
+    }
+
+    private static void ChartPriceProjection()
+    {
+        var spot = new Market(Venue.Binance, "PEPEUSDT", "PEPE", "USDT");
+        var perp = new Market(Venue.Bybit, "1000PEPEUSDT", "PEPE", "USDT",
+            new("linear", Perpetual: true, NativeBase: "1000PEPE"));
+        var weex = new Market(Venue.Weex, "1000PEPEUSDT", "1000PEPE", "USDT",
+            new("linear", Perpetual: true), new(ListingAsset: "PEPE"));
+        var hyper = new Market(Venue.Hyperliquid, "kPEPE", "KPEPE", "USDT", new("perp", Perpetual: true),
+            new(ListingAsset: "PEPE"));
+        var inverse = new Market(Venue.Kraken, "PI_PEPEUSD", "PEPE", "USD",
+            new("derivatives", 100, QuantityUnit.Quote, Perpetual: true));
+        var unrelated = spot with { Venue = Venue.Hyperliquid, Identifiers = new(ListingAsset: "hyperliquid:unrelated") };
+        var untrusted = spot with { Venue = Venue.Lighter, Identifiers = new(TrustedUsdQuote: false) };
+        var eur = spot with { Venue = Venue.Kraken, Symbol = "PEPEEUR", Quote = "EUR" };
+        var levels = new[] { SampleLevel(spot, .000012, 400), SampleLevel(perp, .012, 700), SampleLevel(weex, .012, 800),
+            SampleLevel(hyper, .012, 900), SampleLevel(inverse, .000012, 650), SampleLevel(unrelated, 100, 4000),
+            SampleLevel(untrusted, 100, 4000), SampleLevel(eur, 100, 4000) };
+        var projected = DensityChartLevel.ForMarket(spot, levels);
+        Require(projected.Length == 5 && projected.All(item => Math.Abs(item.Price - .000012) < 1e-12) &&
+            projected.Select(item => item.Level).SequenceEqual(levels.Take(5)),
+            "use confirmed price denominations and dollar quotes without changing source, amount or side");
+        var projectedToPerp = DensityChartLevel.ForMarket(perp, levels);
+        Require(projectedToPerp.Length == 5 && projectedToPerp.All(item => Math.Abs(item.Price - .012) < 1e-12) &&
+            DensityChartLevel.ForMarket(eur, levels).Single() == new DensityChartLevel(levels[^1], 100),
+            "projection also works onto a denominated chart and never assumes an unknown foreign exchange rate");
     }
 
     private static void ListingRulesAndPersistence()
@@ -224,9 +268,10 @@ internal static class DensityChecks
         var options = settings.Densities;
         options.Venues[Market.Venue] = Rule;
         Market? editing = null;
+        var opened = new List<Market>();
         int changes = 0;
         var panel = new DensityPanel(options, () => { }, () => { }, market => editing = market,
-            market => options.Block(market), () => changes++);
+            market => options.Block(market), opened.Add, () => changes++);
         using var http = new HttpClient(new DepthHandler());
         using var colibri = new ColibriBridge(settings);
         var window = new Window { Width = 1180, Height = 640, Left = -3000, Top = -2000, ShowActivated = false,
@@ -236,11 +281,29 @@ internal static class DensityChecks
             var levels = Enumerable.Range(0, 42).SelectMany(i => Enumerable.Range(0, 4).Select(row =>
                 SampleLevel(Market with { Base = $"COIN{i:D2}", Symbol = $"COIN{i:D2}USDT" }, 98 + row * .1, 10_000 + i * 1800 + row))).ToArray();
             window.Show();
-            Update(levels);
+            Update([levels[12]]);
             await Layout();
             var scroll = panel.Children.OfType<ScrollViewer>().Single();
             var board = (Canvas)scroll.Content;
             DensityCard[] VisibleCards() => board.Children.Cast<DensityCard>().ToArray();
+            var lone = VisibleCards().Single();
+            var origin = lone.TranslatePoint(new Point(), scroll);
+            Require(origin is { X: >= 5 and <= 7, Y: >= 5 and <= 7 },
+                "a short board starts at the top left of the actual viewport");
+            Update([levels[8], levels[0], levels[12]]);
+            await Layout();
+            var firstRow = VisibleCards().OrderBy(Canvas.GetLeft).ToArray();
+            Require(firstRow.Length == 3 && firstRow[0] == lone && firstRow.All(card => Canvas.GetTop(card) == Canvas.GetTop(lone)) &&
+                AutomationProperties.GetName(firstRow[1]) == "COIN00/USDT · Spot",
+                "new cards fill the first row from left to right in insertion order");
+            Update([levels[8]]);
+            await Layout();
+            Require(VisibleCards().Single().TranslatePoint(new Point(), scroll) == origin,
+                "after disappearances the surviving card returns to the first position");
+            Update([]);
+            Update(levels);
+            await Layout();
+
             var cards = VisibleCards();
             Require(cards.Length is > 3 and < 42 && cards.Select(Canvas.GetLeft).Distinct().Count() == 3,
                 "normal window lays out three columns and only realizes the surrounding visible cards");
@@ -249,6 +312,24 @@ internal static class DensityChecks
             Require(editing?.Base == "COIN00", "the settings icon passes the coin from the card");
             Click(VisualChildren(first).OfType<Button>().Single(button => AutomationProperties.GetName(button).StartsWith("В чёрный")));
             Require(options.Blacklist.SequenceEqual(["COIN00"]), "the card adds to the densities blacklist");
+            var terminal = VisualChildren(first).OfType<Button>().Single(button => AutomationProperties.GetName(button).StartsWith("Открыть в Colibri"));
+            Click(terminal);
+            Require(opened.Count == 0, "the terminal action stays inactive when integration is disabled");
+            panel.SetColibriEnabled(true);
+            Click(terminal);
+            Require(opened.SequenceEqual([levels[0].Market]), "single-market card opens the exact market");
+            var secondVenue = levels[0] with { Market = levels[0].Market with { Venue = Venue.Binance } };
+            Update([.. levels, secondVenue]);
+            await Layout();
+            Click(terminal);
+            var chooser = terminal.ContextMenu!;
+            Require(chooser.Items.Count == 2 && opened.Count == 1, "multiple density markets require an explicit choice");
+            chooser.Items.OfType<MenuItem>().Single(item => ((string)item.Header).StartsWith("Binance", StringComparison.Ordinal))
+                .RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            chooser.IsOpen = false;
+            Require(opened.SequenceEqual([levels[0].Market, secondVenue.Market]), "the chosen exchange is sent to the terminal");
+            Update(levels);
+            await Layout();
             var bybit = VisualChildren(panel).OfType<Button>()
                 .Single(button => AutomationProperties.GetName(button) == "Источник плотностей · Bybit");
             var future = bybit.ContextMenu.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "Futures"));
@@ -313,19 +394,25 @@ internal static class DensityChecks
             var bid = SampleLevel(Market, 98, 7_800_000);
             var ask = SampleLevel(Market with { Venue = Venue.Weex, Contract = new("linear", Perpetual: true) }, 100.05, 505_000) with
                 { Key = new(BookSide.Ask, 100.05) };
-            plot.SetDensityLevels([bid, ask]);
+            plot.SetDensityLevels(DensityChartLevel.ForMarket(Market, [bid, ask]));
             await Layout();
             var images = Drawings(VisualTreeHelper.GetDrawing(plot)!).OfType<ImageDrawing>().ToArray();
             Require(images.Length == 2 && images.Any(image => image.ImageSource == Terminal.VenueLogoSource(Venue.Bybit)) &&
                 images.Any(image => image.ImageSource == Terminal.VenueLogoSource(Venue.Weex)) &&
                 CandlePlot.DensityLabel(bid) == "$7,8M · Spot" && CandlePlot.DensityLabel(ask) == "$505K · Futures",
                 "rendered density badges carry their venue logos, segments and compact USD amounts");
-            plot.SetDensityLevels([bid with { Usd = 8_700_000 }, ask]);
+            var cluster = new[] { bid with { Usd = 8_700_000 }, ask,
+                ask with { Market = ask.Market with { Venue = Venue.Binance }, Usd = 6_000_000 },
+                ask with { Market = ask.Market with { Venue = Venue.KuCoin }, Usd = 80_000 },
+                ask with { Market = ask.Market with { Venue = Venue.Gate }, Usd = 250_000 } };
+            plot.SetDensityLevels(DensityChartLevel.ForMarket(Market, cluster));
             await Layout();
-            var labels = Drawings(VisualTreeHelper.GetDrawing(plot)!).OfType<GlyphRunDrawing>()
+            var drawings = Drawings(VisualTreeHelper.GetDrawing(plot)!).ToArray();
+            var labels = drawings.OfType<GlyphRunDrawing>()
                 .Select(drawing => new string(drawing.GlyphRun.Characters.ToArray())).ToArray();
-            Require(labels.Any(label => label.Contains("$8,7M", StringComparison.Ordinal)),
-                "a size change redraws the label at the existing price");
+            Require(labels.Any(label => label.Contains("$8,7M", StringComparison.Ordinal)) &&
+                drawings.OfType<ImageDrawing>().Count() == cluster.Length,
+                "changes in size redraw the label and nearby prices can show all their venue badges");
         }
         finally { window.Close(); }
         Console.WriteLine("Density WPF cards, responsive layout, scroll anchoring, per-coin actions and chart badges passed.");
@@ -370,7 +457,11 @@ internal static class DensityChecks
             int count = query.EndsWith("limit=20", StringComparison.Ordinal) ? 20 : 50;
             double[][] Side(double start, double step) => Enumerable.Range(0, count)
                 .Select(i => new double[] { start + step * i, i == 1 && step < 0 ? 10 : 1 }).ToArray();
-            string body = JsonSerializer.Serialize(new { retCode = 0, result = new { b = Side(99.9, -.15), a = Side(100.1, .15) } });
+            var bids = Side(99.9, -.15);
+            var asks = Side(100.1, .15);
+            string body = request.RequestUri.Host == "fapi.binance.com"
+                ? JsonSerializer.Serialize(new { bids, asks })
+                : JsonSerializer.Serialize(new { retCode = 0, result = new { b = bids, a = asks } });
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) });
         }
     }
