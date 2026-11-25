@@ -13,8 +13,8 @@ internal sealed partial class SettingsPanel : Border, IDisposable
 {
     private const int FiltersPage = 0, ModulesPage = 1, PricePage = 2, VolumePage = 3, ChartsPage = 4,
         OverviewPage = 5, IntegrationsPage = 6, AboutPage = 7, BlacklistPage = 8, NotificationsPage = 9, InterfacePage = 10,
-        DensityPage = 11;
-    private const int PageCount = 12;
+        DensityPage = 11, DensityBlacklistPage = 12, DensityCoinsPage = 13;
+    private const int PageCount = 14;
     private const double StandardHeight = 592;
     private readonly CancellationTokenSource stop = new();
     private readonly Grid layout = new();
@@ -52,7 +52,8 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         Action<bool> changed, Action close, Action restart, bool overview = false, Action? saveNotifications = null,
         Action? saveOverview = null, Action<SignalTone>? previewSound = null, RussianVoicePack? neuralVoice = null,
         Action<string>? previewVoice = null, Action? savePreferences = null, Action? saveDiagnostics = null,
-        Action? saveDensities = null, bool densities = false)
+        Action? saveDensities = null, bool densities = false, Market? densityCoin = null,
+        Func<IEnumerable<Market>>? densityMarkets = null)
     {
         this.settings = settings;
         this.updater = updater;
@@ -101,7 +102,8 @@ internal sealed partial class SettingsPanel : Border, IDisposable
             (ModulesPage, "Модули", "listings"), (PricePage, "Импульс цены", "activity"),
             (VolumePage, "Импульс объёма", "volume"), (NotificationsPage, "Уведомления", "bell"));
         AddNavigationGroup(nav, "Обзор", (OverviewPage, "Инструменты", "overview-nav"));
-        AddNavigationGroup(nav, "Плотности", (DensityPage, "Скринер плотностей", "listings"));
+        AddNavigationGroup(nav, "Плотности", (DensityPage, "Сканирование", "listings"),
+            (DensityCoinsPage, "Настройки монет", "settings"), (DensityBlacklistPage, "Чёрный список", "ban"));
         AddNavigationGroup(nav, "Общие",
             (InterfacePage, "Интерфейс", "settings"), (ChartsPage, "Графики", "candles"),
             (IntegrationsPage, "Интеграции", "external"), (AboutPage, "О программе", "info"));
@@ -118,10 +120,13 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         pages[OverviewPage] = OverviewOptions();
         pages[IntegrationsPage] = Integrations();
         pages[AboutPage] = About();
-        pages[BlacklistPage] = BlacklistOptions();
+        pages[BlacklistPage] = BlacklistOptions(densities: false, () => changed(false));
         pages[NotificationsPage] = NotificationOptions();
         pages[InterfacePage] = InterfaceOptions();
-        pages[DensityPage] = DensitySettings(saveDensities ?? this.savePreferences);
+        var saveDensityOptions = saveDensities ?? this.savePreferences;
+        pages[DensityPage] = DensitySettings(saveDensityOptions);
+        pages[DensityBlacklistPage] = BlacklistOptions(densities: true, saveDensityOptions);
+        pages[DensityCoinsPage] = DensityCoinOptions(saveDensityOptions, densityCoin, densityMarkets);
         foreach (var page in pages) pageHost.Children.Add(page);
 
         var footer = Terminal.Rule(new Thickness(0, 1, 0, 0));
@@ -147,7 +152,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         Grid.SetRow(footer, 2);
         layout.Children.Add(footer);
         UpdateModuleNavigation();
-        int openingPage = densities ? DensityPage : overview ? OverviewPage : FiltersPage;
+        int openingPage = densityCoin != null ? DensityCoinsPage : densities ? DensityPage : overview ? OverviewPage : FiltersPage;
         SelectPage(openingPage);
         UpdateDiagnostics();
         Loaded += (_, _) =>

@@ -37,7 +37,7 @@ public partial class MainWindow : Window, IDisposable
     private HashSet<string> eligible = [];
     private MarketStreams? streams;
     private SettingsPanel? settingsPanel;
-    private SignalListingsPanel? signalListings;
+    private ListingRulesPanel? listingRulesPanel;
     private MarketPicker? picker;
     private IInputElement? previousFocus;
     private ChartCell? fullscreenCell;
@@ -73,7 +73,8 @@ public partial class MainWindow : Window, IDisposable
         signalCooldown = new(signalClock ?? TimeProvider.System);
         api = new(http);
         densityMonitor = new(api);
-        densityPanel = new(() => OpenSettings(DensityButton, new RoutedEventArgs()));
+        densityPanel = new(settings.Densities, () => ShowSettings(), OpenDensityListings, market => ShowSettings(market),
+            BlockDensityCoin, DensitySettingsChanged);
         DensityHost.Content = densityPanel;
         var chartFeatures = new ChartFeatures(settings, api, source => catalogs.GetValueOrDefault(source), Save);
         colibri = new(settings, colibriClient);
@@ -491,7 +492,7 @@ public partial class MainWindow : Window, IDisposable
             CloseDialog();
             OpenSignalListings(this, new RoutedEventArgs());
             UpdateLayout();
-            if (DialogHost.Content is not SignalListingsPanel || !SignalListingsButton.IsVisible)
+            if (DialogHost.Content is not ListingRulesPanel || !SignalListingsButton.IsVisible)
                 throw new InvalidOperationException("The signal listing dialog did not open.");
             CloseDialog();
             PickMarket(0);
@@ -545,8 +546,8 @@ public partial class MainWindow : Window, IDisposable
                 if (!stop.IsCancellationRequested)
                 {
                     catalogs[v] = catalog;
-                    if (ScansDensity(v)) densityMonitor.Configure(settings.Densities, catalogs);
-                    signalListings?.RefreshCatalogStatus();
+                    if (settings.Densities.NeedsCatalog(v)) densityMonitor.Configure(settings.Densities, catalogs);
+                    listingRulesPanel?.RefreshCatalogStatus();
                     RefreshOverview();
                     if (v.Segment == Segment.Spot || settings.Rule(v) != ListingRule.Ignore) ApplyFilter(false);
                 }
@@ -570,7 +571,7 @@ public partial class MainWindow : Window, IDisposable
     {
         bool defaultSpot = !MarketSource.All.Any(source => settings.Rule(source) == ListingRule.Require);
         return catalogs.Where(entry => entry.Value.ConnectionFailed).Select(entry => entry.Key).Where(source =>
-            ScansDensity(source) || settings.Rule(source) != ListingRule.Ignore || defaultSpot && source.Segment == Segment.Spot ||
+            settings.Densities.NeedsCatalog(source) || settings.Rule(source) != ListingRule.Ignore || defaultSpot && source.Segment == Segment.Spot ||
             settings.Overview && (source == settings.OverviewSource || settings.OverviewRule(source) != ListingRule.Ignore)).ToArray();
     }
 
@@ -784,14 +785,16 @@ public partial class MainWindow : Window, IDisposable
         ShowDialog(picker);
     }
 
-    private void OpenSettings(object sender, RoutedEventArgs e)
+    private void OpenSettings(object sender, RoutedEventArgs e) => ShowSettings();
+
+    private void ShowSettings(Market? densityCoin = null)
     {
         if (settingsPanel != null) { settingsPanel.Close(); return; }
         if (DialogHost.Content != null) CloseDialog();
         settingsPanel = new SettingsPanel(settings, new Updater(http), colibri, SettingsChanged, CloseDialog, Close, settings.Overview,
             () => { notifications.SettingsChanged(); Save(); }, () => { RefreshOverview(); Save(); }, notifications.PreviewSound,
             neuralVoice, notifications.PreviewVoice, Save, () => { RefreshDiagnostics(); Save(); },
-            DensitySettingsChanged, settings.DensityWorkspace);
+            DensitySettingsChanged, settings.DensityWorkspace, densityCoin, DensityCoinMarkets);
         settingsPanel.UpdateQuoteChoices(OverviewSourceQuotes());
         settingsPanel.UpdateFilter(CatalogStatus.Text);
         ShowDialog(settingsPanel);
@@ -821,8 +824,15 @@ public partial class MainWindow : Window, IDisposable
 
     private void OpenSignalListings(object sender, RoutedEventArgs e)
     {
-        signalListings = new SignalListingsPanel(settings, catalogs, () => SettingsChanged(false), CloseDialog);
-        ShowDialog(signalListings);
+        ShowListingRules("Листинги сигналов", settings.Rule,
+            source => settings.CycleListingRule(source, overview: false), () => SettingsChanged(false));
+    }
+
+    private void ShowListingRules(string title, Func<MarketSource, ListingRule> rule, Action<MarketSource> cycle, Action changed)
+    {
+        if (DialogHost.Content != null) CloseDialog();
+        listingRulesPanel = new ListingRulesPanel(title, settings, catalogs, rule, cycle, changed, CloseDialog);
+        ShowDialog(listingRulesPanel);
     }
 
     private async void SettingsChanged(bool thresholdsChanged)
@@ -853,7 +863,7 @@ public partial class MainWindow : Window, IDisposable
     {
         settingsPanel?.Dispose();
         settingsPanel = null;
-        signalListings = null;
+        listingRulesPanel = null;
         picker = null;
         DialogHost.Content = null;
         Overlay.Visibility = Visibility.Collapsed;

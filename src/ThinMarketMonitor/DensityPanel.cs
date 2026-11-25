@@ -1,145 +1,293 @@
-using System.Collections.ObjectModel;
-using System.ComponentModel;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
-using System.Windows.Data;
 using System.Windows.Media;
 
 namespace ThinMarketMonitor;
 
 internal sealed class DensityPanel : DockPanel
 {
-    private sealed class Row(DensityLevel level) : INotifyPropertyChanged
-    {
-        public DensityLevel Level { get; private set; } = level;
-        public string Ticker => Level.Market.Ticker;
-        public string Source => Level.Market.Source.Label;
-        public string Side => Level.SideLabel;
-        public double Price => Level.Key.Price;
-        public double Size => Level.Usd;
-        public double Distance => Level.Distance;
-        public double Age => (Level.Seen - Level.FirstSeen) / 1000d;
-        public DateTime FirstSeen => DateTimeOffset.FromUnixTimeMilliseconds(Level.FirstSeen).LocalDateTime;
-        public string Tier => Level.Large ? "2" : "1";
-        public Brush Color { get; private set; } = DensityTint.Read(level.Color);
-        public event PropertyChangedEventHandler? PropertyChanged;
+    private const double Gap = 6;
+    private const double TargetWidth = 315;
+    private const double Overscan = 80;
 
-        public void Update(DensityLevel value)
-        {
-            if (value == Level) return;
-            if (value.Color != Level.Color) Color = DensityTint.Read(value.Color);
-            Level = value;
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
-        }
+    private sealed class Card(DensityCardKey key, DensityLevel[] levels)
+    {
+        public DensityCardKey Key { get; } = key;
+        public DensityLevel[] Levels { get; set; } = levels;
+        public int Column { get; set; } = -1;
+        public double Top { get; set; }
+        public double Height => DensityCard.HeaderHeight + DensityCard.RowHeight * Levels.Length + 2;
+        public DensityCard? View { get; set; }
     }
 
-    private readonly ObservableCollection<Row> rows = [];
-    private readonly Dictionary<(string Market, DensityKey Key), Row> byKey = [];
-    private readonly TextBlock status = Terminal.Copy("");
+    private readonly record struct Anchor(Card Card, double Offset);
 
-    public DensityPanel(Action openSettings)
+    private readonly DensityOptions options;
+    private readonly Action<Market> editCoin;
+    private readonly Action<Market> blockCoin;
+    private readonly Canvas board = new();
+    private readonly ScrollViewer scroll = new()
     {
-        var top = new DockPanel { Margin = new Thickness(8, 4, 8, 7) };
-        var settings = new Button { Content = Terminal.LabelWithIcon("settings", "Настройки плотностей", 5) };
+        HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Visible,
+        CanContentScroll = false
+    };
+    private readonly TextBlock status = Terminal.Copy("");
+    private readonly Dictionary<Venue, (Button Button, Dictionary<MarketSource, MenuItem> Segments)> sources = [];
+    private readonly List<Card> ordered = [];
+    private readonly Dictionary<DensityCardKey, Card> cards = [];
+    private readonly HashSet<Card> realized = [];
+    private DensityLevel[] displayed = [];
+    private int columnCount;
+    private double columnWidth;
+    private double? pendingOffset;
+
+    public DensityPanel(DensityOptions options, Action openSettings, Action openListings, Action<Market> editCoin,
+        Action<Market> blockCoin, Action selectionChanged)
+    {
+        this.options = options;
+        this.editCoin = editCoin;
+        this.blockCoin = blockCoin;
+        Background = Terminal.Brush("Shell");
+
+        var top = Terminal.Rule(new Thickness(0, 0, 0, 1));
+        top.Background = Terminal.Brush("Surface");
+        top.Padding = new Thickness(6, 4, 5, 2);
+        var tools = new DockPanel { LastChildFill = true };
+        var actions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Top };
+        var settings = Terminal.IconButton("settings", "Настройки плотностей");
+        settings.Width = 31;
+        settings.Height = 26;
         settings.Click += (_, _) => openSettings();
-        DockPanel.SetDock(settings, Dock.Right);
-        top.Children.Add(settings);
-        var title = Terminal.Heading("Плотности стакана");
-        title.VerticalAlignment = VerticalAlignment.Center;
-        top.Children.Add(title);
+        var listings = new Button { Content = Terminal.LabelWithIcon("listings", "Листинги", 5),
+            MinHeight = 26, Padding = new Thickness(5, 2, 5, 2), ToolTip = "Правила листингов плотностей" };
+        AutomationProperties.SetName(listings, "Листинги плотностей");
+        listings.Click += (_, _) => openListings();
+        actions.Children.Add(listings);
+        actions.Children.Add(settings);
+        SetDock(actions, Dock.Right);
+        tools.Children.Add(actions);
+
+        var venues = new WrapPanel { Margin = new Thickness(0, 0, 4, 0) };
+        AutomationProperties.SetName(venues, "Источники стакана");
+        foreach (var group in MarketSource.All.GroupBy(source => source.Venue))
+        {
+            var venue = group.Key;
+            var content = new StackPanel { Orientation = Orientation.Horizontal };
+            content.Children.Add(Terminal.VenueLogo(venue, 15));
+            content.Children.Add(new TextBlock { Text = venue.Label(), Margin = new Thickness(5, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center });
+            var button = new Button { Content = content, Padding = new Thickness(6, 2, 6, 2),
+                MinHeight = 26, FontSize = 11, Margin = new Thickness(0, 0, 4, 3) };
+            AutomationProperties.SetName(button, $"Источник плотностей · {venue.Label()}");
+            var segments = new Dictionary<MarketSource, MenuItem>();
+            foreach (var source in group)
+            {
+                var item = new MenuItem { Header = source.Segment.ToString(), IsCheckable = true, StaysOpenOnClick = true };
+                AutomationProperties.SetName(item, source.Label);
+                item.Click += (_, _) =>
+                {
+                    options.ToggleSource(source);
+                    RefreshSources();
+                    selectionChanged();
+                };
+                segments.Add(source, item);
+            }
+            Terminal.AttachMenu(button, segments.Values, 128);
+            sources.Add(venue, (button, segments));
+            venues.Children.Add(button);
+        }
+        tools.Children.Add(venues);
+        top.Child = tools;
         SetDock(top, Dock.Top);
         Children.Add(top);
 
         status.TextWrapping = TextWrapping.NoWrap;
         status.TextTrimming = TextTrimming.CharacterEllipsis;
-        status.Margin = new Thickness(8, 6, 8, 4);
+        status.Margin = new Thickness(8, 5, 8, 4);
+        status.Visibility = Visibility.Collapsed;
         SetDock(status, Dock.Bottom);
         Children.Add(status);
 
-        var table = new DataGrid
+        AutomationProperties.SetName(scroll, "Карточки плотностей");
+        scroll.Content = board;
+        scroll.ScrollChanged += (_, e) =>
         {
-            ItemsSource = rows, AutoGenerateColumns = false, IsReadOnly = true,
-            HeadersVisibility = DataGridHeadersVisibility.Column, SelectionMode = DataGridSelectionMode.Single,
-            EnableRowVirtualization = true, EnableColumnVirtualization = true, AlternationCount = 2,
-            CanUserResizeRows = false, CanUserAddRows = false, CanUserDeleteRows = false,
-            GridLinesVisibility = DataGridGridLinesVisibility.None,
-            Background = Terminal.Brush("Plot"), BorderBrush = Terminal.Brush("Outline"),
-            RowStyle = Terminal.Style("OverviewRow"), CellStyle = Terminal.Style("OverviewCell"),
-            ColumnHeaderStyle = Terminal.Style("OverviewColumnHeader"), RowHeight = 26
-        };
-        AutomationProperties.SetName(table, "Найденные плотности");
-        VirtualizingPanel.SetVirtualizationMode(table, VirtualizationMode.Recycling);
-        Add("Тикер", nameof(Row.Ticker), 116, expand: true);
-        Add("Биржа", nameof(Row.Source), 122, expand: true);
-        Add("Сторона", nameof(Row.Side), 83);
-        Add("Цена", nameof(Row.Price), 85, "G10");
-        Add("Размер ≈ USD", nameof(Row.Size), 110, "N0");
-        Add("От цены, %", nameof(Row.Distance), 95, "0.00");
-        Add("Стоит, с", nameof(Row.Age), 74, "0");
-        Add("Замечена", nameof(Row.FirstSeen), 81, "HH:mm:ss");
-        Add("Уровень", nameof(Row.Tier), 67, tint: true);
-        Children.Add(table);
-
-        void Add(string caption, string property, double width, string? format = null, bool expand = false, bool tint = false)
-        {
-            var binding = new Binding(property);
-            if (format != null) binding.StringFormat = "{0:" + format + "}";
-            var column = new DataGridTextColumn
+            if (e.ViewportWidthChange != 0) LayoutCards(CaptureAnchor());
+            else
             {
-                Header = caption, Binding = binding, SortMemberPath = property,
-                Width = expand ? new DataGridLength(1, DataGridLengthUnitType.Star) : new DataGridLength(width),
-                MinWidth = expand ? width : 55
-            };
-            if (tint)
-            {
-                var style = new Style(typeof(TextBlock), column.ElementStyle);
-                style.Setters.Add(new Setter(TextBlock.ForegroundProperty, new Binding(nameof(Row.Color))));
-                style.Setters.Add(new Setter(TextBlock.FontWeightProperty, FontWeights.Bold));
-                column.ElementStyle = style;
+                if (e.VerticalChange != 0) pendingOffset = null;
+                RealizeCards(pendingOffset ?? scroll.VerticalOffset);
             }
-            table.Columns.Add(column);
+        };
+        Children.Add(scroll);
+        RefreshSources();
+    }
+
+    private void RefreshSources()
+    {
+        foreach (var (venue, (button, segments)) in sources)
+        {
+            foreach (var (source, item) in segments) item.IsChecked = options.Scans(source);
+            string[] selected = segments.Where(pair => pair.Value.IsChecked).Select(pair => pair.Key.Segment.ToString()).ToArray();
+            bool active = selected.Length != 0;
+            var state = active ? string.Join(" + ", selected) : "Выбрать рынок";
+            button.ToolTip = $"{venue.Label()} · {state}";
+            AutomationProperties.SetItemStatus(button, state);
+            button.BorderBrush = Terminal.Brush(active ? "Accent" : "Outline");
+            button.Background = Terminal.Brush(active ? "AccentSurface" : "Surface");
+            button.Foreground = Terminal.Brush(active ? "Text" : "Muted");
         }
     }
 
-    public void Update(DensityLevel[] levels, DensityVenueStatus[] venues, string[] pending)
+    public void Update(DensityLevel[] levels, DensityVenueStatus[] venues, (MarketSource Source, string? Error)[] pending, bool debug)
     {
-        var keys = new HashSet<(string, DensityKey)>();
-        foreach (var level in levels)
+        if (!displayed.AsSpan().SequenceEqual(levels))
         {
-            var key = (level.Market.Key, level.Key);
-            keys.Add(key);
-            if (byKey.TryGetValue(key, out var row)) row.Update(level);
-            else
+            displayed = levels;
+            UpdateCards(levels);
+        }
+        RefreshSources();
+
+        int failed = venues.Sum(venue => venue.Failed);
+        int limited = venues.Sum(venue => venue.Limited);
+        status.Text = venues.Length == 0 ? "Выберите биржу и рынок сверху." : debug
+            ? $"Плотностей: {levels.Length:N0} · Стаканы: {venues.Sum(v => v.Sampled):N0}/{venues.Sum(v => v.Markets):N0}" +
+              (pending.Length > 0 ? $" · Каталоги: {pending.Length}" : "") +
+              (limited > 0 ? $" · Глубина ограничена: {limited:N0}" : "") +
+              (failed > 0 ? $" · Ошибки: {failed:N0}" : "")
+            : pending.Length > 0 ? pending.Any(item => item.Error != null) ? "Часть каталогов недоступна" : "Загрузка каталогов…"
+            : levels.Length > 0 ? ""
+            : failed > 0 ? "Стаканы недоступны" : venues.Any(venue => venue.Markets > 0 && venue.Sampled < venue.Markets)
+                ? "Сканирование стаканов…" : "Нет плотностей по этим условиям";
+        status.Visibility = status.Text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+        status.ToolTip = debug && venues.Length > 0 ? string.Join("\n", venues.Select(v =>
+            $"{v.Venue.Label()} · {v.Sampled}/{v.Markets} · цикл ≈ {v.CycleSeconds} с" +
+            (v.Error != null ? $"\n{v.Error}" : ""))
+            .Concat(pending.Select(item => $"{item.Source.Label} · {item.Error ?? "загрузка каталога"}"))) : null;
+    }
+
+    private void UpdateCards(DensityLevel[] levels)
+    {
+        var snapshots = levels.GroupBy(level => DensityCardKey.For(level.Market)).ToDictionary(group => group.Key, group =>
+            group.OrderBy(level => level.Key.Side).ThenBy(level => level.Key.Side == BookSide.Bid ? -level.Key.Price : level.Key.Price)
+                .ThenBy(level => level.Market.Venue).ThenBy(level => level.Market.Key, StringComparer.Ordinal).ToArray());
+        bool changed = snapshots.Count != cards.Count ||
+            ordered.Any(card => !snapshots.TryGetValue(card.Key, out var values) || values.Length != card.Levels.Length);
+        var anchor = changed ? CaptureAnchor(snapshots) : null;
+        for (int i = ordered.Count - 1; i >= 0; i--)
+        {
+            var card = ordered[i];
+            if (!snapshots.TryGetValue(card.Key, out var next))
             {
-                byKey.Add(key, row = new(level));
-                rows.Add(row);
+                Hide(card);
+                ordered.RemoveAt(i);
+                cards.Remove(card.Key);
+                continue;
+            }
+            if (!card.Levels.AsSpan().SequenceEqual(next))
+            {
+                card.Levels = next;
+                card.View?.Update(next);
             }
         }
-        foreach (var (key, row) in byKey)
-            if (!keys.Contains(key))
-            {
-                rows.Remove(row);
-                byKey.Remove(key);
-            }
+        foreach (var (key, items) in snapshots.Where(pair => !cards.ContainsKey(pair.Key))
+            .OrderBy(pair => pair.Key.Title, StringComparer.Ordinal).ThenBy(pair => pair.Key.Segment)
+            .ThenBy(pair => pair.Key.Asset, StringComparer.Ordinal).ThenBy(pair => pair.Key.Delivery, StringComparer.Ordinal)
+            .ThenBy(pair => pair.Key.Unit))
+        {
+            var card = new Card(key, items);
+            ordered.Add(card);
+            cards.Add(key, card);
+        }
+        if (changed) LayoutCards(anchor);
+    }
 
-        int failed = venues.Sum(v => v.Failed), limited = venues.Sum(v => v.Limited);
-        status.Text = venues.Length == 0 ? "Выберите биржи и сегменты в настройках плотностей." :
-            $"Плотностей: {rows.Count:N0} · Проверено стаканов: {venues.Sum(v => v.Sampled):N0} / {venues.Sum(v => v.Markets):N0}" +
-            (pending.Length > 0 ? $" · Каталоги: {pending.Length}" : "") +
-            (limited > 0 ? $" · Глубина ограничена: {limited:N0}" : "") +
-            (failed > 0 ? $" · Ошибки: {failed:N0}" : "");
-        status.ToolTip = venues.Length == 0 ? null : string.Join("\n", venues.Select(v =>
-            $"{v.Venue.Label()} · {v.Sampled}/{v.Markets} · цикл ≈ {v.CycleSeconds} с" +
-            (v.Error != null ? $"\n{v.Error}" : "")).Concat(pending));
+    private Anchor? CaptureAnchor(Dictionary<DensityCardKey, DensityLevel[]>? remaining = null)
+    {
+        double offset = pendingOffset ?? scroll.VerticalOffset;
+        if (offset < .5) return null;
+        Card? best = null;
+        foreach (var card in ordered)
+        {
+            if (card.Top + card.Height <= offset || (remaining != null && !remaining.ContainsKey(card.Key))) continue;
+            if (best == null || Math.Max(offset, card.Top) < Math.Max(offset, best.Top)
+                || Math.Max(offset, card.Top) == Math.Max(offset, best.Top) && card.Column < best.Column)
+                best = card;
+        }
+        return best == null ? null : new(best, offset - best.Top);
+    }
+
+    private void LayoutCards(Anchor? anchor)
+    {
+        double width = scroll.ViewportWidth;
+        if (width < Gap * 2 + 1) return;
+        int columns = Math.Max(1, (int)((width - Gap) / (TargetWidth + Gap)));
+        if (columns != columnCount)
+        {
+            columnCount = columns;
+            foreach (var card in ordered) card.Column = -1;
+        }
+        columnWidth = (width - Gap * (columns + 1)) / columns;
+        var bottoms = Enumerable.Repeat(Gap, columns).ToArray();
+        foreach (var card in ordered)
+        {
+            if (card.Column < 0) card.Column = Array.IndexOf(bottoms, bottoms.Min());
+            card.Top = bottoms[card.Column];
+            bottoms[card.Column] += card.Height + Gap;
+        }
+        board.Height = ordered.Count == 0 ? 0 : bottoms.Max();
+        double position = pendingOffset ?? scroll.VerticalOffset;
+        if (anchor is { } target)
+            position = Math.Max(0, target.Card.Top + Math.Min(target.Offset, target.Card.Height - 1));
+        position = Math.Clamp(position, 0, Math.Max(0, board.Height - scroll.ViewportHeight));
+        if (Math.Abs(position - scroll.VerticalOffset) > .5)
+        {
+            pendingOffset = position;
+            scroll.ScrollToVerticalOffset(position);
+        }
+        RealizeCards(position);
+    }
+
+    private void RealizeCards(double offset)
+    {
+        if (columnWidth <= 0 || scroll.ViewportHeight <= 0) return;
+        double start = Math.Max(0, offset - Overscan);
+        double end = offset + scroll.ViewportHeight + Overscan;
+        bool Visible(Card item) => item.Top + item.Height >= start && item.Top <= end;
+        foreach (var card in realized.Where(item => !Visible(item) && item.View?.IsKeyboardFocusWithin != true).ToArray()) Hide(card);
+        foreach (var card in ordered)
+        {
+            if (!Visible(card) && card.View?.IsKeyboardFocusWithin != true) continue;
+            if (card.View == null)
+            {
+                card.View = new DensityCard(card.Key, card.Levels, editCoin, blockCoin);
+                board.Children.Add(card.View);
+                realized.Add(card);
+            }
+            card.View.Width = columnWidth;
+            Canvas.SetTop(card.View, card.Top);
+            Canvas.SetLeft(card.View, Gap + card.Column * (columnWidth + Gap));
+            card.View.SetViewport(start - card.Top, end - card.Top);
+        }
+    }
+
+    private void Hide(Card card)
+    {
+        if (card.View == null) return;
+        board.Children.Remove(card.View);
+        card.View = null;
+        realized.Remove(card);
     }
 }
 
 internal static class DensityTint
 {
-    public static SolidColorBrush Read(string hex)
+    public static SolidColorBrush Read(string hex) => FromColor((Color)ColorConverter.ConvertFromString(hex));
+
+    internal static SolidColorBrush FromColor(Color color)
     {
-        var brush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex));
+        var brush = new SolidColorBrush(color);
         brush.Freeze();
         return brush;
     }

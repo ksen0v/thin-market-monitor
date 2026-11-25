@@ -6,18 +6,24 @@ using System.Windows.Media;
 
 namespace ThinMarketMonitor;
 
-internal sealed class SignalListingsPanel : Border
+internal sealed class ListingRulesPanel : Border
 {
     private readonly Settings settings;
     private readonly IReadOnlyDictionary<MarketSource, Catalog> catalogs;
+    private readonly Func<MarketSource, ListingRule> rule;
+    private readonly Action<MarketSource> cycle;
     private readonly Action changed;
+    private readonly string title;
     private readonly Dictionary<MarketSource, (Button Button, TextBlock State)> venues = new();
 
-    public SignalListingsPanel(Settings settings, IReadOnlyDictionary<MarketSource, Catalog> catalogs,
-        Action changed, Action close)
+    public ListingRulesPanel(string title, Settings settings, IReadOnlyDictionary<MarketSource, Catalog> catalogs,
+        Func<MarketSource, ListingRule> rule, Action<MarketSource> cycle, Action changed, Action close)
     {
+        this.title = title;
         this.settings = settings;
         this.catalogs = catalogs;
+        this.rule = rule;
+        this.cycle = cycle;
         this.changed = changed;
         Width = 510;
         Background = Terminal.Brush("Shell");
@@ -26,7 +32,7 @@ internal sealed class SignalListingsPanel : Border
         var layout = new DockPanel();
         var heading = Terminal.Rule(new Thickness(0, 0, 0, 1));
         heading.Background = Terminal.Brush("Control");
-        heading.Child = Terminal.DialogHeader("Листинги сигналов", "Закрыть листинги сигналов", close);
+        heading.Child = Terminal.DialogHeader(title, "Закрыть правила листингов", close);
         DockPanel.SetDock(heading, Dock.Top);
         layout.Children.Add(heading);
         layout.Children.Add(new ScrollViewer
@@ -47,7 +53,7 @@ internal sealed class SignalListingsPanel : Border
     {
         var panel = new StackPanel();
         var logos = new UniformGrid { Columns = 4, Margin = new Thickness(0, 14, -7, 5) };
-        AutomationProperties.SetName(logos, "Листинги сигналов");
+        AutomationProperties.SetName(logos, title);
         foreach (var source in MarketSource.All)
         {
             var venue = source.Venue;
@@ -87,7 +93,7 @@ internal sealed class SignalListingsPanel : Border
             venues.Add(source, (button, state));
             button.Click += (_, _) =>
             {
-                settings.CycleListingRule(source, overview: false);
+                cycle(source);
                 UpdateVenue(source);
                 changed();
             };
@@ -117,8 +123,7 @@ internal sealed class SignalListingsPanel : Border
     private void UpdateVenue(MarketSource venue)
     {
         var (button, state) = venues[venue];
-        var rule = settings.Rule(venue);
-        var (mark, caption, border, background) = rule switch
+        var (mark, caption, border, background) = rule(venue) switch
         {
             ListingRule.Require => ("✓", "требуется листинг", "Required", "RequiredSurface"),
             ListingRule.Exclude => ("×", "требуется отсутствие листинга", "Excluded", "ExcludedSurface"),

@@ -1,11 +1,9 @@
 namespace ThinMarketMonitor;
 
-internal sealed record DensityVenueRule(bool Spot = false, bool Futures = false, double SmallUsd = 10_000,
-    double LargeUsd = 50_000, double MinDistance = 0, double MaxDistance = 5, int MinSeconds = 15,
+internal record DensityRule(double SmallUsd = 10_000, double LargeUsd = 50_000,
+    double MinDistance = 0, double MaxDistance = 5, int MinSeconds = 15,
     string SmallColor = "#61BBDB", string LargeColor = "#EFB863")
 {
-    public bool Enabled(Segment segment) => segment == Segment.Spot ? Spot : Futures;
-
     public bool Valid => SmallUsd is > 0 and <= 1e12 && LargeUsd > SmallUsd && LargeUsd <= 1e12 &&
         MinDistance is >= 0 and <= 100 && MaxDistance >= MinDistance && MaxDistance <= 100 &&
         MinSeconds is >= 0 and <= 86_400 && IsColor(SmallColor) && IsColor(LargeColor);
@@ -14,9 +12,23 @@ internal sealed record DensityVenueRule(bool Spot = false, bool Futures = false,
         value.Skip(1).All(Uri.IsHexDigit);
 }
 
+internal sealed record DensityVenueRule(bool Spot = false, bool Futures = false, double SmallUsd = 10_000,
+    double LargeUsd = 50_000, double MinDistance = 0, double MaxDistance = 5, int MinSeconds = 15,
+    string SmallColor = "#61BBDB", string LargeColor = "#EFB863") :
+    DensityRule(SmallUsd, LargeUsd, MinDistance, MaxDistance, MinSeconds, SmallColor, LargeColor)
+{
+    public bool Enabled(Segment segment) => segment == Segment.Spot ? Spot : Futures;
+
+    internal DensityRule Parameters() => new(SmallUsd, LargeUsd, MinDistance, MaxDistance, MinSeconds, SmallColor, LargeColor);
+}
+
 internal sealed class DensityOptions
 {
     public Dictionary<Venue, DensityVenueRule> Venues { get; set; } = [];
+    public Dictionary<Venue, ListingRule> SpotRules { get; set; } = [];
+    public Dictionary<Venue, ListingRule> FuturesRules { get; set; } = [];
+    public string[] Blacklist { get; set; } = [];
+    public Dictionary<string, DensityRule> CoinRules { get; set; } = new(StringComparer.Ordinal);
     public bool OverviewOverlay { get; set; }
     public bool SignalsOverlay { get; set; }
     public bool Popup { get; set; }
@@ -24,10 +36,45 @@ internal sealed class DensityOptions
     public bool IgnoreFlicker { get; set; }
     public bool IgnoreMirrored { get; set; }
 
+    internal bool Scans(MarketSource source) => Venues.GetValueOrDefault(source.Venue)?.Enabled(source.Segment) == true;
+
+    internal bool NeedsCatalog(MarketSource source) =>
+        Scans(source) || (Rule(source) != ListingRule.Ignore && MarketSource.All.Any(Scans));
+
+    internal void ToggleSource(MarketSource source)
+    {
+        var current = Venues.GetValueOrDefault(source.Venue) ?? new();
+        Venues[source.Venue] = source.Segment == Segment.Spot ? current with { Spot = !current.Spot } :
+            current with { Futures = !current.Futures };
+    }
+
+    private Dictionary<Venue, ListingRule> ListingRules(Segment segment) => segment == Segment.Spot ? SpotRules : FuturesRules;
+
+    internal ListingRule Rule(MarketSource source) => ListingRules(source.Segment).GetValueOrDefault(source.Venue);
+    internal void CycleListingRule(MarketSource source) => ListingFilter.Cycle(ListingRules(source.Segment), source.Venue);
+
+    internal bool Block(Market market)
+    {
+        string asset = market.ListingAsset;
+        if (string.IsNullOrWhiteSpace(asset) || Blacklist.Contains(asset, StringComparer.Ordinal)) return false;
+        Blacklist = Blacklist.Append(asset).Order(StringComparer.Ordinal).ToArray();
+        return true;
+    }
+
     public void Normalize()
     {
         Venues = (Venues ?? []).Where(pair => Enum.IsDefined(pair.Key) && pair.Value is { Valid: true })
             .ToDictionary();
+        SpotRules = ActiveRules(SpotRules, Segment.Spot);
+        FuturesRules = ActiveRules(FuturesRules, Segment.Futures);
+        Blacklist = (Blacklist ?? []).Where(asset => !string.IsNullOrWhiteSpace(asset)).Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal).ToArray();
+        CoinRules = (CoinRules ?? []).Where(pair => !string.IsNullOrWhiteSpace(pair.Key) && pair.Value is { Valid: true })
+            .ToDictionary(StringComparer.Ordinal);
+
+        static Dictionary<Venue, ListingRule> ActiveRules(Dictionary<Venue, ListingRule>? rules, Segment segment) =>
+            (rules ?? []).Where(pair => MarketSource.All.Contains(new MarketSource(pair.Key, segment)) &&
+                pair.Value is ListingRule.Require or ListingRule.Exclude).ToDictionary();
     }
 }
 
@@ -45,7 +92,7 @@ internal sealed record DensityLevel(Market Market, DensityKey Key, double Usd, d
     public string SideLabel => Key.Side == BookSide.Bid ? "Покупка" : "Продажа";
 }
 
-internal sealed class DensityTracker(Market market, DensityVenueRule rule)
+internal sealed class DensityTracker(Market market, DensityRule rule)
 {
     private const long FlickerWindow = 120_000;
     private const long QuickDisappearance = 20_000;

@@ -692,6 +692,7 @@ internal sealed partial class CandlePlot : FrameworkElement
             dc.DrawText(priceLabel, new Point(priceBadge.Right - priceLabel.Width - 3, priceBadge.Top + (priceBadge.Height - priceLabel.Height) / 2));
             dc.Pop();
         }
+        DrawDensityLabels(dc, view, priceBadge);
         if (drag is { Mode: Operation.Ruler } measure) DrawRuler(dc, measure);
         UpdateCrosshairAxes(view, priceStep, priceBadge, interestScales);
     }

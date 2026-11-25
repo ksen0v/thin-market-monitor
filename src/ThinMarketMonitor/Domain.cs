@@ -205,16 +205,8 @@ internal sealed class Settings
         overview ? segment == Segment.Spot ? OverviewSpotRules : OverviewFuturesRules :
         segment == Segment.Spot ? Rules : FuturesRules;
 
-    public void CycleListingRule(MarketSource source, bool overview)
-    {
-        var rules = ListingRules(source.Segment, overview);
-        switch (rules.GetValueOrDefault(source.Venue))
-        {
-            case ListingRule.Ignore: rules[source.Venue] = ListingRule.Require; break;
-            case ListingRule.Require: rules[source.Venue] = ListingRule.Exclude; break;
-            default: rules.Remove(source.Venue); break;
-        }
-    }
+    public void CycleListingRule(MarketSource source, bool overview) =>
+        ListingFilter.Cycle(ListingRules(source.Segment, overview), source.Venue);
 
     public static Settings Load()
     {
@@ -351,6 +343,16 @@ internal sealed class Settings
 
 internal static class ListingFilter
 {
+    internal static void Cycle(Dictionary<Venue, ListingRule> rules, Venue venue)
+    {
+        switch (rules.GetValueOrDefault(venue))
+        {
+            case ListingRule.Ignore: rules[venue] = ListingRule.Require; break;
+            case ListingRule.Require: rules[venue] = ListingRule.Exclude; break;
+            default: rules.Remove(venue); break;
+        }
+    }
+
     public static FilterResult Apply(IReadOnlyDictionary<Venue, Catalog> catalogs, IReadOnlyDictionary<Venue, ListingRule> rules)
         => Apply(catalogs.ToDictionary(x => new MarketSource(x.Key), x => x.Value),
             source => source.Segment == Segment.Spot ? rules.GetValueOrDefault(source.Venue) : ListingRule.Ignore);
@@ -360,16 +362,14 @@ internal static class ListingFilter
     {
         ListingRule EffectiveRule(MarketSource market) => market == source ? ListingRule.Require : rule(market);
         var marked = MarketSource.All.Where(v => EffectiveRule(v) != ListingRule.Ignore).ToArray();
-        var missing = marked.Where(v => !catalogs.TryGetValue(v, out var c) || c.Error != null).ToArray();
+        var missing = marked.Where(v => !Available(catalogs, v)).ToArray();
         if (missing.Length > 0) return new([], missing);
 
         var required = marked.Where(v => EffectiveRule(v) == ListingRule.Require).ToArray();
         var excluded = marked.Where(v => EffectiveRule(v) == ListingRule.Exclude).ToArray();
         var sources = source is { } selected ? [selected] : required.Length > 0 ? required :
             catalogs.Keys.Where(v => v.Segment == Segment.Spot && !excluded.Contains(v)).ToArray();
-        var bases = marked.ToDictionary(v => v, v => catalogs[v].Markets.Select(m => m.ListingAsset).ToHashSet(StringComparer.Ordinal));
-        var matching = sources.Where(v => catalogs[v].Error == null).SelectMany(v => catalogs[v].Markets)
-            .Where(m => required.All(v => bases[v].Contains(m.ListingAsset)) && excluded.All(v => !bases[v].Contains(m.ListingAsset)));
+        var matching = Matching(catalogs, sources, required, excluded);
         if (source.HasValue) return new(matching.ToArray(), []);
         return new(matching
             .GroupBy(m => (m.ListingAsset, m.Source.Segment))
@@ -382,6 +382,31 @@ internal static class ListingFilter
             })
             .OrderBy(m => m.Base, StringComparer.Ordinal).ThenBy(m => m.Source.Segment)
             .ThenBy(m => QuoteRank(m.Quote)).ThenBy(m => m.Symbol, StringComparer.Ordinal).ToArray(), []);
+    }
+
+    internal static FilterResult ApplySources(IReadOnlyDictionary<MarketSource, Catalog> catalogs, Func<MarketSource, ListingRule> rule,
+        IReadOnlyList<MarketSource> sources)
+    {
+        if (sources.Count == 0) return new([], []);
+        var required = MarketSource.All.Where(source => rule(source) == ListingRule.Require).ToArray();
+        var excluded = MarketSource.All.Where(source => rule(source) == ListingRule.Exclude).ToArray();
+        var missingRules = required.Concat(excluded).Where(source => !Available(catalogs, source)).ToArray();
+        var missingSources = sources.Where(source => !Available(catalogs, source)).ToArray();
+        if (missingRules.Length != 0) return new([], missingRules.Concat(missingSources).Distinct().ToArray());
+        return new(Matching(catalogs, sources, required, excluded).ToArray(), missingSources);
+    }
+
+    private static bool Available(IReadOnlyDictionary<MarketSource, Catalog> catalogs, MarketSource source) =>
+        catalogs.TryGetValue(source, out var catalog) && catalog.Error == null;
+
+    private static IEnumerable<Market> Matching(IReadOnlyDictionary<MarketSource, Catalog> catalogs, IEnumerable<MarketSource> sources,
+        MarketSource[] required, MarketSource[] excluded)
+    {
+        var bases = required.Concat(excluded).ToDictionary(source => source,
+            source => catalogs[source].Markets.Select(market => market.ListingAsset).ToHashSet(StringComparer.Ordinal));
+        return sources.Where(source => Available(catalogs, source)).SelectMany(source => catalogs[source].Markets)
+            .Where(market => required.All(source => bases[source].Contains(market.ListingAsset)) &&
+                excluded.All(source => !bases[source].Contains(market.ListingAsset)));
     }
 
     private static int QuoteRank(string quote) => quote switch

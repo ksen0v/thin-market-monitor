@@ -7,8 +7,17 @@ public partial class MainWindow
     private readonly DensityMonitor densityMonitor;
     private readonly DensityPanel densityPanel;
 
-    private bool ScansDensity(MarketSource source) =>
-        settings.Densities.Venues.TryGetValue(source.Venue, out var rule) && rule.Enabled(source.Segment);
+    private void OpenDensityListings() =>
+        ShowListingRules("Листинги плотностей", settings.Densities.Rule, settings.Densities.CycleListingRule, DensitySettingsChanged);
+
+    private void BlockDensityCoin(Market market)
+    {
+        if (settings.Densities.Block(market)) DensitySettingsChanged();
+    }
+
+    private IEnumerable<Market> DensityCoinMarkets() => catalogs.Where(entry => entry.Value.Error == null)
+        .OrderByDescending(entry => settings.Densities.Scans(entry.Key))
+        .SelectMany(entry => entry.Value.Markets.Where(ExchangeApi.SupportsDensity));
 
     private void DensitySettingsChanged()
     {
@@ -28,10 +37,9 @@ public partial class MainWindow
             ? densityMonitor.ForMarket(overviewChart.Instrument) : []);
         if (!settings.DensityWorkspace || fullscreenCell != null) return;
 
-        var pending = MarketSource.All.Where(ScansDensity)
-            .Where(source => !catalogs.TryGetValue(source, out var catalog) || catalog.Error != null)
-            .Select(source => $"{source.Label} · {catalogs.GetValueOrDefault(source)?.Error ?? "загрузка каталога"}")
+        var pending = densityMonitor.PendingCatalogs
+            .Select(source => (Source: source, Error: catalogs.GetValueOrDefault(source)?.Error))
             .ToArray();
-        densityPanel.Update(densityMonitor.Visible(), densityMonitor.Status(), pending);
+        densityPanel.Update(densityMonitor.Visible(), densityMonitor.Status(), pending, settings.DebugMode);
     }
 }

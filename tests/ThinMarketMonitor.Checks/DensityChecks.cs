@@ -1,7 +1,14 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http;
+using System.Reflection;
 using System.Text.Json;
+using System.Windows;
+using System.Windows.Automation;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Media;
+using System.Windows.Threading;
 using ThinMarketMonitor;
 
 internal static class DensityChecks
@@ -107,6 +114,7 @@ internal static class DensityChecks
         Require(inverse.Apply(Present, Start + 6000, 12_000, false, false, _ => { }).Single().Usd == 1000,
             "inverse contract quantities convert to quote value");
         Require(Settings.Deserialize("{}").Densities.Venues.Count == 0, "existing installs are opted out until sources are chosen");
+        ListingRulesAndPersistence();
 
         using var handler = new DepthHandler();
         using var http = new HttpClient(handler);
@@ -115,21 +123,241 @@ internal static class DensityChecks
         {
             Popup = true, Venues = { [Venue.Bybit] = Rule with { MinSeconds = 0 } }
         };
+        var other = Market with { Base = "OTHER", Symbol = "OTHERUSDT" };
         var catalogs = new Dictionary<MarketSource, Catalog>
         {
-            [Market.Source] = new([Market]),
+            [Market.Source] = new([Market, other]),
             [new(Venue.Bybit, Segment.Futures)] = new([Market with { Contract = new("linear") }])
         };
         monitor.Configure(options, catalogs);
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(23));
         while (!monitor.TryRead(out _)) await Task.Delay(80, timeout.Token);
-        Require(monitor.Visible().Length == 1 && monitor.Status().Single().Markets == 1, "configured segment only");
-        Require(handler.Queries.Take(2).SequenceEqual(["?category=spot&symbol=TESTUSDT&limit=20",
+        while (monitor.Visible().Length < 2) await Task.Delay(80, timeout.Token);
+        Require(monitor.Visible().All(entry => entry.Market.Contract == null) && monitor.Status().Single().Markets == 2,
+            "configured segment only");
+        Require(handler.Queries.Where(q => q.Contains("symbol=TESTUSDT", StringComparison.Ordinal)).Take(2)
+            .SequenceEqual(["?category=spot&symbol=TESTUSDT&limit=20",
             "?category=spot&symbol=TESTUSDT&limit=50"]), "start small and request more depth when price range requires it");
+        var otherFirstSeen = monitor.ForMarket(other).Single().FirstSeen;
+        options.CoinRules[Market.ListingAsset] = Rule.Parameters() with
+            { SmallUsd = 950, LargeUsd = 2500, MinSeconds = 0, SmallColor = "#C086E7" };
+        monitor.Configure(options, catalogs);
+        Require(monitor.ForMarket(Market).Length == 0 && monitor.ForMarket(other).Single().FirstSeen == otherFirstSeen,
+            "a per-coin change drops its prior levels while other coins retain their observed age");
+        while (monitor.ForMarket(Market).Length == 0) await Task.Delay(80, timeout.Token);
+        Require(monitor.ForMarket(Market).Single() is { Large: false, Color: "#C086E7" },
+            "the next observations use the coin's thresholds and color");
+        options.CoinRules.Clear();
+        options.Block(other);
+        monitor.Configure(options, catalogs);
+        Require(monitor.ForMarket(other).Length == 0, "blacklisting removes the card and chart levels immediately");
+        while (monitor.ForMarket(Market).Length == 0) await Task.Delay(80, timeout.Token);
+        Require(monitor.Visible().Single() is { Large: true } restoredLevel && restoredLevel.Market == Market,
+            "venue thresholds keep applying after the coin override is cleared");
         options.Venues.Clear();
         monitor.Configure(options, catalogs);
         Require(monitor.Visible().Length == 0 && monitor.Status().Length == 0, "disabled venue removes levels and scan");
+        Console.WriteLine("Density source and listing rules, settings migration, per-coin thresholds, blacklist and adaptive depth passed.");
     }
+
+    private static void ListingRulesAndPersistence()
+    {
+        var settings = Settings.Deserialize("""
+            {"Densities":{"Venues":{"Weex":{"Futures":true,"SmallUsd":200,"LargeUsd":900,"SmallColor":"#123abc"}}}}
+            """);
+        var options = settings.Densities;
+        var weex = new MarketSource(Venue.Weex, Segment.Futures);
+        var spot = new MarketSource(Venue.Binance, Segment.Spot);
+        var futures = new MarketSource(Venue.Binance, Segment.Futures);
+        var pepe = new Market(Venue.Weex, "1000PEPEUSDT", "1000PEPE", "USDT", new("linear", Perpetual: true),
+            new(ListingAsset: "PEPE"));
+        var floki = pepe with { Symbol = "1000FLOKIUSDT", Base = "1000FLOKI", Identifiers = new(ListingAsset: "FLOKI") };
+        var unrelated = pepe with { Symbol = "1000OTHERUSDC", Base = "1000OTHER", Quote = "USDC", Identifiers = null };
+        var binanceFloki = new Market(Venue.Binance, "1000FLOKIUSDT", "FLOKI", "USDT",
+            new("usdm", NativeBase: "1000FLOKI", Perpetual: true));
+        var catalogs = new Dictionary<MarketSource, Catalog>
+        {
+            [weex] = new([pepe, floki, unrelated]),
+            [spot] = new([new(Venue.Binance, "PEPEUSDC", "PEPE", "USDC")]),
+            [futures] = new([binanceFloki])
+        };
+        Require(options.Scans(weex) && !options.Scans(new(Venue.Weex)) &&
+            options.Venues[Venue.Weex] is { SmallUsd: 200, LargeUsd: 900, SmallColor: "#123abc" }, "flat v0.11.0 options migrate");
+        options.CycleListingRule(spot);
+        Require(Filter().Markets.SequenceEqual([pepe]), "required spot listing uses the asset regardless of quote or segment");
+        options.CycleListingRule(spot);
+        options.CycleListingRule(futures);
+        Require(Filter().Markets.SequenceEqual([floki]), "spot exclusion and futures requirement have independent states");
+        options.CycleListingRule(futures);
+        Require(Filter().Markets.SequenceEqual([unrelated]) && options.NeedsCatalog(futures), "exclude a listing on either marked market");
+        catalogs[futures] = new([], "Unavailable");
+        var waiting = Filter();
+        Require(waiting.Markets.Count == 0 && waiting.Missing.SequenceEqual([futures]), "an unavailable rule catalog remains unknown");
+        options.CycleListingRule(futures);
+        var unavailableBook = new MarketSource(Venue.Htx, Segment.Futures);
+        var partial = ListingFilter.ApplySources(catalogs, options.Rule, [weex, unavailableBook]);
+        Require(partial.Markets.SequenceEqual([floki, unrelated]) && partial.Missing.SequenceEqual([unavailableBook]),
+            "one unavailable selected book source does not prevent using the other source");
+
+        options.ToggleSource(new(Venue.Weex));
+        Require(options.Venues[Venue.Weex] is { Spot: true, Futures: true, SmallUsd: 200, SmallColor: "#123abc" },
+            "toggling a source keeps venue parameters");
+        Require(options.Block(pepe) && !options.Block(catalogs[spot].Markets[0]) && !settings.SignalBlocked(pepe),
+            "density blacklist matches a confirmed base across markets without affecting signals");
+        options.CoinRules[floki.ListingAsset] = new(SmallUsd: 222, SmallColor: "#FEDCBA");
+        var restored = Settings.Deserialize(JsonSerializer.Serialize(settings)).Densities;
+        Require(restored.Blacklist.SequenceEqual(["PEPE"]) && restored.CoinRules["FLOKI"] == options.CoinRules["FLOKI"] &&
+            restored.Rule(spot) == ListingRule.Exclude && restored.Scans(new(Venue.Weex)) && restored.Scans(weex),
+            "new selection, rule, blacklist and per-coin settings survive a round trip");
+        Require(DensityCardKey.For(floki) == DensityCardKey.For(binanceFloki) &&
+            DensityCardKey.For(pepe) != DensityCardKey.For(pepe with { Base = "PEPE" }) &&
+            DensityCardKey.For(pepe) != DensityCardKey.For(pepe with { Contract = null }) &&
+            DensityCardKey.For(pepe) != DensityCardKey.For(pepe with { Quote = "USDC" }),
+            "cards group equivalent exchange levels but keep price denominations, quotes and segments separate");
+
+        FilterResult Filter() => ListingFilter.ApplySources(catalogs, options.Rule, [weex]);
+    }
+
+    public static async Task Ui()
+    {
+        var settings = new Settings();
+        var options = settings.Densities;
+        options.Venues[Market.Venue] = Rule;
+        Market? editing = null;
+        int changes = 0;
+        var panel = new DensityPanel(options, () => { }, () => { }, market => editing = market,
+            market => options.Block(market), () => changes++);
+        using var http = new HttpClient(new DepthHandler());
+        using var colibri = new ColibriBridge(settings);
+        var window = new Window { Width = 1180, Height = 640, Left = -3000, Top = -2000, ShowActivated = false,
+            ShowInTaskbar = false, Content = panel, WindowStartupLocation = WindowStartupLocation.Manual };
+        try
+        {
+            var levels = Enumerable.Range(0, 42).SelectMany(i => Enumerable.Range(0, 4).Select(row =>
+                SampleLevel(Market with { Base = $"COIN{i:D2}", Symbol = $"COIN{i:D2}USDT" }, 98 + row * .1, 10_000 + i * 1800 + row))).ToArray();
+            window.Show();
+            Update(levels);
+            await Layout();
+            var scroll = panel.Children.OfType<ScrollViewer>().Single();
+            var board = (Canvas)scroll.Content;
+            DensityCard[] VisibleCards() => board.Children.Cast<DensityCard>().ToArray();
+            var cards = VisibleCards();
+            Require(cards.Length is > 3 and < 42 && cards.Select(Canvas.GetLeft).Distinct().Count() == 3,
+                "normal window lays out three columns and only realizes the surrounding visible cards");
+            var first = cards.Single(card => AutomationProperties.GetName(card) == "COIN00/USDT · Spot");
+            Click(VisualChildren(first).OfType<Button>().Single(button => AutomationProperties.GetName(button).StartsWith("Настройки")));
+            Require(editing?.Base == "COIN00", "the settings icon passes the coin from the card");
+            Click(VisualChildren(first).OfType<Button>().Single(button => AutomationProperties.GetName(button).StartsWith("В чёрный")));
+            Require(options.Blacklist.SequenceEqual(["COIN00"]), "the card adds to the densities blacklist");
+            var bybit = VisualChildren(panel).OfType<Button>()
+                .Single(button => AutomationProperties.GetName(button) == "Источник плотностей · Bybit");
+            var future = bybit.ContextMenu.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "Futures"));
+            future.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            Require(future.IsChecked && future.StaysOpenOnClick && options.Venues[Market.Venue] is { Spot: true, Futures: true } && changes == 1,
+                "market choices can be toggled independently from the top exchange strip");
+
+            scroll.ScrollToVerticalOffset(335);
+            await Layout();
+            double start = scroll.VerticalOffset;
+            var anchor = VisibleCards().Where(card => Canvas.GetTop(card) <= start &&
+                Canvas.GetTop(card) + card.ActualHeight > start).MinBy(Canvas.GetLeft)!;
+            double relative = Canvas.GetTop(anchor) - start;
+            Update(levels.Select(level => level with { Usd = level.Usd * 2 }).ToArray());
+            await Layout();
+            Require(VisibleCards().Contains(anchor) && Math.Abs(scroll.VerticalOffset - start) < .5 &&
+                Math.Abs(Canvas.GetTop(anchor) - start - relative) < .5, "quote refresh leaves cards and scrolling in place");
+            Update([.. levels, levels[0] with { Key = new(BookSide.Ask, 102) }]);
+            await Layout();
+            Require(VisibleCards().Contains(anchor) && Math.Abs(Canvas.GetTop(anchor) - scroll.VerticalOffset - relative) < .5,
+                "structural change above the viewport preserves the visible anchor");
+            window.Width = 760;
+            await Layout();
+            Require(VisibleCards().Select(Canvas.GetLeft).Distinct().Count() == 2 &&
+                VisibleCards().All(card => Canvas.GetLeft(card) + card.ActualWidth <= scroll.ViewportWidth),
+                "the board reflows when the window shrinks");
+
+            using var dialog = new SettingsPanel(settings, new(http), colibri, _ => { }, () => { }, () => { },
+                saveDensities: () => changes++, densityCoin: editing, densityMarkets: () => [Market]);
+            window.Content = dialog;
+            await Layout();
+            var pickers = VisualChildren(dialog).OfType<DensityColorPicker>().Where(item => item.IsVisible).ToArray();
+            Require(pickers.Length == 2 && pickers[0].Hex == Rule.SmallColor && pickers[1].Hex == Rule.LargeColor,
+                "opening coin preferences inherits both venue swatches");
+            var palette = (Popup)typeof(DensityColorPicker).GetMethod("BuildPopup", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(pickers[0], null)!;
+            var controls = (StackPanel)((Border)palette.Child).Child;
+            Click((Button)((UniformGrid)controls.Children[0]).Children[1]);
+            Require(pickers[0].Hex == "#679CF2", "a preset updates the chosen color");
+            double[] channels = [18, 202, 120];
+            for (int i = 0; i < channels.Length; i++)
+            {
+                var track = (StackPanel)((DockPanel)controls.Children[i + 1]).Children[1];
+                ((Slider)track.Children[0]).Value = channels[i];
+            }
+            Click(VisibleButton(dialog, "Сохранить для монеты"));
+            Require(options.CoinRules["COIN00"].SmallColor == "#12CA78" && options.Venues[Market.Venue].SmallColor == Rule.SmallColor,
+                "saving the swatch stores the coin color only");
+            Click(VisibleButton(dialog, "Сбросить к настройкам биржи"));
+            Require(options.CoinRules.Count == 0 && pickers[0].Hex == Rule.SmallColor, "coin overrides can be reset");
+            var blacklist = VisualChildren(dialog).OfType<Button>()
+                .Where(button => AutomationProperties.GetName(button) == "Чёрный список").Last();
+            Click(blacklist);
+            await Layout();
+            Click(VisualChildren(dialog).OfType<Button>().Single(button =>
+                AutomationProperties.GetName(button) == "Вернуть COIN00 в плотности"));
+            Require(options.Blacklist.Length == 0, "the settings blacklist restores the coin");
+
+            var plot = new CandlePlot(() => new(System.Windows.Input.Key.F));
+            window.Content = plot;
+            plot.Set([new(Start - 60_000, 100, 110, 90, 105), new(Start, 105, 108, 99, 100)], reset: true);
+            var bid = SampleLevel(Market, 98, 7_800_000);
+            var ask = SampleLevel(Market with { Venue = Venue.Weex, Contract = new("linear", Perpetual: true) }, 100.05, 505_000) with
+                { Key = new(BookSide.Ask, 100.05) };
+            plot.SetDensityLevels([bid, ask]);
+            await Layout();
+            var images = Drawings(VisualTreeHelper.GetDrawing(plot)!).OfType<ImageDrawing>().ToArray();
+            Require(images.Length == 2 && images.Any(image => image.ImageSource == Terminal.VenueLogoSource(Venue.Bybit)) &&
+                images.Any(image => image.ImageSource == Terminal.VenueLogoSource(Venue.Weex)) &&
+                CandlePlot.DensityLabel(bid) == "$7,8M · Spot" && CandlePlot.DensityLabel(ask) == "$505K · Futures",
+                "rendered density badges carry their venue logos, segments and compact USD amounts");
+            plot.SetDensityLevels([bid with { Usd = 8_700_000 }, ask]);
+            await Layout();
+            var labels = Drawings(VisualTreeHelper.GetDrawing(plot)!).OfType<GlyphRunDrawing>()
+                .Select(drawing => new string(drawing.GlyphRun.Characters.ToArray())).ToArray();
+            Require(labels.Any(label => label.Contains("$8,7M", StringComparison.Ordinal)),
+                "a size change redraws the label at the existing price");
+        }
+        finally { window.Close(); }
+        Console.WriteLine("Density WPF cards, responsive layout, scroll anchoring, per-coin actions and chart badges passed.");
+
+        void Update(DensityLevel[] levels) => panel.Update(levels, [new(Market.Venue, 42, 42, 0, 0, 12, null)], [], false);
+        async Task Layout()
+        {
+            window.UpdateLayout();
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        }
+    }
+
+    private static DensityLevel SampleLevel(Market market, double price, double usd) =>
+        new(market, new(BookSide.Bid, price), usd, 1.4, Start - 35_000, Start, true, "#EFB863");
+
+    private static void Click(Button button) => button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+
+    private static Button VisibleButton(DependencyObject parent, string label) => VisualChildren(parent).OfType<Button>()
+        .Single(button => button.IsVisible && Equals(button.Content, label));
+
+    private static IEnumerable<DependencyObject> VisualChildren(DependencyObject node)
+    {
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(node); i++)
+        {
+            var child = VisualTreeHelper.GetChild(node, i);
+            yield return child;
+            foreach (var descendant in VisualChildren(child)) yield return descendant;
+        }
+    }
+
+    private static IEnumerable<Drawing> Drawings(Drawing drawing) => drawing is DrawingGroup group
+        ? group.Children.SelectMany(Drawings) : [drawing];
 
     private sealed class DepthHandler : HttpMessageHandler
     {

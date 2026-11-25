@@ -284,6 +284,7 @@ internal static class ColibriChecks
             await OverviewSpreadChecks.Run();
             await OverviewPresentationChecks.Run();
             await ChartFeatureChecks.Ui();
+            await DensityChecks.Ui();
             await SignalNotificationChecks.Run();
             await ConnectionChecks.Ui();
             await BlacklistChecks.Ui();
