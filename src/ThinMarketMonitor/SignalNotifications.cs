@@ -8,7 +8,7 @@ using System.Windows.Threading;
 
 namespace ThinMarketMonitor;
 
-internal sealed record SignalNotice(string Ticker, string Kind, string Details, string Speech, long Time, SignalModule Module)
+internal sealed record SignalNotice(string Ticker, string Kind, string Details, string Speech, long Time, SignalModule? Module)
 {
     private static readonly CultureInfo Russian = CultureInfo.GetCultureInfo("ru-RU");
     public string Title => $"{Ticker} · {Kind}";
@@ -33,6 +33,13 @@ internal sealed record SignalNotice(string Ticker, string Kind, string Details, 
 
     private static string Money(double value) => value.ToString("N2", Russian);
 
+    public static SignalNotice From(DensityLevel level)
+    {
+        string details = $"{level.Market.Source.Label} · {level.SideLabel}\n" +
+            $"≈ {Money(level.Usd)} USD · цена {level.Key.Price.ToString("G12", Russian)} {level.Market.Quote}\n" +
+            $"{level.Distance.ToString("F2", Russian)}% от середины спреда";
+        return new(level.Market.Ticker, "Плотность стакана", details, "", level.Seen, null);
+    }
 }
 
 internal sealed class SignalNotifications : IDisposable
@@ -53,6 +60,7 @@ internal sealed class SignalNotifications : IDisposable
     private Task? audioWorker;
     private CancellationTokenSource? activeVoice;
     private SignalTone? preview;
+    private SignalNotice? shown;
     private string? voicePreview;
     private bool disposed;
 
@@ -83,13 +91,23 @@ internal sealed class SignalNotifications : IDisposable
         if (last.TryGetValue(key, out long previous) && signal.Time <= previous) return;
         last[key] = signal.Time;
 
-        var notice = SignalNotice.From(signal, settings.SpeechFor(signal.Module));
-        if (settings.SignalPopup)
+        Publish(SignalNotice.From(signal, settings.SpeechFor(signal.Module)));
+    }
+
+    public void PublishDensity(DensityLevel level)
+    {
+        if (disposed || !Fresh(level.Seen, Now) || !(settings.Densities.Popup || settings.Densities.Sound)) return;
+        Publish(SignalNotice.From(level));
+    }
+
+    private void Publish(SignalNotice notice)
+    {
+        if (PopupEnabled(notice))
         {
             Enqueue(visual, notice);
             if (!popupTimer.IsEnabled) ShowNext();
         }
-        if (settings.SignalSound || settings.SignalVoice)
+        if (SoundEnabled(notice) || VoiceEnabled(notice))
         {
             Enqueue(audio, notice);
             StartAudio();
@@ -117,18 +135,21 @@ internal sealed class SignalNotifications : IDisposable
 
     public void SettingsChanged()
     {
-        if (!settings.SignalPopup && popupTimer.IsEnabled)
-        {
+        if (!settings.SignalPopup && !settings.Densities.Popup)
             visual.Clear();
-            popupTimer.Stop();
-            showPopup(null);
+        if (shown != null && !PopupEnabled(shown))
+        {
+            ShowNext();
         }
-        if (!settings.SignalSound && !settings.SignalVoice) audio.Clear();
+        if (!settings.SignalSound && !settings.SignalVoice && !settings.Densities.Sound) audio.Clear();
         if (!settings.SignalVoice) activeVoice?.Cancel();
     }
 
     private long Now => clock.GetUtcNow().ToUnixTimeMilliseconds();
     private static bool Fresh(long time, long now) => time >= now - MaximumAge && time <= now + 3000;
+    private bool PopupEnabled(SignalNotice notice) => notice.Module == null ? settings.Densities.Popup : settings.SignalPopup;
+    private bool SoundEnabled(SignalNotice notice) => notice.Module == null ? settings.Densities.Sound : settings.SignalSound;
+    private bool VoiceEnabled(SignalNotice notice) => notice.Module != null && settings.SignalVoice;
 
     private static void Enqueue(Queue<SignalNotice> queue, SignalNotice notice)
     {
@@ -139,14 +160,14 @@ internal sealed class SignalNotifications : IDisposable
     private void ShowNext()
     {
         popupTimer.Stop();
-        while (settings.SignalPopup && visual.TryDequeue(out var notice))
+        while (visual.TryDequeue(out var notice))
         {
-            if (!Fresh(notice.Time, Now)) continue;
-            showPopup(notice);
+            if (!PopupEnabled(notice) || !Fresh(notice.Time, Now)) continue;
+            showPopup(shown = notice);
             popupTimer.Start();
             return;
         }
-        showPopup(null);
+        showPopup(shown = null);
     }
 
     private async Task PlayPending()
@@ -174,9 +195,14 @@ internal sealed class SignalNotifications : IDisposable
                 continue;
             }
             if (!audio.TryDequeue(out var notice)) return;
-            bool sound = settings.SignalSound, voice = settings.SignalVoice;
+            bool sound = SoundEnabled(notice), voice = VoiceEnabled(notice);
             if ((!sound && !voice) || !Fresh(notice.Time, Now)) continue;
-            SignalTone tone = notice.Module == SignalModule.Volume ? settings.VolumeSignalTone : settings.PriceSignalTone;
+            SignalTone tone = notice.Module switch
+            {
+                SignalModule.Volume => settings.VolumeSignalTone,
+                SignalModule.Price => settings.PriceSignalTone,
+                _ => SignalTone.System
+            };
             var ct = stop.Token;
             using var voiceStop = voice ? CancellationTokenSource.CreateLinkedTokenSource(ct) : null;
             activeVoice = voiceStop;
@@ -285,7 +311,7 @@ internal sealed class SignalPopupWindow : IDisposable
         bool volume = notice.Module == SignalModule.Volume;
         kind.Foreground = Terminal.Brush(volume ? "Rising" : "Accent");
         badge!.Background = Terminal.Brush(volume ? "RequiredSurface" : "AccentSurface");
-        badge.Child = Terminal.Icon(volume ? "volume" : "activity");
+        badge.Child = Terminal.Icon(notice.Module == null ? "density-nav" : volume ? "volume" : "activity");
         System.Windows.Documents.TextElement.SetForeground(badge.Child, kind.Foreground);
 
         var workArea = SystemParameters.WorkArea;

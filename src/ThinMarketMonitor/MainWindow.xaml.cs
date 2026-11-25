@@ -72,6 +72,9 @@ public partial class MainWindow : Window, IDisposable
         notifications = testNotifications ?? new(settings, Dispatcher, speak: neuralVoice.Speak);
         signalCooldown = new(signalClock ?? TimeProvider.System);
         api = new(http);
+        densityMonitor = new(api);
+        densityPanel = new(() => OpenSettings(DensityButton, new RoutedEventArgs()));
+        DensityHost.Content = densityPanel;
         var chartFeatures = new ChartFeatures(settings, api, source => catalogs.GetValueOrDefault(source), Save);
         colibri = new(settings, colibriClient);
         colibri.StatusChanged += ShowIntegrationStatus;
@@ -81,7 +84,8 @@ public partial class MainWindow : Window, IDisposable
         SignalListingsButton.Content = Terminal.LabelWithIcon("listings", "Листинги", 5);
         foreach (var (button, icon, accessKey) in new[]
         {
-            (SignalsButton, "signals-nav", "С"), (OverviewButton, "overview-nav", "О"), (SettingsButton, "settings-nav", "Н")
+            (SignalsButton, "signals-nav", "С"), (OverviewButton, "overview-nav", "О"),
+            (DensityButton, "density-nav", "П"), (SettingsButton, "settings-nav", "Н")
         })
         {
             button.Content = Terminal.Icon(icon, 22);
@@ -133,6 +137,7 @@ public partial class MainWindow : Window, IDisposable
         RefreshDiagnostics();
         if (startMonitoring) Loaded += async (_, _) =>
         {
+            densityMonitor.Configure(settings.Densities, catalogs);
             if (!watchingNetwork)
             {
                 NetworkChange.NetworkAddressChanged += NetworkAddressChanged;
@@ -317,13 +322,15 @@ public partial class MainWindow : Window, IDisposable
     {
         if (settingsPanel?.Installing == true) return;
         if (DialogHost.Content != null) CloseDialog();
+        bool densities = ReferenceEquals(sender, DensityButton);
         bool overview = ReferenceEquals(sender, OverviewButton);
-        if (settings.Overview == overview) return;
+        if (settings.DensityWorkspace == densities && (densities || settings.Overview == overview)) return;
         colibri.CancelPending();
-        settings.Overview = overview;
+        settings.DensityWorkspace = densities;
+        if (!densities) settings.Overview = overview;
         if (overview) overviewChart.ResetDrawingToolbar();
         else foreach (var cell in cells) cell.ResetDrawingToolbar();
-        activeCell = settings.Overview ? overviewChart : null;
+        activeCell = overview ? overviewChart : null;
         RefreshOverview();
         Save();
     }
@@ -337,11 +344,14 @@ public partial class MainWindow : Window, IDisposable
 
     private void RefreshOverview()
     {
-        GridSpace.Visibility = settings.Overview ? Visibility.Collapsed : Visibility.Visible;
-        OverviewSpace.Visibility = settings.Overview ? Visibility.Visible : Visibility.Collapsed;
-        GridSwitch.Visibility = SignalListingsButton.Visibility = settings.Overview ? Visibility.Collapsed : Visibility.Visible;
+        bool density = settings.DensityWorkspace;
+        bool overview = !density && settings.Overview;
+        GridSpace.Visibility = density || overview ? Visibility.Collapsed : Visibility.Visible;
+        OverviewSpace.Visibility = overview ? Visibility.Visible : Visibility.Collapsed;
+        DensityHost.Visibility = density ? Visibility.Visible : Visibility.Collapsed;
+        GridSwitch.Visibility = SignalListingsButton.Visibility = GridSpace.Visibility;
         UpdateNavigation();
-        if (settings.Overview) UpdateOverviewQuickSources();
+        if (overview) UpdateOverviewQuickSources();
         DrawerSwitch.Content = Terminal.Icon(settings.OverviewDrawer ? "drawer-open" : "drawer-closed");
         DrawerSwitch.Foreground = Terminal.Brush(settings.OverviewDrawer ? "Accent" : "Muted");
         string drawerLabel = settings.OverviewDrawer ? "Скрыть инструменты" : "Показать инструменты";
@@ -358,10 +368,11 @@ public partial class MainWindow : Window, IDisposable
             $"{source.Label} · {catalogs.GetValueOrDefault(source)?.Error ?? "загрузка"}"));
         if (overviewChart.Choice?.Key != settings.OverviewChoice?.Key) overviewChart.Choice = settings.OverviewChoice;
         overviewChart.Resolve(result.Markets.FirstOrDefault(m => m.Key == settings.OverviewChoice?.Key && settings.ShowsOverviewMarket(m)));
-        overviewChart.Activate(settings.Overview);
-        overviewPanel.SetSource(result.Markets, settings.Overview && settings.OverviewDrawer, pending, details,
+        overviewChart.Activate(overview);
+        overviewPanel.SetSource(result.Markets, overview && settings.OverviewDrawer, pending, details,
             catalogUnavailable: unavailable > 0);
         settingsPanel?.UpdateQuoteChoices(OverviewSourceQuotes());
+        RefreshDensities();
     }
 
     private void UpdateOverviewQuickSources()
@@ -451,10 +462,12 @@ public partial class MainWindow : Window, IDisposable
         UpdateLayout();
         int original = settings.Grid;
         bool overview = settings.Overview;
+        bool density = settings.DensityWorkspace;
         double originalHeight = Height;
         try
         {
             settings.Overview = false;
+            settings.DensityWorkspace = false;
             RefreshOverview();
             foreach (int size in new[] { 2, 3 })
             {
@@ -497,12 +510,23 @@ public partial class MainWindow : Window, IDisposable
             UpdateLayout();
             if (GridSpace.IsVisible || SignalListingsButton.IsVisible || !OverviewSpace.IsVisible || overviewChart.Plot.ActualHeight <= 0)
                 throw new InvalidOperationException("The overview workspace did not open.");
+            settings.DensityWorkspace = true;
+            RefreshOverview();
+            UpdateLayout();
+            if (!DensityHost.IsVisible || densityPanel.ActualHeight <= 0 || OverviewSpace.IsVisible || GridSpace.IsVisible)
+                throw new InvalidOperationException("The density workspace did not open.");
+            OpenSettings(DensityButton, new RoutedEventArgs());
+            UpdateLayout();
+            if (DialogHost.Content is not SettingsPanel)
+                throw new InvalidOperationException("The density settings did not open.");
+            CloseDialog();
         }
         finally
         {
             Height = originalHeight;
             settings.Grid = original;
             settings.Overview = overview;
+            settings.DensityWorkspace = density;
             RebuildGrid();
             RefreshOverview();
         }
@@ -521,6 +545,7 @@ public partial class MainWindow : Window, IDisposable
                 if (!stop.IsCancellationRequested)
                 {
                     catalogs[v] = catalog;
+                    if (ScansDensity(v)) densityMonitor.Configure(settings.Densities, catalogs);
                     signalListings?.RefreshCatalogStatus();
                     RefreshOverview();
                     if (v.Segment == Segment.Spot || settings.Rule(v) != ListingRule.Ignore) ApplyFilter(false);
@@ -545,7 +570,7 @@ public partial class MainWindow : Window, IDisposable
     {
         bool defaultSpot = !MarketSource.All.Any(source => settings.Rule(source) == ListingRule.Require);
         return catalogs.Where(entry => entry.Value.ConnectionFailed).Select(entry => entry.Key).Where(source =>
-            settings.Rule(source) != ListingRule.Ignore || defaultSpot && source.Segment == Segment.Spot ||
+            ScansDensity(source) || settings.Rule(source) != ListingRule.Ignore || defaultSpot && source.Segment == Segment.Spot ||
             settings.Overview && (source == settings.OverviewSource || settings.OverviewRule(source) != ListingRule.Ignore)).ToArray();
     }
 
@@ -666,6 +691,9 @@ public partial class MainWindow : Window, IDisposable
 
     private async void Tick(object? sender, EventArgs e)
     {
+        RefreshDensities();
+        for (int i = 0; i < 32 && densityMonitor.TryRead(out var level); i++)
+            notifications.PublishDensity(level!);
         if (!loading)
         {
             long change = Volatile.Read(ref networkChanged);
@@ -762,7 +790,8 @@ public partial class MainWindow : Window, IDisposable
         if (DialogHost.Content != null) CloseDialog();
         settingsPanel = new SettingsPanel(settings, new Updater(http), colibri, SettingsChanged, CloseDialog, Close, settings.Overview,
             () => { notifications.SettingsChanged(); Save(); }, () => { RefreshOverview(); Save(); }, notifications.PreviewSound,
-            neuralVoice, notifications.PreviewVoice, Save, () => { RefreshDiagnostics(); Save(); });
+            neuralVoice, notifications.PreviewVoice, Save, () => { RefreshDiagnostics(); Save(); },
+            DensitySettingsChanged, settings.DensityWorkspace);
         settingsPanel.UpdateQuoteChoices(OverviewSourceQuotes());
         settingsPanel.UpdateFilter(CatalogStatus.Text);
         ShowDialog(settingsPanel);
@@ -836,8 +865,9 @@ public partial class MainWindow : Window, IDisposable
 
     private void UpdateNavigation()
     {
-        var selected = settingsPanel != null ? SettingsButton : settings.Overview ? OverviewButton : SignalsButton;
-        foreach (var button in new[] { SignalsButton, OverviewButton, SettingsButton })
+        var selected = settingsPanel != null ? SettingsButton : settings.DensityWorkspace ? DensityButton :
+            settings.Overview ? OverviewButton : SignalsButton;
+        foreach (var button in new[] { SignalsButton, OverviewButton, DensityButton, SettingsButton })
         {
             bool active = ReferenceEquals(button, selected);
             button.Background = active ? Terminal.Brush("AccentSurface") : System.Windows.Media.Brushes.Transparent;
@@ -882,10 +912,12 @@ public partial class MainWindow : Window, IDisposable
         stop.Cancel();
         AccessKeyManager.Unregister("С", SignalsButton);
         AccessKeyManager.Unregister("О", OverviewButton);
+        AccessKeyManager.Unregister("П", DensityButton);
         AccessKeyManager.Unregister("Н", SettingsButton);
         if (watchingNetwork) NetworkChange.NetworkAddressChanged -= NetworkAddressChanged;
         colibri.Dispose();
         notifications.Dispose();
+        densityMonitor.Dispose();
         neuralVoice.Dispose();
         timer.Stop();
         settingsPanel?.Dispose();

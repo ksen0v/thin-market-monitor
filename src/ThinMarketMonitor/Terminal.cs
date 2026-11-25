@@ -42,6 +42,7 @@ internal static class Terminal
                 "close" => "M6 6 L18 18 M18 6 L6 18",
                 "ban" => "M12 2 A10 10 0 1 0 12 22 A10 10 0 1 0 12 2 M5 5 L19 19",
                 "listings" => "M12 2 L22 7 L12 12 L2 7 Z M2 12 L12 17 L22 12 M2 17 L12 22 L22 17",
+                "density-nav" => "M12 3 V21 M4 6 H9 M2 10 H9 M6 14 H9 M3 18 H9 M15 6 H19 M15 10 H22 M15 14 H18 M15 18 H21",
                 "activity" => "M2 12 H6 L9 4 L15 20 L18 12 H22",
                 "volume" => "M4 20 H21 M7 17 V11 M12 17 V5 M17 17 V8",
                 "bell" => "M4 17 H20 L18 14 V9 A6 6 0 0 0 6 9 V14 Z M10 21 H14",

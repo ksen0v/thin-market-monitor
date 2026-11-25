@@ -287,6 +287,7 @@ internal sealed partial class ChartCell : Border
         olderRequested = false;
         plot.Frame = frame;
         plot.Instrument = market;
+        plot.SetDensityLevels([]);
         plot.Set([], reset: true);
         UpdateHeader();
         ResetChartTools();
@@ -662,6 +663,7 @@ internal sealed partial class CandlePlot : FrameworkElement
         DrawTimeScale(dc, view, timeTicks);
 
         dc.PushClip(new RectangleGeometry(plot));
+        DrawDensityRays(dc, view);
         candlePixels.Reset(step, VisualTreeHelper.GetDpi(this).DpiScaleX);
         Market? volumeMarket = indicators is { Options.Volume: true } indicator ? indicator.Market : null;
         foreach (var c in VisibleCandles(view.Start, view.End))

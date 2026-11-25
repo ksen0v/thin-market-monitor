@@ -8,6 +8,7 @@ if (args is ["--spread"]) return await SpreadChecks.Live();
 if (args is ["--volume-live"]) return await VolumeGrowthChecks.Live();
 if (args is ["--new-venues"]) return await ExtendedVenueChecks.Live();
 if (args is ["--indicators-live"]) return await ChartFeatureChecks.Live();
+if (args is ["--density-live"]) return await DensityChecks.Live();
 
 if (args is ["--segments"])
 {
@@ -374,6 +375,7 @@ ExtendedVenueChecks.Run();
 ChartFeatureChecks.Run();
 await OpenInterestChecks.Run();
 await SpreadChecks.Run();
+await DensityChecks.Run();
 await ColibriChecks.Run();
 Console.WriteLine("Listings, volume conditions, chart placement, migration, price and volume windows, eight trade adapters and update metadata passed.");
 return 0;

@@ -104,6 +104,8 @@ internal sealed class Settings
     public Key FrameUp { get; set; } = Key.Up;
     public Key FrameDown { get; set; } = Key.Down;
     public bool Overview { get; set; }
+    public bool DensityWorkspace { get; set; }
+    public DensityOptions Densities { get; set; } = new();
     public bool OverviewDrawer { get; set; } = true;
     public double OverviewDrawerWidth { get; set; } = 390;
     public MarketSource OverviewSource { get; set; } = new(Venue.KuCoin);
@@ -225,6 +227,7 @@ internal sealed class Settings
     internal static Settings Deserialize(string json)
     {
         var settings = JsonSerializer.Deserialize<Settings>(json) ?? new();
+        (settings.Densities ??= new()).Normalize();
         settings.Rules ??= new();
         settings.FuturesRules ??= [];
         settings.OverviewSpotRules ??= [];

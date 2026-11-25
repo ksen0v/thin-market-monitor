@@ -33,6 +33,8 @@
                 <TextBlock x:Name="IntegrationStatus" TextTrimming="CharacterEllipsis" FontSize="11"/>
             </Border>
             <Grid Margin="10,5,10,10">
+                <ContentControl x:Name="DensityHost" Visibility="Collapsed"
+                                HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
                 <DockPanel x:Name="GridSpace">
                     <ScrollViewer x:Name="ChartScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
                                   SizeChanged="ResizeChartGrid" Background="{StaticResource Outline}" Padding="1,1,0,0">
@@ -103,6 +105,8 @@
                                 AutomationProperties.Name="Сигналы" Click="ChangeWorkspace"/>
                         <Button x:Name="OverviewButton" Style="{StaticResource WorkspaceNavigationButton}" ToolTip="Обзор"
                                 AutomationProperties.Name="Обзор" Click="ChangeWorkspace" Margin="3,0"/>
+                        <Button x:Name="DensityButton" Style="{StaticResource WorkspaceNavigationButton}" ToolTip="Плотности"
+                                AutomationProperties.Name="Плотности" Click="ChangeWorkspace" Margin="0,0,3,0"/>
                         <Button x:Name="SettingsButton" Style="{StaticResource WorkspaceNavigationButton}" ToolTip="Настройки"
                                 AutomationProperties.Name="Настройки" Click="OpenSettings"/>
                     </StackPanel>
