@@ -80,12 +80,10 @@ public partial class MainWindow : Window, IDisposable
         SignalListingsButton.Content = Terminal.LabelWithIcon("listings", "Листинги", 5);
         foreach (var (button, icon, accessKey) in new[]
         {
-            (SignalsButton, "activity", "С"), (OverviewButton, "overview-nav", "О"), (SettingsButton, "gear", "Н")
+            (SignalsButton, "signals-nav", "С"), (OverviewButton, "overview-nav", "О"), (SettingsButton, "settings-nav", "Н")
         })
         {
-            var glyph = Terminal.Icon(icon);
-            glyph.Width = glyph.Height = 20;
-            button.Content = glyph;
+            button.Content = Terminal.Icon(icon, 22);
             AccessKeyManager.Register(accessKey, button);
         }
         for (int i = 0; i < cells.Length; i++)

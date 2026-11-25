@@ -131,8 +131,8 @@
             </Setter>
         </Style>
         <Style x:Key="WorkspaceNavigationButton" TargetType="Button" BasedOn="{StaticResource TerminalButton}">
-            <Setter Property="Width" Value="46"/>
-            <Setter Property="Height" Value="32"/>
+            <Setter Property="Width" Value="36"/>
+            <Setter Property="Height" Value="36"/>
             <Setter Property="Padding" Value="0"/>
             <Setter Property="Template">
                 <Setter.Value>

@@ -135,7 +135,90 @@ internal static class ChartFeatureChecks
             Math.Abs(restoredSizes[1] - ChartPaneLayout.InterestMinimum) < .001 &&
             Math.Abs(restoredSizes[2] - 140) < .001 && enlarged[2] > restoredSizes[2],
             "resizing past the adjoining pane's minimum adjusts the next pane and proportions work in larger windows");
-        Console.WriteLine("Chart drawing geometry, profile arithmetic, live volume joins, OI scale and volume default passed.");
+        CheckPriceAndTimeTicks();
+        CheckRulerTurnover();
+        CheckOverviewIndicatorSettings();
+        Console.WriteLine("Chart drawing, grid marks, profiles, live volume joins, ruler turnover and saved indicator options passed.");
+    }
+
+    private static void CheckRulerTurnover()
+    {
+        const long interval = 60_000;
+        Candle[] bars =
+        [
+            new(Now, 10, 11, 9, 10, 110, 5),
+            new(Now + interval, 10, 13, 9, 12, 120),
+            new(Now + 2 * interval, 12, 13, 11, 12, BaseVolume: 2),
+            new(Now + 3 * interval, 12, 13, 11, 12),
+            new(Now + 5 * interval, 12, 13, 11, 12, 14, ObservedVolume: true),
+            new(Now + 6 * interval, 12, 13, 11, 12, 0)
+        ];
+        Check(ChartVolume.MeasureTurnover(Bitcoin, bars, interval, Now + 1, Now + interval + 1) == (230d, false, false) &&
+            ChartVolume.MeasureTurnover(Bitcoin with { Quote = "USDC" }, bars, interval, Now + interval + 1, Now + 1) == (230d, false, false),
+            "the ruler includes both boundary candles in either direction and prefers quote turnover");
+        Check(ChartVolume.MeasureTurnover(Bitcoin, bars, interval, Now + 2 * interval, Now + 2 * interval) == (24d, true, false) &&
+            ChartVolume.MeasureTurnover(Bitcoin, bars, interval, Now + 2 * interval, Now + 5 * interval + 1) == (38d, true, true),
+            "base-volume estimates and missing or sampled candles are marked separately");
+        Check(ChartVolume.MeasureTurnover(Bitcoin, bars, interval, Now + 6 * interval, Now + 6 * interval) == (0d, false, false) &&
+            ChartVolume.MeasureTurnover(Bitcoin with { Quote = "EUR" }, bars, interval, Now, Now).Usd == null &&
+            ChartVolume.MeasureTurnover(Bitcoin, bars, interval, Now + 8 * interval, Now + 9 * interval).Usd == null,
+            "reported zero is distinct from an unsupported quote or a selection without candles");
+    }
+
+    private static void CheckOverviewIndicatorSettings()
+    {
+        var eth = Bitcoin with { Symbol = "ETHUSDT", Base = "ETH" };
+        var legacy = new
+        {
+            SchemaVersion = new Settings().SchemaVersion,
+            OverviewChoice = new CellChoice(Bitcoin.Key, false),
+            ChartIndicators = new Dictionary<string, ChartIndicatorOptions>
+            {
+                [Bitcoin.Key] = new(false, Profile: true, Liquidations: true,
+                    Interest: new() { [Venue.Binance] = Bitcoin.Key, [Venue.Gate] = "" }, InterestUsd: true)
+            }
+        };
+        var settings = Settings.Deserialize(JsonSerializer.Serialize(legacy));
+        using var http = new HttpClient();
+        var features = new ChartFeatures(settings, new ExchangeApi(http), _ => null, () => { });
+        var shared = features.Options(eth.Key, overview: true);
+        Check(shared is { Volume: false, Profile: true, Liquidations: true, InterestUsd: true } &&
+            shared.Interest!.Values.SequenceEqual(["", ""]) &&
+            features.Options(Bitcoin.Key, overview: true).Interest![Venue.Binance] == Bitcoin.Key,
+            "migration shares the saved Overview preferences while keeping the exact OI contract scoped to its market");
+        features.SetOptions(eth.Key, true, shared with { Interest = new() { [Venue.Binance] = eth.Key } });
+        var reopened = Settings.Deserialize(JsonSerializer.Serialize(settings));
+        var restored = new ChartFeatures(reopened, new ExchangeApi(http), _ => null, () => { });
+        Check(restored.Options(eth.Key, true).Interest![Venue.Binance] == eth.Key &&
+            restored.Options(Bitcoin.Key, true).Interest![Venue.Binance] == Bitcoin.Key &&
+            restored.Options(Bitcoin.Key, false).Interest!.ContainsKey(Venue.Gate) &&
+            !restored.Options(eth.Key, false).HasDetails,
+            "global source removal and both exact choices survive reload without copying settings into Signals");
+    }
+
+    private static void CheckPriceAndTimeTicks()
+    {
+        double wide = ChartAxis.NiceStep(.00223 - .00114, 20);
+        double zoomed = ChartAxis.NiceStep(.00194 - .00155, 20);
+        Check(Math.Abs(wide - .0001) < 1e-12 && Math.Abs(zoomed - .00002) < 1e-12 &&
+            ChartAxis.NumericTicks(.001777, .001824, zoomed).Select(tick => ChartAxis.PriceLabel(tick, zoomed))
+                .SequenceEqual(["0,00178", "0,00180", "0,00182"]),
+            "price zoom changes to a finer round step and the marks stay on its multiples");
+        Check(ChartAxis.NumericTicks(-3.1, 2.99, 2).SequenceEqual([-2d, 0d, 2d]),
+            "price marks keep the same origin through zero");
+
+        var halfHourZone = TimeZoneInfo.CreateCustomTimeZone("UTC+05:30", TimeSpan.FromMinutes(330), "UTC+05:30", "UTC+05:30");
+        long start = new DateTimeOffset(2026, 11, 25, 3, 4, 0, TimeSpan.Zero).ToUnixTimeMilliseconds();
+        var times = ChartAxis.TimeTicks(start, start + 14_400_000, 60_000, 4, halfHourZone);
+        Check(times.Select(mark => mark.Label).SequenceEqual(["09:00", "10:00", "11:00", "12:00"]) &&
+            times.SequenceEqual(ChartAxis.TimeTicks(start + 660_000, start + 15_060_000, 60_000, 4, halfHourZone)),
+            "clock grid follows local round hours and keeps the same timestamps when the chart pans");
+        var begin = new DateTimeOffset(2026, 1, 17, 0, 0, 0, TimeSpan.Zero);
+        var end = new DateTimeOffset(2026, 5, 22, 0, 0, 0, TimeSpan.Zero);
+        var months = ChartAxis.TimeTicks(begin.ToUnixTimeMilliseconds(), end.ToUnixTimeMilliseconds(), 86_400_000, 4, TimeZoneInfo.Utc);
+        Check(months.Select(mark => mark.Label).SequenceEqual(["03.26", "05.26"]) &&
+            months.All(mark => DateTimeOffset.FromUnixTimeMilliseconds(mark.Time).Day == 1),
+            "multi-month marks land on calendar boundaries");
     }
 
     public static async Task Ui()
@@ -156,13 +239,13 @@ internal static class ChartFeatureChecks
         var bottom = (FrameworkElement)window.FindName("BottomNavigation");
         try
         {
-            AssertCenteredNavigation();
+            AssertNavigationLayout();
             Check(new[] { signals, overview, preferences }.All(b => b.Content is Viewbox && b.IsTabStop &&
                 !string.IsNullOrEmpty(AutomationProperties.GetName(b))) && AutomationProperties.GetItemStatus(signals) == "Активный раздел",
                 "center navigation has accessible icon-only buttons and an active state");
             window.Width -= 100;
             window.UpdateLayout();
-            AssertCenteredNavigation();
+            AssertNavigationLayout();
 
             var time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var bars = new[] { new Candle(time - 60_000, 10, 12, 9, 11, 50), new Candle(time, 11, 13, 10, 12, 75) };
@@ -174,6 +257,8 @@ internal static class ChartFeatureChecks
             SetCrosshair(plot, cursor);
             plot.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, Environment.TickCount) { RoutedEvent = Mouse.MouseLeaveEvent });
             Check(!HasCrosshair(plot), "leaving a signal chart clears the crosshair");
+            CheckChartGridPan(plot);
+            plot.Set(bars, reset: true);
             typeof(CandlePlot).GetMethod("SetPrice", Private)!.Invoke(plot, [-20d, 40d]);
             var view = typeof(CandlePlot).GetMethod("CurrentView", Private)!.Invoke(plot, null)!;
             var bounds = (Rect)view.GetType().GetProperty("Plot")!.GetValue(view)!;
@@ -277,9 +362,33 @@ internal static class ChartFeatureChecks
                 !HeaderButtons(overviewChart).Any(button => Equals(button.Content, "Выбрать")) &&
                 !HeaderButtons(overviewChart).Contains(Field<Button>(overviewChart, "pin")),
                 "choose and pin are present in Signals only");
-            overviewChart.Assign(Bitcoin with { Symbol = "ETHUSDT", Base = "ETH",
-                Contract = Bitcoin.Contract! with { Streaming = false } }, false);
+            var overviewEth = new Market(Venue.Gate, "ETH_USDT", "ETH", "USDT", new("futures/usdt", Streaming: false, Perpetual: true));
+            overviewChart.Assign(overviewEth, false);
             overviewChart.Plot.Set(bars);
+            CheckCrosshair(overviewChart.Plot);
+            var overviewTools = Field<Button>(overviewChart, "indicatorTools");
+            ToggleOverview("Объём свечей");
+            Check(Field<IndicatorDisplay?>(overviewChart.Plot, "indicators") == null,
+                "the candle volume overlay can be disabled in Overview");
+            var overviewView = typeof(CandlePlot).GetMethod("CurrentView", Private)!.Invoke(overviewChart.Plot, null)!;
+            Check((string)typeof(CandlePlot).GetMethod("RulerTurnover", Private)!.Invoke(overviewChart.Plot,
+                [overviewView, CandleCenter(bars[0]), CandleCenter(bars[1])])! == "Оборот 125 USD",
+                "ruler turnover uses the visible selection even when the volume overlay is disabled");
+            ToggleOverview("Профиль по сделкам");
+            ToggleOverview("Открытый интерес в USD");
+            ToggleOverview("Binance");
+            ToggleOverview("Lighter");
+            overviewChart.Assign(Bitcoin with { Contract = Bitcoin.Contract! with { Streaming = false } }, false);
+            var overviewDisplay = Field<IndicatorDisplay>(overviewChart.Plot, "indicators");
+            Check(overviewDisplay.Market.Key == Bitcoin.Key && overviewDisplay.Options is { Volume: false, Profile: true, InterestUsd: true } &&
+                overviewDisplay.Interest.Select(layer => layer.Venue).SequenceEqual([Venue.Lighter, Venue.Binance]) &&
+                settings.ChartIndicators[Bitcoin.Key] is { Volume: true, Profile: false },
+                "Overview settings follow the next instrument without affecting a Signals chart of the same market");
+            Click(PaneButton(Field<ChartSurface>(overviewChart, "chartSurface"), "Закрыть панель OI · Lighter"));
+            overviewChart.Assign(overviewEth, false);
+            overviewChart.Plot.Set(bars);
+            Check(Field<IndicatorDisplay>(overviewChart.Plot, "indicators").Interest is [{ Venue: Venue.Binance }],
+                "closing an OI panel applies to other instruments in Overview");
             CheckCrosshair(overviewChart.Plot);
             Click(signals);
             Check(!HasCrosshair(overviewChart.Plot), "hiding a chart clears its cursor overlay");
@@ -298,13 +407,31 @@ internal static class ChartFeatureChecks
             cell.Assign(Bitcoin with { Symbol = "ETHUSDT", Base = "ETH", Contract = Bitcoin.Contract! with { Streaming = false } }, true);
             Check(Field<ChartDrawing[]>(plot, "drawings").Length == 0 && (Field<IndicatorDisplay?>(plot, "indicators")?.Interest.Length ?? 0) == 0,
                 "a different market shows its own annotations and indicator setup");
+
+            void ToggleOverview(string caption)
+            {
+                Click(overviewTools);
+                ClickMenu(overviewTools.ContextMenu.Items.OfType<MenuItem>().Single(item => Equals(item.Header, caption)));
+                overviewTools.ContextMenu.IsOpen = false;
+            }
+            Point CandleCenter(Candle candle) => new((double)overviewView.GetType().GetMethod("X")!
+                .Invoke(overviewView, [(double)candle.Time + 30_000])!, 20);
         }
         finally { window.Close(); }
 
-        void AssertCenteredNavigation()
+        void AssertNavigationLayout()
         {
             double center = navigation.TranslatePoint(new Point(navigation.ActualWidth / 2, 0), bottom).X;
             Check(Math.Abs(center - bottom.ActualWidth / 2) <= 1, "workspace buttons are centered at different window sizes");
+            foreach (var button in new[] { signals, overview, preferences })
+            {
+                var shape = (System.Windows.Shapes.Path)((Viewbox)button.Content).Child;
+                var bounds = shape.TransformToAncestor(button).TransformBounds(shape.Data.Bounds);
+                Check(bounds.Width >= 16 && Math.Abs(bounds.Width - bounds.Height) <= .5 &&
+                    Math.Abs(bounds.Left + bounds.Width / 2 - button.ActualWidth / 2) <= 1 &&
+                    Math.Abs(bounds.Top + bounds.Height / 2 - button.ActualHeight / 2) <= 1,
+                    "workspace icons keep their proportions and are centered in the buttons");
+            }
         }
         static void Click(Button button) => button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         static void ClickMenu(MenuItem item) => item.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
@@ -321,24 +448,94 @@ internal static class ChartFeatureChecks
         plot.UpdateLayout();
         var view = typeof(CandlePlot).GetMethod("CurrentView", Private)!.Invoke(plot, null)!;
         var graph = pane ?? (Rect)view.GetType().GetProperty("Plot")!.GetValue(view)!;
-        var cursor = new Point(graph.Left + graph.Width / 3, graph.Top + graph.Height / 3);
+        var cursor = new Point(graph.Left + graph.Width / 3, graph.Top + graph.Height * .6);
         foreach (var at in new[] { cursor, new Point(cursor.X + 5, cursor.Y + 3) })
         {
             SetCrosshair(plot, at);
-            var lines = Lines(CrosshairVisual(plot).Drawing).ToArray();
+            var drawings = Drawings(CrosshairVisual(plot).Drawing).ToArray();
+            var lines = Lines(drawings).ToArray();
+            var badges = drawings.OfType<GeometryDrawing>().Select(item => item.Geometry).OfType<RectangleGeometry>().ToArray();
             Check(lines.Any(line => line.StartPoint == at && line.EndPoint == new Point(graph.Left, at.Y)) &&
                 lines.Any(line => line.StartPoint == at && line.EndPoint.X == at.X && line.EndPoint.Y < at.Y) &&
+                badges.Any(badge => badge.Rect.Bottom == plot.ActualHeight && badge.Rect.Left <= at.X && at.X <= badge.Rect.Right) &&
+                badges.Any(badge => IsValueBadge(badge.Rect, graph) && badge.Rect.Top <= at.Y && at.Y <= badge.Rect.Bottom) &&
+                drawings.OfType<GlyphRunDrawing>().Count() >= 2 &&
                 plot.IsArrangeValid, "both guides follow the cursor without invalidating layout of the plot");
         }
         return cursor;
-
-        static IEnumerable<LineGeometry> Lines(Drawing? drawing) => drawing switch
-        {
-            DrawingGroup group => group.Children.SelectMany(Lines),
-            GeometryDrawing { Geometry: LineGeometry line, Pen.DashStyle.Dashes.Count: > 0 } => [line],
-            _ => []
-        };
     }
+
+    private static void CheckChartGridPan(CandlePlot plot)
+    {
+        var viewMethod = typeof(CandlePlot).GetMethod("CurrentView", Private)!;
+        var moveMethod = typeof(CandlePlot).GetMethod("MoveGesture", Private)!;
+        var stepMethod = typeof(CandlePlot).GetMethod("PriceGridStep", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var before = viewMethod.Invoke(plot, null)!;
+        var type = before.GetType();
+        var graph = (Rect)type.GetProperty("Plot")!.GetValue(before)!;
+        var anchor = new Point(graph.Left + graph.Width / 2, graph.Top + graph.Height / 2);
+        double step = (double)stepMethod.Invoke(null, [before])!;
+        double low = (double)type.GetProperty("Low")!.GetValue(before)!;
+        double high = (double)type.GetProperty("High")!.GetValue(before)!;
+        double level = ChartAxis.NumericTicks(low, high, step).MinBy(tick => Math.Abs(tick - (low + high) / 2));
+        var ticks = (ChartTimeTick[])typeof(CandlePlot).GetMethod("TimeGridTicks", Private)!.Invoke(plot, [before])!;
+        long time = ticks[^1].Time;
+        Check(GridLine(X(before), true) && GridLine(Y(before), false), "the plot draws the price and time grid at the round scale marks");
+        var marketBadge = Drawings(VisualTreeHelper.GetDrawing(plot)).OfType<GeometryDrawing>()
+            .Select(item => item.Geometry).OfType<RectangleGeometry>().Single(rect => rect.Rect.Left == graph.Right).Rect;
+        SetCrosshair(plot, new Point(anchor.X, marketBadge.Top + marketBadge.Height / 2));
+        var cursorBadges = Drawings(CrosshairVisual(plot).Drawing).OfType<GeometryDrawing>()
+            .Select(item => item.Geometry).OfType<RectangleGeometry>().Select(rect => rect.Rect).ToArray();
+        Check(cursorBadges.Any(rect => IsValueBadge(rect, graph) && !rect.IntersectsWith(marketBadge)),
+            $"cursor and live-price labels remain readable when their price levels coincide ({graph}, {marketBadge}, {string.Join(" | ", cursorBadges)})");
+
+        double dx = -.12 * graph.Width, dy = .12 * graph.Height;
+        Move("Pan", before, anchor, new Point(anchor.X + dx, anchor.Y + dy));
+        var after = viewMethod.Invoke(plot, null)!;
+        Check(Math.Abs(X(after) - X(before) - dx) < .001 && Math.Abs(Y(after) - Y(before) - dy) < .001 &&
+            GridLine(X(after), true) && GridLine(Y(after), false) && (double)stepMethod.Invoke(null, [after])! == step,
+            "dragging the plot moves both sets of grid lines by the same distance without rescaling");
+
+        SetCrosshair(plot, new Point(anchor.X, graph.Top + .27 * graph.Height));
+        string oldLabel = GlyphSignature();
+        Move("Price", after, new Point(graph.Right + 6, anchor.Y), new Point(graph.Right + 6, anchor.Y - .60 * graph.Height));
+        var zoomed = viewMethod.Invoke(plot, null)!;
+        Check((double)stepMethod.Invoke(null, [zoomed])! < step && GlyphSignature() != oldLabel,
+            "vertical scaling picks a finer step and updates the value under a stationary cursor");
+
+        double X(object view) => (double)type.GetMethod("X")!.Invoke(view, [(double)time])!;
+        double Y(object view) => (double)type.GetMethod("Y")!.Invoke(view, [level])!;
+        bool GridLine(double position, bool vertical)
+        {
+            var start = vertical ? new Point(position, graph.Top) : new Point(graph.Left, position);
+            var end = vertical ? new Point(position, graph.Bottom) : new Point(graph.Right, position);
+            return Drawings(VisualTreeHelper.GetDrawing(plot)).OfType<GeometryDrawing>().Any(item =>
+                item.Geometry is LineGeometry line && (line.StartPoint - start).Length < .001 && (line.EndPoint - end).Length < .001);
+        }
+        void Move(string action, object view, Point from, Point to)
+        {
+            var mode = Enum.Parse(typeof(CandlePlot).GetNestedType("Operation", BindingFlags.NonPublic)!, action);
+            var drag = typeof(CandlePlot).GetNestedType("Drag", BindingFlags.NonPublic)!.GetConstructors().Single()
+                .Invoke([mode, from, view, (double)CandlePlot.DefaultVisibleBars, MouseButton.Left, null]);
+            moveMethod.Invoke(plot, [drag, to]);
+            plot.UpdateLayout();
+        }
+        string GlyphSignature() => string.Join(",", Drawings(CrosshairVisual(plot).Drawing).OfType<GlyphRunDrawing>()
+            .SelectMany(run => run.GlyphRun.GlyphIndices));
+    }
+
+    private static bool IsValueBadge(Rect badge, Rect plot) =>
+        badge.Left == plot.Right || Math.Abs(badge.Right - plot.Right + 1) < .001;
+
+    private static IEnumerable<Drawing> Drawings(Drawing? drawing) => drawing switch
+    {
+        DrawingGroup group => group.Children.SelectMany(Drawings),
+        null => [],
+        _ => [drawing]
+    };
+
+    private static IEnumerable<LineGeometry> Lines(IEnumerable<Drawing> drawings) => drawings.OfType<GeometryDrawing>()
+        .Where(item => item.Pen?.DashStyle.Dashes.Count > 0).Select(item => item.Geometry).OfType<LineGeometry>();
 
     private static DrawingVisual CrosshairVisual(CandlePlot plot) => (DrawingVisual)VisualTreeHelper.GetChild(plot, 0);
     private static bool HasCrosshair(CandlePlot plot) => CrosshairVisual(plot).Drawing is { Children.Count: > 0 };

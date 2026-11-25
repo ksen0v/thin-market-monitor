@@ -14,7 +14,7 @@ internal static class Terminal
     public static Brush Brush(string key) => (Brush)Application.Current.FindResource(key);
     public static Style Style(string key) => (Style)Application.Current.FindResource(key);
 
-    public static FrameworkElement Icon(string name)
+    public static FrameworkElement Icon(string name, double size = 15)
     {
         var path = new Path
         {
@@ -28,8 +28,14 @@ internal static class Terminal
                 "horizontal-ray" => "M3 12 A2 2 0 1 0 7 12 A2 2 0 1 0 3 12 M7 12 H21 M17 8 L21 12 L17 16",
                 "trend-ray" => "M3 18 A2 2 0 1 0 7 18 A2 2 0 1 0 3 18 M7 17 L21 5 M15 5 H21 V11",
                 "segment" => "M3 18 A2 2 0 1 0 7 18 A2 2 0 1 0 3 18 M7 17 L17 7 M17 6 A2 2 0 1 0 21 6 A2 2 0 1 0 17 6",
-                "overview-nav" => "M3 4 H21 V20 H3 Z M14 4 V20 M5.5 14 L8 10 L11.5 12 M16.5 8 H18.5 M16.5 12 H18.5 M16.5 16 H18.5",
-                "gear" => "M9 3 H15 L15.7 6 L18 7.3 L21 6.6 L22.5 9.3 L20.3 11.5 V12.5 L22.5 14.7 L21 17.4 L18 16.7 L15.7 18 L15 21 H9 L8.3 18 L6 16.7 L3 17.4 L1.5 14.7 L3.7 12.5 V11.5 L1.5 9.3 L3 6.6 L6 7.3 L8.3 6 Z M9 12 A3 3 0 1 0 15 12 A3 3 0 1 0 9 12",
+                "signals-nav" => "M12 3 A9 9 0 1 0 12 21 A9 9 0 1 0 12 3 M6.5 12 H9 L11 8.5 L13 15.5 L15 12 H17.5",
+                "overview-nav" => "M5 3 H19 Q21 3 21 5 V19 Q21 21 19 21 H5 Q3 21 3 19 V5 Q3 3 5 3 Z " +
+                    "M14 3 V21 M6 14.5 L8.5 11 L11 13 M17 8 H18 M17 12 H18 M17 16 H18",
+                "settings-nav" => "M10.5 3 H13.5 L14 5.5 L15.2 6 L17.3 4.6 L19.4 6.7 L18 8.8 L18.5 10 L21 10.5 " +
+                    "V13.5 L18.5 14 L18 15.2 L19.4 17.3 L17.3 19.4 L15.2 18 L14 18.5 L13.5 21 " +
+                    "H10.5 L10 18.5 L8.8 18 L6.7 19.4 L4.6 17.3 L6 15.2 L5.5 14 L3 13.5 " +
+                    "V10.5 L5.5 10 L6 8.8 L4.6 6.7 L6.7 4.6 L8.8 6 L10 5.5 Z " +
+                    "M9 12 A3 3 0 1 0 15 12 A3 3 0 1 0 9 12",
                 "close" => "M6 6 L18 18 M18 6 L6 18",
                 "ban" => "M12 2 A10 10 0 1 0 12 22 A10 10 0 1 0 12 2 M5 5 L19 19",
                 "listings" => "M12 2 L22 7 L12 12 L2 7 Z M2 12 L12 17 L22 12 M2 17 L12 22 L22 17",
@@ -53,7 +59,7 @@ internal static class Terminal
         {
             Path = new PropertyPath("(0)", TextElement.ForegroundProperty), RelativeSource = RelativeSource.Self
         });
-        return new Viewbox { Child = path, Width = 15, Height = 15, VerticalAlignment = VerticalAlignment.Center };
+        return new Viewbox { Child = path, Width = size, Height = size, Stretch = Stretch.Uniform, VerticalAlignment = VerticalAlignment.Center };
     }
 
     public static StackPanel LabelWithIcon(string icon, string label, double gap)

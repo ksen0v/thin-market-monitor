@@ -8,10 +8,10 @@ namespace ThinMarketMonitor;
 internal sealed partial class ChartCell
 {
     private ChartFeatures? features;
+    private readonly bool overview;
     private Button? drawingTools, indicatorTools;
     private Border? drawingToolbar;
     private readonly Dictionary<DrawingKind, Button> drawingActions = [];
-    private bool drawingToolbarDefault;
     private bool? drawingToolbarBeforeFullscreen;
     private readonly TextBlock indicatorHint = new()
     {
@@ -34,20 +34,22 @@ internal sealed partial class ChartCell
     internal int MinimumGridHeight { get; private set; } = 116;
     internal event Action? IndicatorLayoutChanged;
 
-    private void ConfigureChartTools(DockPanel bar, DockPanel body, ChartFeatures? shared, bool showDrawingTools)
+    private void ConfigureChartTools(DockPanel bar, DockPanel body, ChartFeatures? shared)
     {
         if (shared == null) return;
         features = shared;
-        drawingToolbarDefault = showDrawingTools;
         indicatorHint.Foreground = Terminal.Brush("Muted");
         plot.Magnet = () => shared.Magnet;
         plot.DrawingsChanged += values => { if (market != null) shared.SetDrawings(market.Key, values); };
         shared.DrawingsChanged += key => { if (market?.Key == key) plot.SetDrawings(shared.Drawings(key)); };
-        shared.IndicatorsChanged += key => { if (market?.Key == key) ResetChartTools(); };
-        shared.InterestOrderChanged += key =>
+        shared.IndicatorsChanged += (key, overviewScope) =>
         {
-            if (market is not { } instrument || instrument.Key != key) return;
-            indicatorOptions = shared.Options(key);
+            if (UsesOptions(key, overviewScope)) ResetChartTools();
+        };
+        shared.InterestOrderChanged += (key, overviewScope) =>
+        {
+            if (market is not { } instrument || !UsesOptions(key, overviewScope)) return;
+            indicatorOptions = shared.Options(instrument.Key, overview);
             PublishIndicators(instrument);
         };
         shared.PaneWeightsChanged += key =>
@@ -120,12 +122,15 @@ internal sealed partial class ChartCell
         drawingTools.Click += (_, _) => SetDrawingToolbar(!DrawingToolbarExpanded);
         indicatorTools.Click += (_, _) => OpenTools(indicatorTools, IndicatorMenu());
         plot.DrawingToolChanged += UpdateDrawingButtons;
-        SetDrawingToolbar(showDrawingTools);
+        SetDrawingToolbar(overview);
+
+        bool UsesOptions(string key, bool overviewScope) =>
+            overviewScope == overview && market != null && (overview || market.Key == key);
     }
 
     private bool DrawingToolbarExpanded => drawingToolbar?.Visibility == Visibility.Visible;
 
-    internal void ResetDrawingToolbar() => SetDrawingToolbar(drawingToolbarDefault);
+    internal void ResetDrawingToolbar() => SetDrawingToolbar(overview);
 
     internal void SetFullscreenDrawingToolbar(bool fullscreen)
     {
@@ -175,7 +180,7 @@ internal sealed partial class ChartCell
         yield return Item("Открытый интерес в USD", () => Change(o => o with { InterestUsd = !o.InterestUsd }),
             indicatorOptions.InterestUsd, hint: "Единицы для шкал OI и линейки");
         yield return new MenuItem { Header = "Открытый интерес · источники", IsEnabled = false, Style = Terminal.Style("TerminalMenuItem") };
-        foreach (var venue in Enum.GetValues<Venue>().Where(venue => venue != Venue.Alpha))
+        foreach (var venue in Enum.GetValues<Venue>().Where(ChartIndicatorOptions.IsInterestSource))
         {
             var layer = interestLayers.GetValueOrDefault(venue);
             bool chosen = indicatorOptions.Interest?.ContainsKey(venue) == true;
@@ -194,7 +199,7 @@ internal sealed partial class ChartCell
 
         void Change(Func<ChartIndicatorOptions, ChartIndicatorOptions> change)
         {
-            if (market?.Key == key) features.SetOptions(key, change(indicatorOptions));
+            if (market?.Key == key) features.SetOptions(key, overview, change(indicatorOptions));
         }
         void SetInterest(Venue venue, string? contract)
         {
@@ -243,7 +248,7 @@ internal sealed partial class ChartCell
     {
         if (market is not { } instrument || features == null || indicatorOptions.Interest is not { } selected) return;
         var sources = new Dictionary<Venue, string>(selected);
-        if (sources.Remove(venue)) features.SetOptions(instrument.Key, indicatorOptions with { Interest = sources });
+        if (sources.Remove(venue)) features.SetOptions(instrument.Key, overview, indicatorOptions with { Interest = sources });
     }
 
     private void MoveInterestPane(Venue venue, int direction)
@@ -254,7 +259,7 @@ internal sealed partial class ChartCell
         if (before < 0 || after < 0 || after >= topToBottom.Length) return;
         (topToBottom[before], topToBottom[after]) = (topToBottom[after], topToBottom[before]);
         var order = topToBottom.Reverse().ToDictionary(source => source, source => sources[source]);
-        features.SetOptions(instrument.Key, indicatorOptions with { Interest = order }, orderOnly: true);
+        features.SetOptions(instrument.Key, overview, indicatorOptions with { Interest = order }, orderOnly: true);
     }
 
     private void ResetChartTools()
@@ -275,7 +280,7 @@ internal sealed partial class ChartCell
             tradeTape = liquidationTape = null;
             profileStatus = liquidationStatus = "";
         }
-        indicatorOptions = market == null ? ChartIndicatorOptions.Off : features.Options(market.Key);
+        indicatorOptions = market == null ? ChartIndicatorOptions.Off : features.Options(market.Key, overview);
         plot.SetDrawings(market == null ? [] : features.Drawings(market.Key));
         UpdateChartToolState();
         if (!indicatorOptions.Profile) tradeTape = null;

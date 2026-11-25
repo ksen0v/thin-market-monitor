@@ -58,6 +58,7 @@ internal sealed partial class ChartCell : Border
         Func<int[]> frameButtons, ChartFeatures? features = null)
     {
         this.api = api;
+        overview = number == 0;
         this.nextOrder = nextOrder;
         this.frameButtons = frameButtons;
         plot = new CandlePlot(gesture) { Focusable = true };
@@ -116,7 +117,7 @@ internal sealed partial class ChartCell : Border
         var commandBar = new DockPanel();
         var chartBody = new DockPanel();
         DockPanel.SetDock(commandBar, Dock.Top);
-        ConfigureChartTools(commandBar, chartBody, features, number == 0);
+        ConfigureChartTools(commandBar, chartBody, features);
         commandBar.Children.Add(frameBar);
         DockPanel.SetDock(detail, Dock.Bottom);
         layout.Children.Add(headerFrame);
@@ -267,6 +268,7 @@ internal sealed partial class ChartCell : Border
         refresh = null;
         olderRequested = false;
         plot.Frame = frame;
+        plot.Instrument = market;
         plot.Set([], reset: true);
         UpdateHeader();
         ResetChartTools();
@@ -322,6 +324,7 @@ internal sealed partial class ChartCell : Border
         var ct = source.Token;
         long offset = ExchangeApi.CandleOffset(instrument, tf);
         var candles = new LiveCandles(tf, offset, ChartVolume.UsesBase(instrument));
+        bool rulerTurnover = UsdQuotes.Supported(instrument);
         long liveStart = api.CandleNow;
         var live = new ConcurrentQueue<Trade>();
         bool native = tf >= 60 || ExchangeApi.NativeSeconds(instrument);
@@ -340,7 +343,7 @@ internal sealed partial class ChartCell : Border
             for (int i = 0; i < pending && live.TryDequeue(out var trade); i++)
             {
                 Interlocked.Decrement(ref queuedTrades);
-                candles.Add(trade, indicatorOptions.Volume && IsVisible && (native || trade.Time >= liveStart)
+                candles.Add(trade, (rulerTurnover || indicatorOptions.Volume) && IsVisible && (native || trade.Time >= liveStart)
                     ? ChartVolume.TradeAmount(instrument, trade) : double.NaN);
                 ObserveChartTrade(instrument, trade);
             }
@@ -448,7 +451,7 @@ internal sealed partial class ChartCell : Border
             {
                 var trades = features != null && indicatorOptions.Profile ? await features.Recent(instrument, ct) : await api.RecentTrades(instrument, ct);
                 ct.ThrowIfCancellationRequested();
-                foreach (var trade in trades) candles.Add(trade, indicatorOptions.Volume && IsVisible && trade.Time < liveStart
+                foreach (var trade in trades) candles.Add(trade, (rulerTurnover || indicatorOptions.Volume) && IsVisible && trade.Time < liveStart
                     ? ChartVolume.TradeAmount(instrument, trade) : double.NaN);
                 Draw();
             }
@@ -492,6 +495,7 @@ internal sealed partial class CandlePlot : FrameworkElement
     internal const int MaxVisibleBars = 6000;
     private const double LatestFraction = .8;
     public int Frame { get; set; } = 60;
+    internal Market? Instrument { private get; set; }
     private long BarTime => Frame * 1000L;
     public event Action? OlderRequested;
     private readonly Brush background = Terminal.Brush("Plot");
@@ -605,40 +609,33 @@ internal sealed partial class CandlePlot : FrameworkElement
     {
         dc.DrawRectangle(background, null, new Rect(0, 0, ActualWidth, ActualHeight));
         var currentView = CurrentView();
-        UpdateCrosshairPanes(currentView);
-        if (currentView is not { } view) { SummarizeIndicators(null); return; }
+        if (currentView is not { } view)
+        {
+            UpdateCrosshairAxes(null, 0, Rect.Empty, []);
+            SummarizeIndicators(null);
+            return;
+        }
         var plot = view.Plot;
         double step = plot.Width * BarTime / (view.End - view.Start);
         double body = Math.Max(.12, step * .67);
         Pen risingWick = step < 1 ? new Pen(up, body) : upLine;
         Pen fallingWick = step < 1 ? new Pen(down, body) : downLine;
-        int rows = ActualHeight < 105 ? 3 : 5;
-        int columns = ActualWidth > 325 ? 4 : ActualWidth > 190 ? 3 : 2;
+        double priceStep = PriceGridStep(view);
+        var timeTicks = TimeGridTicks(view);
         double lastPrice = candles[^1].Close;
         double priceY = view.Y(lastPrice);
         FormattedText? priceLabel = double.IsFinite(priceY) && priceY >= plot.Top && priceY <= plot.Bottom
             ? Text(lastPrice.ToString("G9", Russian), onAccent) : null;
-        double labelTop = Math.Max(0, priceY - (priceLabel?.Height ?? 0) / 2 - 2);
-        double labelBottom = labelTop + (priceLabel?.Height ?? 0) + 4;
-        for (int i = 0; i < rows; i++)
+        Rect priceBadge = Rect.Empty;
+        if (priceLabel != null)
         {
-            double fraction = (double)i / (rows - 1);
-            double y = plot.Top + plot.Height * fraction;
-            dc.DrawLine(gridLine, new Point(plot.Left, y), new Point(plot.Right, y));
-            if (priceLabel == null || y + 7 < labelTop || y - 6 > labelBottom)
-                DrawText(dc, FormatPrice(view.High - view.Span * fraction, view.Span / (rows - 1)), plot.Right + 5, y - 6);
+            double height = Math.Min(plot.Height, priceLabel.Height + 4);
+            priceBadge = new Rect(plot.Right, Math.Clamp(priceY - height / 2, plot.Top, plot.Bottom - height),
+                ActualWidth - plot.Right, height);
         }
-        string timeFormat = Frame >= 3600 || view.End - view.Start >= 86_400_000 ? "dd.MM HH:mm" :
-            Frame < 60 ? "HH:mm:ss" : "HH:mm";
-        for (int i = 0; i < columns; i++)
-        {
-            double fraction = (double)i / (columns - 1);
-            double x = plot.Left + plot.Width * fraction;
-            dc.DrawLine(gridLine, new Point(x, plot.Top), new Point(x, plot.Bottom));
-            long time = (long)(view.Start + fraction * (view.End - view.Start));
-            DrawText(dc, DateTimeOffset.FromUnixTimeMilliseconds(time).ToLocalTime().ToString(timeFormat),
-                x, ActualHeight - 15, i == 0 ? 0 : i == columns - 1 ? 1 : 0.5);
-        }
+        DrawPriceGrid(dc, view, priceStep, priceBadge);
+        DrawTimeGrid(dc, view, plot, timeTicks);
+        DrawTimeScale(dc, view, timeTicks);
 
         dc.PushClip(new RectangleGeometry(plot));
         var volumeBars = DrawCandleVolume(dc, view, body);
@@ -656,21 +653,21 @@ internal sealed partial class CandlePlot : FrameworkElement
         if (volumeBars.Known > 0 && indicators is { } data && plot.Width > 95 && plot.Height > 31)
             DrawText(dc, $"V · {ChartVolume.Unit(data.Market)}", plot.Left + 4, plot.Bottom - 14);
         dc.Pop();
-        DrawInterest(dc, view, columns);
+        var interestScales = DrawInterest(dc, view, timeTicks);
         SummarizeIndicators(view, volumeBars, volume, liquidations);
         if (priceLabel != null)
         {
             dc.DrawLine(lastPriceLine, new Point(plot.Left, priceY), new Point(plot.Right, priceY));
-            var axisLabel = new Rect(plot.Right, labelTop, ActualWidth - plot.Right, labelBottom - labelTop);
-            dc.DrawRectangle(accent, null, axisLabel);
-            dc.PushClip(new RectangleGeometry(axisLabel));
-            double available = axisLabel.Width - 6;
+            dc.DrawRectangle(accent, null, priceBadge);
+            dc.PushClip(new RectangleGeometry(priceBadge));
+            double available = priceBadge.Width - 6;
             if (priceLabel.Width > available)
                 priceLabel = Text(lastPrice.ToString("G6", Russian), onAccent);
-            dc.DrawText(priceLabel, new Point(plot.Right + 3, labelTop + 2));
+            dc.DrawText(priceLabel, new Point(plot.Right + 3, priceBadge.Top + (priceBadge.Height - priceLabel.Height) / 2));
             dc.Pop();
         }
         if (drag is { Mode: Operation.Ruler } measure) DrawRuler(dc, measure);
+        UpdateCrosshairAxes(view, priceStep, priceBadge, interestScales);
     }
 
     private void DrawRuler(DrawingContext dc, Drag measure)
@@ -689,13 +686,25 @@ internal sealed partial class CandlePlot : FrameworkElement
         dc.DrawEllipse(color, null, b, 3, 3);
         string percent = double.IsFinite(change) ? change.ToString("+0.00;-0.00;0.00", Russian) + "%" : "—";
         string text = interest == null
-            ? $"{FormatPrice(first, view.Span / 100)} → {FormatPrice(last, view.Span / 100)}   {percent}"
+            ? $"{ChartAxis.PriceLabel(first, view.Span / 100)} → {ChartAxis.PriceLabel(last, view.Span / 100)}   {percent}"
             : $"{(interest.Estimated ? "≈ " : "")}{interest.Scale.Delta(last - first)} {interest.Unit}   {percent}";
+        if (interest == null) text += "\n" + RulerTurnover(view, a, b);
         var formatted = Text(text, color);
+        double fit = Math.Min((ActualWidth - view.Plot.Left - 12) / formatted.Width, (view.Plot.Height - 6) / formatted.Height);
+        if (fit < 1) formatted.SetFontSize(Math.Max(7, 11 * fit));
         double x = Math.Clamp(b.X + 7, view.Plot.Left, Math.Max(view.Plot.Left, ActualWidth - formatted.Width - 14));
         double y = Math.Clamp(b.Y - formatted.Height - 9, view.Plot.Top, Math.Max(view.Plot.Top, view.Plot.Bottom - formatted.Height - 6));
         dc.DrawRectangle(background, line, new Rect(x, y, formatted.Width + 10, formatted.Height + 6));
         dc.DrawText(formatted, new Point(x + 5, y + 3));
+    }
+
+    private string RulerTurnover(View view, Point start, Point end)
+    {
+        if (Instrument == null) return "Оборот USD —";
+        var (total, estimated, partial) = ChartVolume.MeasureTurnover(Instrument, candles, BarTime, view.Time(start.X), view.Time(end.X));
+        if (total is not { } usd) return "Оборот USD —";
+        string amount = usd is > 0 and < .01 ? "<0,01" : usd.ToString("#,0.##", Russian);
+        return $"Оборот {(estimated ? "≈ " : "")}{amount} USD{(partial ? " · частично" : "")}";
     }
 
     protected override void OnMouseWheel(MouseWheelEventArgs e)
@@ -740,7 +749,15 @@ internal sealed partial class CandlePlot : FrameworkElement
         else if (InterestPaneAt(at, view, axisOnly: false) is { } pane)
             Start(Operation.InterestPan, at, view with { Plot = pane.Graph }, MouseButton.Left);
         else if (at.Y >= view.Plot.Bottom && at.X <= view.Plot.Right) Start(Operation.Time, at, view, MouseButton.Left);
-        else if (at.X >= view.Plot.Right && at.Y <= view.Plot.Bottom) Start(Operation.Price, at, view, MouseButton.Left);
+        else if (at.X >= view.Plot.Right && at.Y >= view.Plot.Top && at.Y <= view.Plot.Bottom)
+        {
+            if (e.ClickCount == 2)
+            {
+                fixedPrice = null;
+                InvalidateVisual();
+            }
+            else Start(Operation.Price, at, view, MouseButton.Left);
+        }
         else return;
         e.Handled = true;
     }
@@ -791,6 +808,11 @@ internal sealed partial class CandlePlot : FrameworkElement
             MoveDrawing(point);
             return;
         }
+        MoveGesture(move, point);
+    }
+
+    private void MoveGesture(Drag move, Point point)
+    {
         var view = move.View;
         double dx = (point.X - move.Start.X) / view.Plot.Width;
         double dy = (point.Y - move.Start.Y) / view.Plot.Height;
@@ -803,7 +825,8 @@ internal sealed partial class CandlePlot : FrameworkElement
                 if (Math.Abs(point.X - move.Start.X) > 1 || manualEnd.HasValue)
                     manualEnd = ClampEnd(PanEnd(view.End, dx, move.Visible, BarTime), move.Visible);
                 RequestOlder(dx > 0);
-                if (move.Mode == Operation.Pan && (Math.Abs(point.Y - move.Start.Y) > 4 || fixedPrice.HasValue))
+                if (move.Mode == Operation.Pan && (Math.Abs(point.X - move.Start.X) > 1 ||
+                    Math.Abs(point.Y - move.Start.Y) > 4 || fixedPrice.HasValue))
                     SetPrice(view.Low + dy * view.Span, view.Span);
                 break;
             case Operation.Time:
@@ -868,21 +891,8 @@ internal sealed partial class CandlePlot : FrameworkElement
             OlderRequested?.Invoke();
     }
 
-    private void DrawText(DrawingContext dc, string text, double x, double y, double anchor = 0)
-    {
-        var formatted = Text(text, axis);
-        dc.DrawText(formatted, new Point(x - formatted.Width * anchor, y));
-    }
+    private void DrawText(DrawingContext dc, string text, double x, double y) => dc.DrawText(Text(text, axis), new Point(x, y));
+
     private FormattedText Text(string text, Brush foreground) => new(text, Russian, FlowDirection.LeftToRight,
         typeface, 11, foreground, VisualTreeHelper.GetDpi(this).PixelsPerDip);
-
-    private static string FormatPrice(double value, double tick)
-    {
-        if (value == 0) return "0";
-        double magnitude = Math.Abs(value);
-        if (magnitude < 0.00001 || magnitude >= 10_000_000) return value.ToString("0.###e-0", Russian);
-        int precision = magnitude >= 100 ? 0 : magnitude >= 0.01 ? 4 : 5;
-        precision = Math.Max(precision, Math.Clamp((int)Math.Ceiling(-Math.Log10(tick)), 0, 8));
-        return value.ToString($"F{precision}", Russian);
-    }
 }

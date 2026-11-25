@@ -167,6 +167,8 @@ internal sealed class Settings
     public ModifierKeys ChartMagnet { get; set; } = ModifierKeys.Shift;
     public Dictionary<string, ChartDrawing[]> ChartDrawings { get; set; } = new(StringComparer.Ordinal);
     public Dictionary<string, ChartIndicatorOptions> ChartIndicators { get; set; } = new(StringComparer.Ordinal);
+    public ChartIndicatorOptions OverviewIndicators { get; set; } = ChartIndicatorOptions.Default;
+    public Dictionary<string, Dictionary<Venue, string>> OverviewInterestContracts { get; set; } = new(StringComparer.Ordinal);
     public Dictionary<string, ChartPaneWeights> ChartPaneWeights { get; set; } = new(StringComparer.Ordinal);
     public Key Fullscreen { get; set; } = Key.F;
     public int Grid { get; set; } = 2;
@@ -273,6 +275,21 @@ internal sealed class Settings
         settings.ChartIndicators = (settings.ChartIndicators ?? []).Where(pair => pair.Value != null && !string.IsNullOrWhiteSpace(pair.Key))
             .ToDictionary(pair => pair.Key, pair => pair.Value.Normalized() with { Volume = !defaultVolume || pair.Value.Volume },
                 StringComparer.Ordinal);
+        if (root.ValueKind == JsonValueKind.Object && !root.TryGetProperty(nameof(OverviewIndicators), out _))
+        {
+            if (settings.OverviewChoice?.Key is { } market)
+                settings.OverviewIndicators = settings.ChartIndicators.GetValueOrDefault(market) ?? ChartIndicatorOptions.Default;
+            settings.OverviewInterestContracts = settings.ChartIndicators.Where(pair => pair.Value.HasInterest)
+                .ToDictionary(pair => pair.Key, pair => pair.Value.Interest!, StringComparer.Ordinal);
+        }
+        settings.OverviewIndicators = (settings.OverviewIndicators ?? ChartIndicatorOptions.Default).Normalized(keepContracts: false);
+        settings.OverviewInterestContracts = (settings.OverviewInterestContracts ?? [])
+            .Where(pair => !string.IsNullOrWhiteSpace(pair.Key) && pair.Value != null)
+            .Select(pair => (pair.Key, Contracts: pair.Value
+                .Where(choice => ChartIndicatorOptions.IsInterestSource(choice.Key) && !string.IsNullOrWhiteSpace(choice.Value))
+                .ToDictionary(choice => choice.Key, choice => choice.Value)))
+            .Where(pair => pair.Contracts.Count > 0)
+            .ToDictionary(pair => pair.Key, pair => pair.Contracts, StringComparer.Ordinal);
         settings.ChartPaneWeights = (settings.ChartPaneWeights ?? []).Where(pair => pair.Value is { Valid: true } && !string.IsNullOrWhiteSpace(pair.Key))
             .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
         if (settings.Ruler == null || (settings.Ruler.Mouse is { } mouse ? !Enum.IsDefined(mouse)

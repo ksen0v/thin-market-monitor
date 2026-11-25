@@ -8,11 +8,13 @@ internal sealed record ChartIndicatorOptions(bool Volume = true, bool Profile = 
     public bool HasInterest => Interest is { Count: > 0 };
     public bool HasDetails => Profile || Liquidations || HasInterest;
     public bool Empty => !Volume && !HasDetails;
-    public ChartIndicatorOptions Normalized() => this with
+    public ChartIndicatorOptions Normalized(bool keepContracts = true) => this with
     {
-        Interest = (Interest ?? []).Where(pair => Enum.IsDefined(pair.Key) && pair.Key != Venue.Alpha)
-            .ToDictionary(pair => pair.Key, pair => pair.Value ?? "")
+        Interest = (Interest ?? []).Where(pair => IsInterestSource(pair.Key))
+            .ToDictionary(pair => pair.Key, pair => keepContracts ? pair.Value ?? "" : "")
     };
+
+    internal static bool IsInterestSource(Venue venue) => Enum.IsDefined(venue) && venue != Venue.Alpha;
 }
 
 internal readonly record struct InterestPoint(long Time, double Value, double? Usd = null, bool Estimated = false)
@@ -36,6 +38,39 @@ internal static class ChartVolume
     {
         if (trade.Size <= 0 || !double.IsFinite(trade.Size) || market.Contract is { Multiplier: <= 0 }) return double.NaN;
         return UsesBase(market) ? trade.Size * (market.Contract?.Multiplier ?? 1) : market.Turnover(trade.Size, trade.Price);
+    }
+
+    internal static (double? Usd, bool Estimated, bool Partial) MeasureTurnover(Market market, ReadOnlySpan<Candle> candles,
+        long interval, double start, double end)
+    {
+        if (!UsdQuotes.Supported(market)) return default;
+        double from = Math.Min(start, end), until = Math.Max(start, end);
+        double total = 0;
+        bool known = false, estimated = false, partial = false;
+        long? previous = null;
+        foreach (var candle in candles)
+        {
+            if (candle.Time + interval <= from) continue;
+            if (candle.Time > until) break;
+            partial |= previous is { } last && candle.Time > last + interval;
+            previous = candle.Time;
+
+            double? amount = candle.QuoteVolume;
+            if (amount is not (>= 0 and < double.PositiveInfinity))
+            {
+                amount = candle.Close > 0 ? candle.BaseVolume * candle.Close : null;
+                if (amount is not (>= 0 and < double.PositiveInfinity))
+                {
+                    partial = true;
+                    continue;
+                }
+                estimated = true;
+            }
+            known = true;
+            partial |= candle.ObservedVolume;
+            total += amount.Value;
+        }
+        return (known && double.IsFinite(total) ? total : null, estimated, partial);
     }
 }
 

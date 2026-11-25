@@ -118,21 +118,20 @@ internal sealed partial class CandlePlot
             .Select(point => point with { Value = point.InUnit(usd) }).Where(point => point.Value >= 0 && double.IsFinite(point.Value)).ToArray();
     }
 
-    private void DrawInterest(DrawingContext dc, View view, int columns)
+    private IReadOnlyList<InterestScale?> DrawInterest(DrawingContext dc, View view, ChartTimeTick[] timeTicks)
     {
         ReportInterestRange(view);
+        if (view.PaneHeights == null) return [];
+        var scales = new List<InterestScale?>(view.PaneHeights.Length - 1);
         foreach (var pane in InterestPanes(view))
         {
             var graph = pane.Graph;
             var points = VisibleInterest(pane.Layer.Reading, view);
             var numeric = GetInterestAxis(pane, points);
+            scales.Add(numeric?.Scale);
             var color = InterestBrush(pane.Layer.Venue);
             DrawInterestTitle(dc, pane, numeric, color);
-            for (int i = 0; i < columns; i++)
-            {
-                double x = graph.Left + graph.Width * i / (columns - 1);
-                dc.DrawLine(gridLine, new(x, graph.Top), new(x, graph.Bottom));
-            }
+            DrawTimeGrid(dc, view, graph, timeTicks);
             if (numeric == null)
             {
                 DrawText(dc, "—", graph.Right + 5, graph.Top + 1);
@@ -162,6 +161,7 @@ internal sealed partial class CandlePlot
             }
             dc.Pop();
         }
+        return scales;
     }
 
     private void DrawInterestTitle(DrawingContext dc, InterestPane pane, InterestAxis? numeric, Brush color)
@@ -192,7 +192,7 @@ internal sealed partial class CandlePlot
             if (lastLabel - y < 16) continue;
             double available = ActualWidth - graph.Right - 6;
             var label = Text(scale.Label(tick), brush);
-            if (label.Width > available) label.SetFontSize(Math.Max(7, 11 * available / label.Width));
+            FitAxisLabel(label, available);
             double top = Math.Clamp(y - label.Height / 2, graph.Top - label.Height / 4, graph.Bottom - label.Height * .75);
             dc.DrawText(label, new(graph.Right + 5, top));
             lastLabel = y;

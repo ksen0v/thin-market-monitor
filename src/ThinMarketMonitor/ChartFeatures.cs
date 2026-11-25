@@ -17,11 +17,19 @@ internal sealed class ChartFeatures(Settings settings, ExchangeApi api, Func<Mar
     public BinanceLiquidations Liquidations { get; } = new();
     public System.Windows.Input.ModifierKeys Magnet => settings.ChartMagnet;
     public event Action<string>? DrawingsChanged;
-    public event Action<string>? IndicatorsChanged;
-    public event Action<string>? InterestOrderChanged;
+    public event Action<string, bool>? IndicatorsChanged;
+    public event Action<string, bool>? InterestOrderChanged;
     public event Action<string>? PaneWeightsChanged;
     public ChartDrawing[] Drawings(string key) => settings.ChartDrawings.GetValueOrDefault(key) ?? [];
-    public ChartIndicatorOptions Options(string key) => settings.ChartIndicators.GetValueOrDefault(key) ?? ChartIndicatorOptions.Default;
+    public ChartIndicatorOptions Options(string key, bool overview)
+    {
+        if (!overview) return settings.ChartIndicators.GetValueOrDefault(key) ?? ChartIndicatorOptions.Default;
+        var options = settings.OverviewIndicators;
+        if (options.Interest is not { Count: > 0 } sources || !settings.OverviewInterestContracts.TryGetValue(key, out var contracts))
+            return options;
+        return options with { Interest = sources.Keys.ToDictionary(venue => venue, venue => contracts.GetValueOrDefault(venue) ?? "") };
+    }
+
     public ChartPaneWeights? PaneWeights(string key) => settings.ChartPaneWeights.GetValueOrDefault(key);
 
     public void SetDrawings(string key, ChartDrawing[] drawings)
@@ -32,12 +40,25 @@ internal sealed class ChartFeatures(Settings settings, ExchangeApi api, Func<Mar
         DrawingsChanged?.Invoke(key);
     }
 
-    public void SetOptions(string key, ChartIndicatorOptions options, bool orderOnly = false)
+    public void SetOptions(string key, bool overview, ChartIndicatorOptions options, bool orderOnly = false)
     {
-        if (options.Volume && !options.HasDetails && !options.InterestUsd) settings.ChartIndicators.Remove(key);
+        if (overview) SetOverviewOptions(key, options);
+        else if (options.Volume && !options.HasDetails && !options.InterestUsd) settings.ChartIndicators.Remove(key);
         else settings.ChartIndicators[key] = options;
         save();
-        (orderOnly ? InterestOrderChanged : IndicatorsChanged)?.Invoke(key);
+        (orderOnly ? InterestOrderChanged : IndicatorsChanged)?.Invoke(key, overview);
+    }
+
+    private void SetOverviewOptions(string key, ChartIndicatorOptions options)
+    {
+        settings.OverviewIndicators = options.Normalized(keepContracts: false);
+        foreach (var (venue, choice) in options.Interest ?? [])
+        {
+            if (choice.Length == 0) continue;
+            if (!settings.OverviewInterestContracts.TryGetValue(key, out var contracts))
+                settings.OverviewInterestContracts[key] = contracts = [];
+            contracts[venue] = choice;
+        }
     }
 
     public void SetPaneWeights(string key, ChartPaneWeights? weights)
