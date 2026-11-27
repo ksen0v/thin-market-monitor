@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace ThinMarketMonitor;
 
 internal record DensityRule(double SmallUsd = 10_000, double LargeUsd = 50_000,
@@ -25,7 +27,13 @@ internal sealed record DensityVenueRule(bool Spot = false, bool Futures = false,
 internal sealed class DensityOptions
 {
     public Dictionary<Venue, DensityVenueRule> Venues { get; set; } = [];
-    public HashSet<Venue> DisabledVenues { get; set; } = [];
+    public MarketSource[]? ExcludedSources { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public HashSet<Venue>? DisabledVenues { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<Venue, ListingRule>? SpotRules { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<Venue, ListingRule>? FuturesRules { get; set; }
     public string[] Blacklist { get; set; } = [];
     public Dictionary<string, DensityRule> CoinRules { get; set; } = new(StringComparer.Ordinal);
     public bool OverviewOverlay { get; set; }
@@ -38,33 +46,32 @@ internal sealed class DensityOptions
     public bool HideLeveragedTokens { get; set; }
     public bool HideStocksAndFunds { get; set; }
 
-    internal bool Scans(MarketSource source) => !DisabledVenues.Contains(source.Venue) &&
-        Venues.GetValueOrDefault(source.Venue)?.Enabled(source.Segment) == true;
+    internal ListingRule SourceRule(MarketSource source) => ExcludedSources?.Contains(source) == true
+        ? ListingRule.Exclude
+        : Venues.GetValueOrDefault(source.Venue)?.Enabled(source.Segment) == true ? ListingRule.Require : ListingRule.Ignore;
+    internal bool Scans(MarketSource source) => SourceRule(source) == ListingRule.Require;
     internal MarketSource[] EnabledSources() => MarketSource.All.Where(Scans).ToArray();
 
     internal bool ShowsMarket(Market market) => (!HideLeveragedTokens || !market.IsLeveragedToken) &&
         (!HideStocksAndFunds || !market.IsStockOrFund);
 
     internal bool NeedsCatalog(MarketSource source) =>
-        Scans(source) || MarketSource.All.Any(Scans) && !MarketSource.All.Any(other => other.Venue == source.Venue && Scans(other));
+        Scans(source) || SourceRule(source) == ListingRule.Exclude && MarketSource.All.Any(Scans);
 
-    internal void ToggleVenue(Venue venue)
+    internal void CycleSource(MarketSource source) => SetSourceRule(source, ListingFilter.Next(SourceRule(source)));
+
+    internal void SetSourceRule(MarketSource source, ListingRule rule)
     {
-        var rule = Venues.GetValueOrDefault(venue) ?? new();
-        if (!rule.Spot && !rule.Futures)
+        if (!MarketSource.All.Contains(source)) return;
+        var current = Venues.GetValueOrDefault(source.Venue);
+        bool enabled = rule == ListingRule.Require;
+        if (current != null || enabled)
         {
-            Venues[venue] = rule with { Spot = true };
-            DisabledVenues.Remove(venue);
+            current ??= new();
+            Venues[source.Venue] = source.Segment == Segment.Spot ? current with { Spot = enabled } :
+                current with { Futures = enabled };
         }
-        else if (!DisabledVenues.Remove(venue)) DisabledVenues.Add(venue);
-    }
-
-    internal void ToggleSource(MarketSource source)
-    {
-        var current = Venues.GetValueOrDefault(source.Venue) ?? new();
-        if (DisabledVenues.Remove(source.Venue)) current = current with { Spot = false, Futures = false };
-        Venues[source.Venue] = source.Segment == Segment.Spot ? current with { Spot = !current.Spot } :
-            current with { Futures = !current.Futures };
+        ExcludedSources = ListingFilter.SetSource(ExcludedSources ?? [], source, rule == ListingRule.Exclude);
     }
 
     internal bool Block(Market market)
@@ -79,7 +86,25 @@ internal sealed class DensityOptions
     {
         Venues = (Venues ?? []).Where(pair => Enum.IsDefined(pair.Key) && pair.Value is { Valid: true })
             .ToDictionary();
-        DisabledVenues = (DisabledVenues ?? []).Where(Enum.IsDefined).ToHashSet();
+        var exclusions = ExcludedSources;
+        if (exclusions == null && DisabledVenues is { } disabled)
+        {
+            // v0.11.4 excluded every venue without any active segment.
+            var activeVenues = MarketSource.All.Where(source => !disabled.Contains(source.Venue) && Scans(source))
+                .Select(source => source.Venue).ToHashSet();
+            exclusions = MarketSource.All.Where(source => disabled.Contains(source.Venue) ||
+                activeVenues.Count > 0 && !activeVenues.Contains(source.Venue)).ToArray();
+        }
+        ExcludedSources = MarketSource.All.Where(source => exclusions?.Contains(source) ??
+            ((source.Segment == Segment.Spot ? SpotRules : FuturesRules)?.GetValueOrDefault(source.Venue) == ListingRule.Exclude)).ToArray();
+        foreach (var source in ExcludedSources)
+        {
+            if (Venues.TryGetValue(source.Venue, out var rule))
+                Venues[source.Venue] = source.Segment == Segment.Spot ? rule with { Spot = false } : rule with { Futures = false };
+        }
+        if (Venues.TryGetValue(Venue.Alpha, out var alpha) && alpha.Futures) Venues[Venue.Alpha] = alpha with { Futures = false };
+        DisabledVenues = null;
+        SpotRules = FuturesRules = null;
         Blacklist = (Blacklist ?? []).Where(asset => !string.IsNullOrWhiteSpace(asset)).Distinct(StringComparer.Ordinal)
             .Order(StringComparer.Ordinal).ToArray();
         CoinRules = (CoinRules ?? []).Where(pair => !string.IsNullOrWhiteSpace(pair.Key) && pair.Value is { Valid: true })

@@ -24,11 +24,9 @@ internal sealed class DensityMonitor(ExchangeApi api) : IDisposable
     {
         if (disposed) return;
         var sources = options.EnabledSources();
-        var activeVenues = sources.Select(source => source.Venue).ToHashSet();
-        var excluded = MarketSource.All.Where(source => !activeVenues.Contains(source.Venue)).ToArray();
         foreach (var (source, catalog) in catalogs)
             if (catalog.Error == null) lastCatalogs[source] = catalog;
-        var eligible = ListingFilter.CollectSources(catalogs, sources, excluded, lastCatalogs);
+        var eligible = ListingFilter.CollectSources(catalogs, sources, options.ExcludedSources, lastCatalogs);
         PendingCatalogs = eligible.Missing;
         var blocked = options.Blacklist.ToHashSet(StringComparer.Ordinal);
         var marketsByVenue = eligible.Markets.Where(m => !blocked.Contains(m.ListingAsset) && options.ShowsMarket(m) && ExchangeApi.SupportsDensity(m))

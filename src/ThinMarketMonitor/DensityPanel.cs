@@ -65,7 +65,7 @@ internal sealed class DensityPanel : DockPanel
         SetDock(actions, Dock.Right);
         tools.Children.Add(actions);
 
-        sources = new("Источник плотностей", options.Scans, options.ToggleVenue, options.ToggleSource, selectionChanged);
+        sources = new("Источник плотностей", options.SourceRule, options.CycleSource, selectionChanged);
         AutomationProperties.SetName(sources, "Источники стакана");
         tools.Children.Add(sources);
         top.Child = tools;

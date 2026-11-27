@@ -57,9 +57,8 @@ internal sealed partial class SettingsPanel
             if (!editor.TryRead(out var rule)) { DensityRuleEditor.Invalid(message); return; }
             var venue = venues[exchange.SelectedIndex];
             bool useSpot = spot.IsChecked == true, useFutures = futures.IsEnabled && futures.IsChecked == true;
-            if (useSpot || useFutures) options.DisabledVenues.Remove(venue);
-            else if (options.DisabledVenues.Contains(venue) && options.Venues.GetValueOrDefault(venue) is { } preferences)
-                (useSpot, useFutures) = (preferences.Spot, preferences.Futures);
+            if (useSpot) options.SetSourceRule(new(venue), ListingRule.Require);
+            if (useFutures) options.SetSourceRule(new(venue, Segment.Futures), ListingRule.Require);
             options.Venues[venue] = new(useSpot, useFutures,
                 rule.SmallUsd, rule.LargeUsd, rule.MinDistance, rule.MaxDistance, rule.MinSeconds, rule.SmallColor, rule.LargeColor);
             save();

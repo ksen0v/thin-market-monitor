@@ -563,47 +563,74 @@ internal static class ChartFeatureChecks
     {
         var bar = (VenueSourceStrip)((ContentControl)window.FindName("OverviewSourcesHost")).Content;
         var buttons = bar.Children.OfType<StackPanel>().SelectMany(group => group.Children.OfType<Button>())
-            .Where(item => item.Tag is Venue).ToDictionary(item => (Venue)item.Tag);
-        Check(buttons.Keys.SequenceEqual(Enum.GetValues<Venue>()), "every exchange is visible in the overview source strip");
+            .ToDictionary(item => (MarketSource)item.Tag);
+        Check(buttons.Keys.SequenceEqual(MarketSource.All) && buttons.All(pair => pair.Value.ContextMenu == null &&
+            pair.Value.Content is StackPanel content && content.Children[0] is Image &&
+            content.Children.OfType<TextBlock>().Select(text => text.Text)
+                .SequenceEqual([pair.Key.Segment == Segment.Spot ? "S" : "F", pair.Key.Venue.Label()])),
+            "every supported spot and futures source has its own branded button without a menu");
         var binance = new MarketSource(Venue.Binance);
+        var binanceFuture = new MarketSource(Venue.Binance, Segment.Futures);
         var ku = new MarketSource(Venue.KuCoin);
-        var bybitFuture = new MarketSource(Venue.Bybit, Segment.Futures);
         var btc = Bitcoin with { Contract = null };
         var kuBtc = btc with { Venue = Venue.KuCoin, Symbol = "BTC-USDT" };
         var kuOnly = kuBtc with { Symbol = "AKE-USDT", Base = "AKE" };
         var binanceOnly = btc with { Symbol = "SOLUSDT", Base = "SOL" };
-        var bybit = Bitcoin with { Venue = Venue.Bybit, Contract = new("linear") };
+        var perpetual = Bitcoin with { Symbol = "AKEUSDT", Base = "AKE" };
         var catalogs = Field<Dictionary<MarketSource, Catalog>>(window, "catalogs");
         var old = catalogs.ToArray();
+        var oldIncluded = settings.OverviewSources;
+        var oldExcluded = settings.OverviewExcludedSources;
         settings.OverviewSources = [ku];
+        settings.OverviewExcludedSources = [];
         catalogs[ku] = new([kuBtc, kuOnly]);
         catalogs[binance] = new([btc, binanceOnly]);
-        catalogs[bybitFuture] = new([bybit]);
+        catalogs[binanceFuture] = new([perpetual]);
         var panel = Field<OverviewPanel>(window, "overviewPanel");
         var table = Field<DataGrid>(panel, "table");
-        typeof(MainWindow).GetMethod("RefreshOverview", Private)!.Invoke(window, null);
+        Refresh();
         table.SelectedItem = table.Items.OfType<OverviewPanel.Row>().Single(item => item.Market == kuBtc);
-        buttons[Venue.Binance].RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-        Check(table.Items.OfType<OverviewPanel.Row>().Select(row => row.Market)
-            .ToHashSet().SetEquals([btc, kuBtc, kuOnly, binanceOnly]) &&
-            table.SelectedItem is OverviewPanel.Row { Market: var chosen } && chosen == kuBtc,
+        Click(binance);
+        Check(Rows().SetEquals([btc, kuBtc, kuOnly, binanceOnly]) && Selected() == kuBtc,
             "turning on Binance adds all its exact markets to KuCoin and preserves the chosen chart");
-        var segments = ((StackPanel)buttons[Venue.Bybit].Parent).Children.OfType<Button>().Single(item => item.ContextMenu != null);
-        segments.ContextMenu.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "Futures"))
-            .RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
-        Check(table.Items.OfType<OverviewPanel.Row>().Any(row => row.Market == bybit) &&
-            AutomationProperties.GetItemStatus(buttons[Venue.Bybit]) == "Futures", "per-venue futures can join the spot union");
-        buttons[Venue.Bybit].RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-        Check(!settings.ScansOverview(bybitFuture) &&
-            AutomationProperties.GetItemStatus(buttons[Venue.Bybit]) == "Выключена", "clicking the active venue directly switches it off");
+        Click(binanceFuture);
+        Check(Rows().Contains(perpetual) && buttons[binanceFuture].BorderBrush == Terminal.Brush("Required") &&
+            buttons[binanceFuture].Background == Terminal.Brush("RequiredSurface"),
+            "futures can join the union independently of spot");
+        Click(binanceFuture);
+        Check(Rows().SetEquals([btc, kuBtc, binanceOnly]) && Selected() == kuBtc &&
+            buttons[binance].BorderBrush == Terminal.Brush("Required") &&
+            buttons[binanceFuture].BorderBrush == Terminal.Brush("Excluded"),
+            "red futures excludes its AKE listing from KuCoin without switching off Binance spot");
         var reopened = Settings.Deserialize(JsonSerializer.Serialize(settings));
-        reopened.ToggleOverviewVenue(Venue.Bybit);
-        Check(reopened.EnabledOverviewSources().ToHashSet().SetEquals([ku, binance, bybitFuture]),
-            "re-enabling a disabled venue restores its previous market type after a restart");
+        Check(reopened.EnabledOverviewSources().ToHashSet().SetEquals([ku, binance]) &&
+            reopened.OverviewSourceRule(binanceFuture) == ListingRule.Exclude && reopened.Rule(binanceFuture) == ListingRule.Ignore,
+            "the exact included and excluded markets survive restart independently of signal rules");
+        catalogs[binanceFuture] = new([], "Unavailable", true);
+        Refresh();
+        Check(Rows().SetEquals([btc, kuBtc, binanceOnly]), "red sources continue using their last confirmed listing on an outage");
+        Click(binanceFuture);
+        Check(Rows().SetEquals([btc, kuBtc, kuOnly, binanceOnly]) &&
+            buttons[binanceFuture].BorderBrush == Terminal.Brush("Outline"),
+            "neutral futures neither adds the contract nor excludes matching spot markets");
+        Click(binance);
+        Check(Rows().SetEquals([kuOnly]) && Selected() == null,
+            "red spot removes its listings from the other currently selected venues");
+        Click(binance);
+        Check(Rows().SetEquals([kuBtc, kuOnly]) && Selected() == kuBtc,
+            "neutral spot restores the exact previously selected market without adding Binance");
+
+        settings.OverviewSources = oldIncluded;
+        settings.OverviewExcludedSources = oldExcluded;
         catalogs.Clear();
         foreach (var entry in old) catalogs.Add(entry.Key, entry.Value);
         settings.OverviewChoice = null;
-        typeof(MainWindow).GetMethod("RefreshOverview", Private)!.Invoke(window, null);
+        Refresh();
+
+        void Click(MarketSource source) => buttons[source].RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        void Refresh() => typeof(MainWindow).GetMethod("RefreshOverview", Private)!.Invoke(window, null);
+        HashSet<Market> Rows() => table.Items.OfType<OverviewPanel.Row>().Select(row => row.Market).ToHashSet();
+        Market? Selected() => (table.SelectedItem as OverviewPanel.Row)?.Market;
     }
 
     private static void CheckPriceLabelsOnMove(CandlePlot plot, Candle[] bars)

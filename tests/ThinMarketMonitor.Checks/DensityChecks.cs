@@ -160,7 +160,7 @@ internal static class DensityChecks
         Require(monitor.Visible().Single() is { Large: true } restoredLevel && restoredLevel.Market == Market,
             "venue thresholds keep applying after the coin override is cleared");
 
-        options.ToggleSource(bybitPerp.Source);
+        options.CycleSource(bybitPerp.Source);
         options.Venues[Venue.Binance] = Rule with { Spot = false, Futures = true, MinSeconds = 0 };
         catalogs[binancePerp.Source] = new([binancePerp]);
         monitor.Configure(options, catalogs);
@@ -174,17 +174,20 @@ internal static class DensityChecks
         Require(monitor.ForMarket(bybitPerp).Length == 0 && monitor.Visible(assets).Length == 2,
             "hiding stocks removes existing levels for that market, including chart overlays, without affecting the other sources");
         options.HideStocksAndFunds = false;
-        options.ToggleSource(bybitPerp.Source);
+        options.SetSourceRule(bybitPerp.Source, ListingRule.Ignore);
         monitor.Configure(options, catalogs);
-        Require(monitor.Visible(assets).All(entry => entry.Market != bybitPerp),
-            "deselecting a market immediately removes its overlay");
-        options.ToggleVenue(Venue.Binance);
+        Require(monitor.Visible(assets).Length == 2 && monitor.Visible(assets).All(entry => entry.Market != bybitPerp),
+            "neutral futures removes only its own overlay");
+        options.CycleSource(binancePerp.Source);
         monitor.Configure(options, catalogs);
-        Require(monitor.Visible(assets).Length == 0, "switching off Binance excludes the shared symbol from Bybit immediately");
+        Require(monitor.Visible(assets).Length == 0, "red Binance futures excludes the shared symbol from Bybit immediately");
         catalogs[binancePerp.Source] = new([], "Unavailable");
         monitor.Configure(options, catalogs);
         Require(monitor.Visible(assets).Length == 0 && monitor.PendingCatalogs.Contains(binancePerp.Source),
             "a temporary outage keeps the last known exclusions instead of treating the catalog as empty");
+        options.CycleSource(binancePerp.Source);
+        monitor.Configure(options, catalogs);
+        Require(!monitor.PendingCatalogs.Contains(binancePerp.Source), "neutral venues no longer hold the density filter pending");
         options.Venues.Clear();
         monitor.Configure(options, catalogs);
         Require(monitor.Visible().Length == 0 && monitor.Status().Length == 0, "disabled venue removes levels and scan");
@@ -357,20 +360,25 @@ internal static class DensityChecks
         };
         Require(options.Scans(weex) && !options.Scans(new(Venue.Weex)) &&
             options.Venues[Venue.Weex] is { SmallUsd: 200, LargeUsd: 900, SmallColor: "#123abc" }, "flat v0.11.0 options migrate");
-        Require(Filter().Markets.SequenceEqual([unrelated]) && options.NeedsCatalog(futures),
-            "disabled Binance spot and futures exclude confirmed base assets across quotes and denominations");
-        options.ToggleSource(spot);
-        options.ToggleSource(futures);
+        Require(Filter().Markets.SequenceEqual([pepe, floki, unrelated]) && !options.NeedsCatalog(futures),
+            "neutral Binance markets neither contribute instruments nor exclude listed coins");
+        options.CycleSource(spot);
+        options.CycleSource(futures);
         Require(Filter().Markets.Select(market => market.Key).ToHashSet().SetEquals(
             catalogs.Values.SelectMany(catalog => catalog.Markets).Select(market => market.Key)),
             "two enabled venues contribute a union including their unique markets");
-        options.ToggleVenue(Venue.Binance);
+        options.CycleSource(spot);
+        Require(Filter().Markets.ToHashSet().SetEquals([floki, unrelated, binanceFloki]) && options.Scans(futures),
+            "excluding spot uses the confirmed base across quotes without excluding Binance futures listings");
+        options.CycleSource(futures);
+        Require(Filter().Markets.SequenceEqual([unrelated]) && options.NeedsCatalog(futures),
+            "red futures also excludes the confirmed base even when exchanges denominate the ticker differently");
         var previous = new Dictionary<MarketSource, Catalog>(catalogs);
         catalogs[futures] = new([], "Unavailable");
         Require(Filter(previous).Markets.SequenceEqual([unrelated]) && Filter(previous).Missing.Contains(futures),
             "when fresh metadata is unavailable, a last known disabled catalog still filters its listed asset");
 
-        options.ToggleSource(new(Venue.Weex));
+        options.CycleSource(new(Venue.Weex));
         Require(options.Venues[Venue.Weex] is { Spot: true, Futures: true, SmallUsd: 200, SmallColor: "#123abc" },
             "toggling a source keeps venue parameters");
         Require(options.Block(pepe) && !options.Block(catalogs[spot].Markets[0]) && !settings.SignalBlocked(pepe),
@@ -378,10 +386,35 @@ internal static class DensityChecks
         options.CoinRules[floki.ListingAsset] = new(SmallUsd: 222, SmallColor: "#FEDCBA");
         var restored = Settings.Deserialize(JsonSerializer.Serialize(settings)).Densities;
         Require(restored.Blacklist.SequenceEqual(["PEPE"]) && restored.CoinRules["FLOKI"] == options.CoinRules["FLOKI"] &&
-            !restored.Scans(spot) && restored.Scans(new(Venue.Weex)) && restored.Scans(weex),
-            "direct venue selection, blacklist and per-coin settings survive a round trip");
-        restored.ToggleVenue(Venue.Binance);
-        Require(restored.Scans(spot) && restored.Scans(futures), "re-enabling a venue restores both selected segments");
+            restored.SourceRule(spot) == ListingRule.Exclude && restored.SourceRule(futures) == ListingRule.Exclude &&
+            restored.Scans(new(Venue.Weex)) && restored.Scans(weex),
+            "exact exclusions, scan sources, blacklist and per-coin settings survive a round trip");
+        restored.CycleSource(spot);
+        Require(restored.SourceRule(spot) == ListingRule.Ignore && restored.SourceRule(futures) == ListingRule.Exclude,
+            "one excluded segment can be neutralized without changing the other");
+        var legacyDensity = Settings.Deserialize("""
+            {"Densities":{"Venues":{"Weex":{"Futures":true,"SmallUsd":200,"LargeUsd":900,"SmallColor":"#123abc"}},"DisabledVenues":[]}}
+            """).Densities;
+        Require(legacyDensity.SourceRule(spot) == ListingRule.Exclude && legacyDensity.SourceRule(futures) == ListingRule.Exclude &&
+            legacyDensity.SourceRule(new(Venue.Weex)) == ListingRule.Ignore && legacyDensity.Scans(weex) &&
+            legacyDensity.Venues[Venue.Weex] is { SmallUsd: 200, SmallColor: "#123abc" },
+            "v0.11.4 preserves previous density exclusions explicitly and keeps the active venue's other segment neutral");
+        var legacyListing = Settings.Deserialize("""
+            {"Densities":{"Venues":{"Weex":{"Futures":true}},"FuturesRules":{"Binance":2}}}
+            """).Densities;
+        Require(legacyListing.Scans(weex) && legacyListing.SourceRule(spot) == ListingRule.Ignore &&
+            legacyListing.SourceRule(futures) == ListingRule.Exclude, "older explicit per-segment exclusions migrate");
+        var legacyOverview = Settings.Deserialize(JsonSerializer.Serialize(new
+        {
+            OverviewSources = new[] { spot, new MarketSource(Venue.Weex, Segment.Futures) },
+            OverviewDisabledVenues = new[] { Venue.Binance }
+        }));
+        Require(legacyOverview.OverviewSourceRule(spot) == ListingRule.Ignore &&
+            legacyOverview.OverviewSourceRule(weex) == ListingRule.Require,
+            "an overview venue that was off in v0.11.4 remains neutral after migration");
+        var oldOverviewRules = Settings.Deserialize("""{"OverviewFuturesRules":{"Binance":2}}""");
+        Require(oldOverviewRules.OverviewSourceRule(futures) == ListingRule.Exclude &&
+            oldOverviewRules.OverviewSourceRule(spot) == ListingRule.Ignore, "older overview listing exclusions retain their exact segment");
         Require(DensityCardKey.For(floki) == DensityCardKey.For(binanceFloki) &&
             DensityCardKey.For(pepe) != DensityCardKey.For(pepe with { Base = "PEPE" }) &&
             DensityCardKey.For(pepe) != DensityCardKey.For(pepe with { Contract = null }) &&
@@ -390,9 +423,7 @@ internal static class DensityChecks
 
         FilterResult Filter(IReadOnlyDictionary<MarketSource, Catalog>? last = null)
         {
-            var enabled = options.EnabledSources();
-            return ListingFilter.CollectSources(catalogs, enabled,
-                MarketSource.All.Where(source => enabled.All(active => active.Venue != source.Venue)).ToArray(), last);
+            return ListingFilter.CollectSources(catalogs, options.EnabledSources(), options.ExcludedSources, last);
         }
     }
 
@@ -464,20 +495,23 @@ internal static class DensityChecks
             Require(opened.SequenceEqual([levels[0].Market, secondVenue.Market]), "the chosen exchange is sent to the terminal");
             Update(levels);
             await Layout();
-            var bybit = VisualChildren(panel).OfType<Button>()
-                .Single(button => AutomationProperties.GetName(button) == "Источник плотностей · Bybit");
-            var segmentButton = ((StackPanel)bybit.Parent).Children.OfType<Button>().Single(button => button.ContextMenu != null);
-            var future = segmentButton.ContextMenu.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "Futures"));
-            future.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
-            Require(future.IsChecked && future.StaysOpenOnClick && options.Venues[Market.Venue] is { Spot: true, Futures: true } && changes == 1,
-                "market choices can be toggled independently from the top exchange strip");
-            Click(bybit);
-            Require(!options.Scans(Market.Source) && AutomationProperties.GetItemStatus(bybit) == "Выключена",
-                "the exchange button switches off immediately");
-            Click(bybit);
-            Require(options.Scans(Market.Source) && future.IsChecked &&
+            var buttons = VisualChildren(panel).OfType<Button>().Where(button => button.Tag is MarketSource)
+                .ToDictionary(button => (MarketSource)button.Tag);
+            var binanceSpot = new MarketSource(Venue.Binance);
+            var binanceFuture = new MarketSource(Venue.Binance, Segment.Futures);
+            var spot = buttons[binanceSpot];
+            var future = buttons[binanceFuture];
+            Click(future);
+            Require(spot.ContextMenu == null && future.ContextMenu == null && !options.Scans(binanceSpot) &&
+                options.Scans(binanceFuture) && changes == 1, "the futures button works independently of spot");
+            Click(future);
+            Require(options.SourceRule(binanceFuture) == ListingRule.Exclude &&
+                AutomationProperties.GetItemStatus(future) == "Исключать монеты с листингом",
+                "the density strip visibly marks an excluded source");
+            Click(future);
+            Require(options.SourceRule(binanceFuture) == ListingRule.Ignore && options.Scans(Market.Source) &&
                 VisualChildren(panel).OfType<Button>().All(button => AutomationProperties.GetName(button) != "Листинги плотностей"),
-                "the top strip restores both markets and replaces the separate listing dialog");
+                "the source cycles back to neutral while the other exchange stays selected");
 
             scroll.ScrollToVerticalOffset(335);
             await Layout();

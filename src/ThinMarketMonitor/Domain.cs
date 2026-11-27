@@ -109,7 +109,9 @@ internal sealed class Settings
     public double OverviewDrawerWidth { get; set; } = 390;
     public MarketSource OverviewSource { get; set; } = new(Venue.KuCoin);
     public MarketSource[]? OverviewSources { get; set; }
-    public HashSet<Venue> OverviewDisabledVenues { get; set; } = [];
+    public MarketSource[]? OverviewExcludedSources { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public HashSet<Venue>? OverviewDisabledVenues { get; set; }
     public Dictionary<Venue, ListingRule> OverviewSpotRules { get; set; } = [];
     public Dictionary<Venue, ListingRule> OverviewFuturesRules { get; set; } = [];
     public ListingRule OverviewRule(MarketSource source) => ListingRules(source.Segment, overview: true).GetValueOrDefault(source.Venue);
@@ -121,33 +123,24 @@ internal sealed class Settings
     public bool ShowsOverviewMarket(Market market) => ShowsOverviewQuote(market.Quote) &&
         (!HideOverviewLeveragedTokens || !market.IsLeveragedToken);
     public CellChoice? OverviewChoice { get; set; }
-    private MarketSource[] ConfiguredOverviewSources() => OverviewSources ??
-        MarketSource.All.Where(source => source == OverviewSource || OverviewRule(source) == ListingRule.Require).ToArray();
-
-    internal bool ScansOverview(MarketSource source) => !OverviewDisabledVenues.Contains(source.Venue) &&
-        (OverviewSources?.Contains(source) ?? (source == OverviewSource || OverviewRule(source) == ListingRule.Require));
-
-    internal MarketSource[] EnabledOverviewSources() => ConfiguredOverviewSources()
-        .Where(source => !OverviewDisabledVenues.Contains(source.Venue)).ToArray();
-
-    internal void ToggleOverviewVenue(Venue venue)
+    internal ListingRule OverviewSourceRule(MarketSource source)
     {
-        var configured = ConfiguredOverviewSources();
-        if (!configured.Any(source => source.Venue == venue))
-        {
-            var preferred = new MarketSource(venue, OverviewSource.Segment);
-            OverviewSources = [.. configured, MarketSource.All.Contains(preferred) ? preferred : new(venue)];
-            OverviewDisabledVenues.Remove(venue);
-        }
-        else if (!OverviewDisabledVenues.Remove(venue)) OverviewDisabledVenues.Add(venue);
+        if (OverviewExcludedSources?.Contains(source) == true) return ListingRule.Exclude;
+        return OverviewDisabledVenues?.Contains(source.Venue) != true &&
+            (OverviewSources?.Contains(source) ?? (source == OverviewSource || OverviewRule(source) == ListingRule.Require))
+            ? ListingRule.Require : ListingRule.Ignore;
     }
 
-    internal void ToggleOverviewSegment(MarketSource source)
+    internal MarketSource[] EnabledOverviewSources() =>
+        MarketSource.All.Where(source => OverviewSourceRule(source) == ListingRule.Require).ToArray();
+
+    internal void CycleOverviewSource(MarketSource source)
     {
-        var configured = ConfiguredOverviewSources();
-        if (OverviewDisabledVenues.Remove(source.Venue))
-            configured = configured.Where(item => item.Venue != source.Venue).ToArray();
-        OverviewSources = configured.Contains(source) ? configured.Where(item => item != source).ToArray() : [.. configured, source];
+        if (!MarketSource.All.Contains(source)) return;
+        var next = ListingFilter.Next(OverviewSourceRule(source));
+        OverviewSources = ListingFilter.SetSource(EnabledOverviewSources(), source, next == ListingRule.Require);
+        OverviewExcludedSources = ListingFilter.SetSource(OverviewExcludedSources ?? [], source, next == ListingRule.Exclude);
+        OverviewDisabledVenues = null;
     }
     public int OverviewFrame { get; set; } = 60;
     public OverviewColumn[] OverviewColumns { get; set; } = [new(MetricKind.Turnover, 1440), new(MetricKind.Change, 1440)];
@@ -259,8 +252,12 @@ internal sealed class Settings
             .Select(CoinKey).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
         settings.FrameButtons = (settings.FrameButtons ?? [15, 60, 300]).Where(Frames.All.Contains).Distinct().Order().ToArray();
         if (!MarketSource.All.Contains(settings.OverviewSource)) settings.OverviewSource = new(Venue.KuCoin);
-        settings.OverviewSources = settings.OverviewSources?.Where(MarketSource.All.Contains).Distinct().ToArray();
-        settings.OverviewDisabledVenues = (settings.OverviewDisabledVenues ?? []).Where(Enum.IsDefined).ToHashSet();
+        settings.OverviewSources = settings.EnabledOverviewSources();
+        settings.OverviewExcludedSources = MarketSource.All.Where(source =>
+            settings.OverviewExcludedSources?.Contains(source) ??
+            (settings.OverviewDisabledVenues == null && settings.OverviewRule(source) == ListingRule.Exclude &&
+                !settings.OverviewSources.Contains(source))).ToArray();
+        settings.OverviewDisabledVenues = null;
         if (!Frames.All.Contains(settings.OverviewFrame)) settings.OverviewFrame = 60;
         if (settings.OverviewDrawerWidth is < 230 or > 1600) settings.OverviewDrawerWidth = 390;
         settings.OverviewColumnWidths = (settings.OverviewColumnWidths ?? [])
@@ -365,14 +362,24 @@ internal sealed class Settings
 
 internal static class ListingFilter
 {
+    internal static ListingRule Next(ListingRule current) => current switch
+    {
+        ListingRule.Ignore => ListingRule.Require,
+        ListingRule.Require => ListingRule.Exclude,
+        _ => ListingRule.Ignore
+    };
+
+    internal static MarketSource[] SetSource(MarketSource[] sources, MarketSource source, bool selected)
+    {
+        var remaining = sources.Where(item => item != source);
+        return selected ? [.. remaining, source] : remaining.ToArray();
+    }
+
     internal static void Cycle(Dictionary<Venue, ListingRule> rules, Venue venue)
     {
-        switch (rules.GetValueOrDefault(venue))
-        {
-            case ListingRule.Ignore: rules[venue] = ListingRule.Require; break;
-            case ListingRule.Require: rules[venue] = ListingRule.Exclude; break;
-            default: rules.Remove(venue); break;
-        }
+        var next = Next(rules.GetValueOrDefault(venue));
+        if (next == ListingRule.Ignore) rules.Remove(venue);
+        else rules[venue] = next;
     }
 
     public static FilterResult Apply(IReadOnlyDictionary<Venue, Catalog> catalogs, IReadOnlyDictionary<Venue, ListingRule> rules)

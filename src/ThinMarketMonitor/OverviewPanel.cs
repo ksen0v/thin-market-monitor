@@ -92,6 +92,8 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
     private Market[] markets = [];
     private string? catalogDetails;
     private string? catalogPending;
+    private string? exclusionNotice;
+    private string progress = "";
     private bool catalogUnavailable;
     private bool noSources;
     private string? spreadDetails;
@@ -260,11 +262,12 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
     }
 
     public void SetSource(IReadOnlyList<Market> next, bool visible, string? pending = null, string? details = null,
-        bool catalogUnavailable = false, bool noSources = false)
+        bool catalogUnavailable = false, bool noSources = false, string? exclusionNotice = null)
     {
         shown = visible;
         catalogDetails = details;
         catalogPending = pending;
+        this.exclusionNotice = exclusionNotice;
         this.catalogUnavailable = catalogUnavailable;
         this.noSources = noSources;
         var matching = settings.OverviewQuotes == null && !settings.HideOverviewLeveragedTokens
@@ -401,7 +404,7 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
     {
         Cancel();
         if (!shown || rows.Length == 0) return;
-        status.Text = $"{rows.Length:N0} инструментов";
+        ReportProgress($"{rows.Length:N0} инструментов");
         if (columns.Length == 0) return;
         var run = new CancellationTokenSource();
         worker = run;
@@ -463,11 +466,18 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
 
     internal void UpdateDiagnostics()
     {
-        status.Visibility = settings.DebugMode || rows.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        status.Visibility = settings.DebugMode || rows.Length == 0 || exclusionNotice != null ? Visibility.Visible : Visibility.Collapsed;
         if (rows.Length == 0)
             status.Text = noSources ? "Включите биржу над графиком." : catalogPending == null ? "Нет инструментов по этим условиям" : settings.DebugMode ? catalogPending
                 : catalogUnavailable ? "Каталог недоступен" : "Загрузка инструментов…";
+        else status.Text = settings.DebugMode ? progress : exclusionNotice ?? progress;
         UpdateStatusTip();
+    }
+
+    private void ReportProgress(string caption)
+    {
+        progress = caption;
+        if (settings.DebugMode || exclusionNotice == null) status.Text = caption;
     }
 
     private void UpdateStatusTip() => status.ToolTip = !settings.DebugMode ? null : catalogDetails == null ? spreadDetails :
@@ -531,7 +541,7 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
                 if (done % 12 == 0 || done == entries.Length)
                 {
                     if (done == 12 || done % 240 == 0 || done == entries.Length) QueueColumnFit();
-                    status.Text = done == entries.Length ? $"{done:N0} инструментов" : $"{done:N0} / {entries.Length:N0}";
+                    ReportProgress(done == entries.Length ? $"{done:N0} инструментов" : $"{done:N0} / {entries.Length:N0}");
                     if (settings.OverviewSort >= 0 && !SortingSpread) RefreshSort();
                 }
                 if (done % 24 == 0) await Task.Yield();

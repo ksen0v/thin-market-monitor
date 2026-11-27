@@ -24,6 +24,7 @@ public partial class MainWindow : Window, IDisposable
     private readonly SignalCooldown signalCooldown;
     private readonly RussianVoicePack neuralVoice;
     private readonly Dictionary<MarketSource, Catalog> catalogs = new();
+    private readonly Dictionary<MarketSource, Catalog> lastOverviewCatalogs = new();
     private readonly ChartCell[] cells = new ChartCell[9];
     private readonly ChartCell overviewChart;
     private readonly OverviewPanel overviewPanel;
@@ -135,7 +136,7 @@ public partial class MainWindow : Window, IDisposable
         OverviewDrawerHost.Content = overviewPanel;
         OverviewChartHost.Content = overviewChart;
         OverviewSourcesHost.Content = new VenueSourceStrip("Источник обзора",
-            settings.ScansOverview, settings.ToggleOverviewVenue, settings.ToggleOverviewSegment,
+            settings.OverviewSourceRule, settings.CycleOverviewSource,
             () =>
             {
                 colibri.CancelPending();
@@ -379,18 +380,25 @@ public partial class MainWindow : Window, IDisposable
         OverviewDrawerHost.Visibility = settings.OverviewDrawer ? Visibility.Visible : Visibility.Collapsed;
         UpdateOverviewDrawerWidth();
         var enabled = settings.EnabledOverviewSources();
-        var result = ListingFilter.CollectSources(catalogs, enabled);
+        var excluded = settings.OverviewExcludedSources ?? [];
+        foreach (var (source, catalog) in catalogs)
+            if (catalog.Error == null) lastOverviewCatalogs[source] = catalog;
+        var result = ListingFilter.CollectSources(catalogs, enabled, excluded, lastOverviewCatalogs);
         int unavailable = result.Missing.Count(source => catalogs.GetValueOrDefault(source)?.Error != null);
         string? pending = result.Missing.Count == 0 ? null : unavailable > 0
             ? $"Недоступно каталогов: {unavailable}"
             : $"Загрузка каталогов: {result.Missing.Count}";
         string? details = result.Missing.Count == 0 ? null : string.Join("\n", result.Missing.Select(source =>
             $"{source.Label} · {catalogs.GetValueOrDefault(source)?.Error ?? "загрузка"}"));
+        var pendingExclusions = result.Missing.Where(source => excluded.Contains(source) && !lastOverviewCatalogs.ContainsKey(source)).ToArray();
+        string? exclusionNotice = pendingExclusions.Length == 0 ? null :
+            pendingExclusions.Any(source => catalogs.GetValueOrDefault(source)?.Error != null)
+                ? "Часть исключений не применена · каталоги недоступны" : "Загрузка каталогов для исключений…";
         if (overviewChart.Choice?.Key != settings.OverviewChoice?.Key) overviewChart.Choice = settings.OverviewChoice;
         overviewChart.Resolve(result.Markets.FirstOrDefault(m => m.Key == settings.OverviewChoice?.Key && settings.ShowsOverviewMarket(m)));
         overviewChart.Activate(overview);
         overviewPanel.SetSource(result.Markets, overview && settings.OverviewDrawer, pending, details,
-            catalogUnavailable: unavailable > 0, noSources: enabled.Length == 0);
+            catalogUnavailable: unavailable > 0, noSources: enabled.Length == 0, exclusionNotice: exclusionNotice);
         settingsPanel?.UpdateQuoteChoices(OverviewSourceQuotes());
         RefreshDensities();
     }
@@ -550,7 +558,7 @@ public partial class MainWindow : Window, IDisposable
         return catalogs.Where(entry => entry.Value.ConnectionFailed).Select(entry => entry.Key).Where(source =>
             settings.Densities.NeedsCatalog(source) || settings.PriceAlerts.Any(alert => alert.Active && alert.Source == source) ||
             settings.Rule(source) != ListingRule.Ignore || defaultSpot && source.Segment == Segment.Spot ||
-            settings.Overview && settings.ScansOverview(source)).ToArray();
+            settings.Overview && settings.OverviewSourceRule(source) != ListingRule.Ignore).ToArray();
     }
 
     private void NetworkAddressChanged(object? sender, EventArgs e) =>
@@ -828,7 +836,7 @@ public partial class MainWindow : Window, IDisposable
         overviewPanel.UpdateColumns();
         Save();
         if (!thresholdsChanged && (catalogs.Count == 0 || catalogs.Any(c => c.Value.Error != null &&
-                (settings.Rule(c.Key) != ListingRule.Ignore || settings.ScansOverview(c.Key))))) await ReloadCatalogs();
+                (settings.Rule(c.Key) != ListingRule.Ignore || settings.OverviewSourceRule(c.Key) != ListingRule.Ignore)))) await ReloadCatalogs();
     }
 
     private void ShowDialog(FrameworkElement content)
