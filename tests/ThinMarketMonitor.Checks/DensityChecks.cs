@@ -114,6 +114,8 @@ internal static class DensityChecks
         Require(inverse.Apply(Present, Start + 6000, 12_000, false, false, _ => { }).Single().Usd == 1000,
             "inverse contract quantities convert to quote value");
         Require(Settings.Deserialize("{}").Densities.Venues.Count == 0, "existing installs are opted out until sources are chosen");
+        FilterOrderLadders();
+        await FilterInstrumentKinds();
         ListingRulesAndPersistence();
         ChartPriceProjection();
 
@@ -125,13 +127,12 @@ internal static class DensityChecks
             Popup = true, Venues = { [Venue.Bybit] = Rule with { MinSeconds = 0 } }
         };
         var other = Market with { Base = "OTHER", Symbol = "OTHERUSDT" };
-        var bybitPerp = Market with { Contract = new("linear", Perpetual: true) };
-        var binancePerp = bybitPerp with { Venue = Venue.Binance, Contract = new("usdm", Perpetual: true) };
+        var bybitPerp = Market with { Contract = new("linear", Perpetual: true), Identifiers = new(StockOrFund: true) };
+        var binancePerp = bybitPerp with { Venue = Venue.Binance, Contract = new("usdm", Perpetual: true), Identifiers = null };
         var catalogs = new Dictionary<MarketSource, Catalog>
         {
             [Market.Source] = new([Market, other]),
-            [bybitPerp.Source] = new([bybitPerp]),
-            [binancePerp.Source] = new([binancePerp])
+            [bybitPerp.Source] = new([bybitPerp])
         };
         monitor.Configure(options, catalogs);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(23));
@@ -161,20 +162,149 @@ internal static class DensityChecks
 
         options.ToggleSource(bybitPerp.Source);
         options.Venues[Venue.Binance] = Rule with { Spot = false, Futures = true, MinSeconds = 0 };
+        catalogs[binancePerp.Source] = new([binancePerp]);
         monitor.Configure(options, catalogs);
         var assets = new HashSet<string>(StringComparer.Ordinal) { Market.ListingAsset };
         while (monitor.Visible(assets).Length < 3) await Task.Delay(80, timeout.Token);
         Require(DensityChartLevel.ForMarket(Market, monitor.Visible(assets)).Select(entry => entry.Level.Market.Source)
             .ToHashSet().SetEquals([Market.Source, bybitPerp.Source, binancePerp.Source]),
             "one chart receives selected spot and futures books across venues");
+        options.HideStocksAndFunds = true;
+        monitor.Configure(options, catalogs);
+        Require(monitor.ForMarket(bybitPerp).Length == 0 && monitor.Visible(assets).Length == 2,
+            "hiding stocks removes existing levels for that market, including chart overlays, without affecting the other sources");
+        options.HideStocksAndFunds = false;
         options.ToggleSource(bybitPerp.Source);
         monitor.Configure(options, catalogs);
         Require(monitor.Visible(assets).All(entry => entry.Market != bybitPerp),
             "deselecting a market immediately removes its overlay");
+        options.ToggleVenue(Venue.Binance);
+        monitor.Configure(options, catalogs);
+        Require(monitor.Visible(assets).Length == 0, "switching off Binance excludes the shared symbol from Bybit immediately");
+        catalogs[binancePerp.Source] = new([], "Unavailable");
+        monitor.Configure(options, catalogs);
+        Require(monitor.Visible(assets).Length == 0 && monitor.PendingCatalogs.Contains(binancePerp.Source),
+            "a temporary outage keeps the last known exclusions instead of treating the catalog as empty");
         options.Venues.Clear();
         monitor.Configure(options, catalogs);
         Require(monitor.Visible().Length == 0 && monitor.Status().Length == 0, "disabled venue removes levels and scan");
-        Console.WriteLine("Density source and listing rules, settings migration, per-coin thresholds, blacklist and adaptive depth passed.");
+        Console.WriteLine("Density market filters, Gate ladder patterns, listing rules, settings, blacklist and adaptive depth passed.");
+    }
+
+    private static void FilterOrderLadders()
+    {
+        Check("BABAON", 89.92, 90.40,
+            [(89.76, 16_200), (89.60, 28_600), (89.44, 31_100), (89.28, 26_700), (89.12, 30_700)],
+            [(90.56, 31_200), (90.72, 27_000), (90.88, 27_700), (91.04, 32_700), (91.20, 15_800)],
+            90.64, 5);
+        Check("AVGOG", 313.60, 314.72,
+            [(312.48, 24_200), (311.92, 9800), (311.36, 18_300), (310.80, 23_600), (310.24, 10_900)],
+            [(315.28, 4800), (315.84, 16_600), (316.40, 30_600), (316.96, 24_700), (317.52, 26_700), (318.08, 16_200)],
+            316.13, 5);
+        Check("AXTIG", 35.34, 35.64,
+            [(35.16, 14_100), (34.98, 13_200), (34.80, 15_500), (34.62, 16_500), (34.44, 16_400), (34.26, 18_800)],
+            [(35.70, 17_800), (35.88, 18_800), (36.06, 15_000), (36.24, 17_700), (36.42, 16_400)],
+            35.79, 2);
+
+        static void Check(string asset, double bid, double ask, (double Price, int Usd)[] bids,
+            (double Price, int Usd)[] asks, double wallPrice, double maxDistance)
+        {
+            var market = new Market(Venue.Gate, asset + "_USDT", asset, "USDT");
+            var parameters = new DensityRule(MaxDistance: maxDistance, MinSeconds: 0);
+            var buy = bids.Select(ToLevel).Prepend(new(bid, 1)).ToArray();
+            var sell = asks.Select(ToLevel).Append(ToLevel((wallPrice, 110_000))).Prepend(new(ask, 1))
+                .OrderBy(level => level.Price).ToArray();
+            var tracker = new DensityTracker(market, parameters);
+            var alerts = new List<DensityLevel>();
+            var book = new DensityBook(buy, sell);
+            tracker.Apply(book, Start, 12_000, false, false, alerts.Add, ignoreLadders: true);
+            var visible = tracker.Apply(book, Start + 3000, 12_000, false, false, alerts.Add, ignoreLadders: true);
+            var wall = new DensityKey(BookSide.Ask, wallPrice);
+            Require(visible.Length == 1 && visible[0].Key == wall && alerts.SequenceEqual(visible),
+                asset + " hides both series, preserves an interleaved independent wall, and alerts only for the wall");
+            Require(tracker.Apply(book, Start + 6000, 12_000, false, false, alerts.Add).Length > 1 &&
+                alerts.Count(level => level.Key == wall) == 1, asset + " restores hidden levels without repeating the independent alert");
+
+            tracker = new(market, parameters);
+            var oneSided = book with { Asks = [new(ask, 1)] };
+            tracker.Apply(oneSided, Start, 12_000, false, false, _ => { }, ignoreLadders: true);
+            Require(tracker.Apply(oneSided, Start + 3000, 12_000, false, false, _ => { }, ignoreLadders: true)
+                .Count(level => level.Key.Side == BookSide.Bid) >= 3, asset + " preserves a series with no counterpart");
+
+            static BookLevel ToLevel((double Price, int Usd) entry) => new(entry.Price, entry.Usd / entry.Price);
+        }
+    }
+
+    private static async Task FilterInstrumentKinds()
+    {
+        using var handler = new GateClassification();
+        using var http = new HttpClient(handler);
+        var api = new ExchangeApi(http);
+        var source = new MarketSource(Venue.Gate);
+        var catalog = await api.LoadCatalog(source, CancellationToken.None);
+        Require(catalog.Error == null && catalog.Markets.Count == 7, "all active Gate pairs load before density exclusions");
+        var settings = Settings.Deserialize("{}");
+        var options = settings.Densities;
+        Require(!options.HideLeveragedTokens && !options.HideStocksAndFunds && !options.IgnoreLadders &&
+            catalog.Markets.All(options.ShowsMarket), "new density filters are opt-in for existing settings");
+        options.HideLeveragedTokens = true;
+        Require(catalog.Markets.Where(market => !options.ShowsMarket(market)).Select(market => market.Base).SequenceEqual(["BTC3S"]),
+            "the leveraged-token switch uses product metadata and preserves an unrelated symbol ending in 3S");
+        options.HideStocksAndFunds = true;
+        options.IgnoreLadders = true;
+        Require(catalog.Markets.Where(options.ShowsMarket).Select(market => market.Base).SequenceEqual(["TEST3S", "XAUT"]) &&
+            catalog.Markets.All(settings.ShowsOverviewMarket) && catalog.Markets.All(settings.ShowsSignalMarket),
+            "stock and ETF metadata excludes the three Gate examples and SPYON only from densities");
+        var restored = Settings.Deserialize(JsonSerializer.Serialize(settings)).Densities;
+        Require(restored.HideLeveragedTokens && restored.HideStocksAndFunds && restored.IgnoreLadders,
+            "the three independent filters are persisted");
+        handler.MetadataUnavailable = true;
+        var refreshed = await api.LoadCatalog(source, CancellationToken.None);
+        Require(refreshed.Error == null && refreshed.Markets.SequenceEqual(catalog.Markets),
+            "an unavailable supplementary feed preserves the catalog and last verified classifications");
+
+        using var products = JsonDocument.Parse("""
+            [
+              {"symbol":"AMDUSDT","baseAsset":"AMD","quoteAsset":"USDT","status":"TRADING","contractType":"TRADIFI_PERPETUAL","underlyingType":"EQUITY"},
+              {"symbol":"SPXUSDT","baseAsset":"SPX","quoteAsset":"USDT","status":"TRADING","contractType":"PERPETUAL","underlyingType":"COIN"},
+              {"symbol":"XAUUSDT","baseAsset":"XAU","quoteAsset":"USDT","status":"TRADING","contractType":"TRADIFI_PERPETUAL","underlyingType":"COMMODITY"}
+            ]
+            """);
+        Require(products.RootElement.EnumerateArray().Select(row => ExchangeApi.DecodeContract(Venue.Binance, "usdm", row)!.IsStockOrFund)
+            .SequenceEqual([true, false, false]), "stock futures are distinguished from crypto and metals");
+        using var categories = JsonDocument.Parse("""[["xyz:AAPL","stocks"],["xyz:XYZ100","indices"],["io:AMD","stock"],["SPX","crypto"]]""");
+        Require(ExchangeApi.DecodeHyperStockSymbols(categories.RootElement).SequenceEqual(["xyz:AAPL", "io:AMD"]),
+            "Hyperliquid classification uses exact namespaced markets from its category feed");
+    }
+
+    private sealed class GateClassification : HttpMessageHandler
+    {
+        public bool MetadataUnavailable;
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            bool currencies = request.RequestUri!.AbsolutePath.EndsWith("/currencies", StringComparison.Ordinal);
+            if (currencies && MetadataUnavailable) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(currencies ? """
+                [
+                  {"currency":"BABAON","category":["stocks","ondo-stocks"]},
+                  {"currency":"AVGOG","category":["gstocks","stocks"]},
+                  {"currency":"AXTIG","category":["gstocks","stocks"]},
+                  {"currency":"SPYON","category":["stocks","ondo-stocks"]},
+                  {"currency":"XAUT","category":["metals"]}
+                ]
+                """ : """
+                [
+                  {"id":"BTC3S_USDT","base":"BTC3S","base_name":"BTC3xShort","quote":"USDT","trade_status":"tradable"},
+                  {"id":"TEST3S_USDT","base":"TEST3S","base_name":"Another token","quote":"USDT","trade_status":"tradable"},
+                  {"id":"BABAON_USDT","base":"BABAON","base_name":"Alibaba Ondo Tokenized","quote":"USDT","trade_status":"tradable"},
+                  {"id":"AVGOG_USDT","base":"AVGOG","base_name":"Broadcom","quote":"USDT","trade_status":"tradable"},
+                  {"id":"AXTIG_USDT","base":"AXTIG","base_name":"AXT, Inc.","quote":"USDT","trade_status":"tradable"},
+                  {"id":"SPYON_USDT","base":"SPYON","base_name":"SPDR S&P 500 ETF Ondo Tokenized","quote":"USDT","trade_status":"tradable"},
+                  {"id":"XAUT_USDT","base":"XAUT","base_name":"Tether Gold","quote":"USDT","trade_status":"tradable"}
+                ]
+                """) });
+        }
     }
 
     private static void ChartPriceProjection()
@@ -227,21 +357,18 @@ internal static class DensityChecks
         };
         Require(options.Scans(weex) && !options.Scans(new(Venue.Weex)) &&
             options.Venues[Venue.Weex] is { SmallUsd: 200, LargeUsd: 900, SmallColor: "#123abc" }, "flat v0.11.0 options migrate");
-        options.CycleListingRule(spot);
-        Require(Filter().Markets.SequenceEqual([pepe]), "required spot listing uses the asset regardless of quote or segment");
-        options.CycleListingRule(spot);
-        options.CycleListingRule(futures);
-        Require(Filter().Markets.SequenceEqual([floki]), "spot exclusion and futures requirement have independent states");
-        options.CycleListingRule(futures);
-        Require(Filter().Markets.SequenceEqual([unrelated]) && options.NeedsCatalog(futures), "exclude a listing on either marked market");
+        Require(Filter().Markets.SequenceEqual([unrelated]) && options.NeedsCatalog(futures),
+            "disabled Binance spot and futures exclude confirmed base assets across quotes and denominations");
+        options.ToggleSource(spot);
+        options.ToggleSource(futures);
+        Require(Filter().Markets.Select(market => market.Key).ToHashSet().SetEquals(
+            catalogs.Values.SelectMany(catalog => catalog.Markets).Select(market => market.Key)),
+            "two enabled venues contribute a union including their unique markets");
+        options.ToggleVenue(Venue.Binance);
+        var previous = new Dictionary<MarketSource, Catalog>(catalogs);
         catalogs[futures] = new([], "Unavailable");
-        var waiting = Filter();
-        Require(waiting.Markets.Count == 0 && waiting.Missing.SequenceEqual([futures]), "an unavailable rule catalog remains unknown");
-        options.CycleListingRule(futures);
-        var unavailableBook = new MarketSource(Venue.Htx, Segment.Futures);
-        var partial = ListingFilter.ApplySources(catalogs, options.Rule, [weex, unavailableBook]);
-        Require(partial.Markets.SequenceEqual([floki, unrelated]) && partial.Missing.SequenceEqual([unavailableBook]),
-            "one unavailable selected book source does not prevent using the other source");
+        Require(Filter(previous).Markets.SequenceEqual([unrelated]) && Filter(previous).Missing.Contains(futures),
+            "when fresh metadata is unavailable, a last known disabled catalog still filters its listed asset");
 
         options.ToggleSource(new(Venue.Weex));
         Require(options.Venues[Venue.Weex] is { Spot: true, Futures: true, SmallUsd: 200, SmallColor: "#123abc" },
@@ -251,15 +378,22 @@ internal static class DensityChecks
         options.CoinRules[floki.ListingAsset] = new(SmallUsd: 222, SmallColor: "#FEDCBA");
         var restored = Settings.Deserialize(JsonSerializer.Serialize(settings)).Densities;
         Require(restored.Blacklist.SequenceEqual(["PEPE"]) && restored.CoinRules["FLOKI"] == options.CoinRules["FLOKI"] &&
-            restored.Rule(spot) == ListingRule.Exclude && restored.Scans(new(Venue.Weex)) && restored.Scans(weex),
-            "new selection, rule, blacklist and per-coin settings survive a round trip");
+            !restored.Scans(spot) && restored.Scans(new(Venue.Weex)) && restored.Scans(weex),
+            "direct venue selection, blacklist and per-coin settings survive a round trip");
+        restored.ToggleVenue(Venue.Binance);
+        Require(restored.Scans(spot) && restored.Scans(futures), "re-enabling a venue restores both selected segments");
         Require(DensityCardKey.For(floki) == DensityCardKey.For(binanceFloki) &&
             DensityCardKey.For(pepe) != DensityCardKey.For(pepe with { Base = "PEPE" }) &&
             DensityCardKey.For(pepe) != DensityCardKey.For(pepe with { Contract = null }) &&
             DensityCardKey.For(pepe) != DensityCardKey.For(pepe with { Quote = "USDC" }),
             "cards group equivalent exchange levels but keep price denominations, quotes and segments separate");
 
-        FilterResult Filter() => ListingFilter.ApplySources(catalogs, options.Rule, [weex]);
+        FilterResult Filter(IReadOnlyDictionary<MarketSource, Catalog>? last = null)
+        {
+            var enabled = options.EnabledSources();
+            return ListingFilter.CollectSources(catalogs, enabled,
+                MarketSource.All.Where(source => enabled.All(active => active.Venue != source.Venue)).ToArray(), last);
+        }
     }
 
     public static async Task Ui()
@@ -270,7 +404,7 @@ internal static class DensityChecks
         Market? editing = null;
         var opened = new List<Market>();
         int changes = 0;
-        var panel = new DensityPanel(options, () => { }, () => { }, market => editing = market,
+        var panel = new DensityPanel(options, () => { }, market => editing = market,
             market => options.Block(market), opened.Add, () => changes++);
         using var http = new HttpClient(new DepthHandler());
         using var colibri = new ColibriBridge(settings);
@@ -332,10 +466,18 @@ internal static class DensityChecks
             await Layout();
             var bybit = VisualChildren(panel).OfType<Button>()
                 .Single(button => AutomationProperties.GetName(button) == "Источник плотностей · Bybit");
-            var future = bybit.ContextMenu.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "Futures"));
+            var segmentButton = ((StackPanel)bybit.Parent).Children.OfType<Button>().Single(button => button.ContextMenu != null);
+            var future = segmentButton.ContextMenu.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "Futures"));
             future.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
             Require(future.IsChecked && future.StaysOpenOnClick && options.Venues[Market.Venue] is { Spot: true, Futures: true } && changes == 1,
                 "market choices can be toggled independently from the top exchange strip");
+            Click(bybit);
+            Require(!options.Scans(Market.Source) && AutomationProperties.GetItemStatus(bybit) == "Выключена",
+                "the exchange button switches off immediately");
+            Click(bybit);
+            Require(options.Scans(Market.Source) && future.IsChecked &&
+                VisualChildren(panel).OfType<Button>().All(button => AutomationProperties.GetName(button) != "Листинги плотностей"),
+                "the top strip restores both markets and replaces the separate listing dialog");
 
             scroll.ScrollToVerticalOffset(335);
             await Layout();
@@ -387,6 +529,19 @@ internal static class DensityChecks
             Click(VisualChildren(dialog).OfType<Button>().Single(button =>
                 AutomationProperties.GetName(button) == "Вернуть COIN00 в плотности"));
             Require(options.Blacklist.Length == 0, "the settings blacklist restores the coin");
+            Click(VisualChildren(dialog).OfType<Button>().Single(button => AutomationProperties.GetName(button) == "Сканирование"));
+            await Layout();
+            int beforeChanges = changes;
+            foreach (string label in new[] { "Скрывать двусторонние серии заявок",
+                         "Исключать токены с плечом (3L, 3S, 5L, 5S)", "Исключать акции и фонды (ETF)" })
+            {
+                var toggle = VisualChildren(dialog).OfType<CheckBox>().Single(item => item.IsVisible && Equals(item.Content, label));
+                Require(toggle.IsChecked == false, "density filter starts disabled");
+                toggle.IsChecked = true;
+                toggle.RaiseEvent(new RoutedEventArgs(CheckBox.ClickEvent));
+            }
+            Require(options.IgnoreLadders && options.HideLeveragedTokens && options.HideStocksAndFunds && changes == beforeChanges + 3,
+                "density settings save each independent switch");
 
             var plot = new CandlePlot(() => new(System.Windows.Input.Key.F));
             window.Content = plot;

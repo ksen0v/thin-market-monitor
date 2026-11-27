@@ -18,7 +18,7 @@ internal sealed partial class ExchangeApi(HttpClient http, TimeProvider? timePro
     private const string KuCoin = "https://api.kucoin.com/api/";
     private const string Gate = "https://api.gateio.ws/api/v4/spot/";
     private const string Alpha = "https://www.binance.com/bapi/defi/v1/public/";
-    private static readonly Regex GateLeveragedName = new(@"\d+(?:\.\d+)?[x×]\s*(?:long|short)\b|[一二三四五六七八九十0-9]+倍[多空]",
+    private static readonly Regex LeveragedAssetName = new(@"\d+(?:\.\d+)?[x×]\s*(?:long|short)\b|[一二三四五六七八九十0-9]+倍[多空]",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     public async Task<Catalog> LoadCatalog(MarketSource source, CancellationToken ct)
@@ -90,7 +90,14 @@ internal sealed partial class ExchangeApi(HttpClient http, TimeProvider? timePro
             Venue.Gate => Gate + "currency_pairs",
             _ => throw new ArgumentOutOfRangeException(nameof(venue))
         };
-        var root = venue == Venue.Binance ? await BinanceCatalog(url, ct) : await Get(url, ct);
+        var catalog = venue == Venue.Binance ? BinanceCatalog(url, ct) : Get(url, ct);
+        var stocks = venue switch
+        {
+            Venue.Gate => GateStockAssets(ct),
+            Venue.Bitget => BitgetStockSymbols("SPOT", ct),
+            _ => null
+        };
+        var root = await catalog;
         if (venue == Venue.Bybit)
         {
             var pairs = new List<Market>();
@@ -114,7 +121,14 @@ internal sealed partial class ExchangeApi(HttpClient http, TimeProvider? timePro
             Venue.KuCoin => Envelope(root, "200000"),
             _ => root
         };
-        return Validate(ReadPairs(venue, rows, ct));
+        var markets = ReadPairs(venue, rows, ct);
+        if (stocks != null)
+        {
+            var identified = await stocks;
+            return Validate(markets.Select(market =>
+                identified.Contains(venue == Venue.Gate ? market.Base : market.Symbol) ? MarkStockFund(market) : market));
+        }
+        return Validate(markets);
     }
 
     private static List<Market> ReadPairs(Venue venue, JsonElement rows, CancellationToken ct)
@@ -125,7 +139,7 @@ internal sealed partial class ExchangeApi(HttpClient http, TimeProvider? timePro
             ct.ThrowIfCancellationRequested();
             Market Make(string symbol, string baseName, string quote) => new(venue,
                 x.Str(symbol), x.Str(baseName).Trim().ToUpperInvariant(), x.Str(quote).Trim().ToUpperInvariant(),
-                Identifiers: venue == Venue.Gate && GateLeveragedName.IsMatch(x.Optional("base_name")) ? new(LeveragedToken: true) : null);
+                Identifiers: SpotKinds(venue, x));
 
             Market? pair = venue switch
             {

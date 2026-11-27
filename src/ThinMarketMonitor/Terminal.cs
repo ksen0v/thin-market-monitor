@@ -29,6 +29,7 @@ internal static class Terminal
                 "pin-off" => "M2 2 L22 22 M12 15 V22 M5 15 H15 M9 4 H16 V9 Q16 11 18 12",
                 "draw" => "M4 20 L6 15 L16 5 L19 8 L9 18 Z M14 7 L17 10 M12 20 H20",
                 "horizontal-ray" => "M3 12 A2 2 0 1 0 7 12 A2 2 0 1 0 3 12 M7 12 H21 M17 8 L21 12 L17 16",
+                "horizontal-line" => "M3 12 H21 M7 8 L3 12 L7 16 M17 8 L21 12 L17 16",
                 "trend-ray" => "M3 18 A2 2 0 1 0 7 18 A2 2 0 1 0 3 18 M7 17 L21 5 M15 5 H21 V11",
                 "segment" => "M3 18 A2 2 0 1 0 7 18 A2 2 0 1 0 3 18 M7 17 L17 7 M17 6 A2 2 0 1 0 21 6 A2 2 0 1 0 17 6",
                 "signals-nav" => "M12 3 A9 9 0 1 0 12 21 A9 9 0 1 0 12 3 M6.5 12 H9 L11 8.5 L13 15.5 L15 12 H17.5",

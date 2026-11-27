@@ -22,6 +22,7 @@ internal sealed class PriceAlertBook
     private sealed class TradeCursor
     {
         internal long Time;
+        internal double? LastPrice;
         internal readonly HashSet<string> Ids = new(StringComparer.Ordinal);
 
         internal bool Accept(Trade trade)
@@ -81,6 +82,22 @@ internal sealed class PriceAlertBook
         }
     }
 
+    internal bool Move(Guid id, double price, double? reference, long now)
+    {
+        if (!PriceAlert.IsPrice(price)) return false;
+        lock (gate)
+        {
+            if (!levels.TryGetValue(id, out var alert) || !alert.Active || alert.Price == price ||
+                levels.Values.Any(other => other.Active && other.MarketKey == alert.MarketKey && other.Price == price))
+                return false;
+            double? latest = cursors.GetValueOrDefault(alert.MarketKey)?.LastPrice;
+            if (latest == null && reference is { } value && PriceAlert.IsPrice(value)) latest = value;
+            levels[id] = alert with { Price = price, ArmedAt = now, ReferencePrice = latest ?? alert.ReferencePrice };
+            changed = true;
+            return true;
+        }
+    }
+
     internal void Remove(Guid id)
     {
         lock (gate)
@@ -102,6 +119,7 @@ internal sealed class PriceAlertBook
             if (!watched.TryGetValue(key, out var matching)) return;
             if (!cursors.TryGetValue(key, out var cursor)) cursors[key] = cursor = new();
             if (!cursor.Accept(trade)) return;
+            cursor.LastPrice = trade.Price;
             bool reached = false;
             foreach (var id in matching)
             {

@@ -34,7 +34,7 @@ internal sealed class DensityPanel : DockPanel
         CanContentScroll = false
     };
     private readonly TextBlock status = Terminal.Copy("");
-    private readonly Dictionary<Venue, (Button Button, Dictionary<MarketSource, MenuItem> Segments)> sources = [];
+    private readonly VenueSourceStrip sources;
     private readonly List<Card> ordered = [];
     private readonly Dictionary<DensityCardKey, Card> cards = [];
     private readonly HashSet<Card> realized = [];
@@ -43,7 +43,7 @@ internal sealed class DensityPanel : DockPanel
     private double? pendingOffset;
     private bool terminalEnabled;
 
-    public DensityPanel(DensityOptions options, Action openSettings, Action openListings, Action<Market> editCoin,
+    public DensityPanel(DensityOptions options, Action openSettings, Action<Market> editCoin,
         Action<Market> blockCoin, Action<Market> openInTerminal, Action selectionChanged)
     {
         this.options = options;
@@ -61,45 +61,13 @@ internal sealed class DensityPanel : DockPanel
         settings.Width = 31;
         settings.Height = 26;
         settings.Click += (_, _) => openSettings();
-        var listings = new Button { Content = Terminal.LabelWithIcon("listings", "Листинги", 5),
-            MinHeight = 26, Padding = new Thickness(5, 2, 5, 2), ToolTip = "Правила листингов плотностей" };
-        AutomationProperties.SetName(listings, "Листинги плотностей");
-        listings.Click += (_, _) => openListings();
-        actions.Children.Add(listings);
         actions.Children.Add(settings);
         SetDock(actions, Dock.Right);
         tools.Children.Add(actions);
 
-        var venues = new WrapPanel { Margin = new Thickness(0, 0, 4, 0) };
-        AutomationProperties.SetName(venues, "Источники стакана");
-        foreach (var group in MarketSource.All.GroupBy(source => source.Venue))
-        {
-            var venue = group.Key;
-            var content = new StackPanel { Orientation = Orientation.Horizontal };
-            content.Children.Add(Terminal.VenueLogo(venue, 15));
-            content.Children.Add(new TextBlock { Text = venue.Label(), Margin = new Thickness(5, 0, 0, 0),
-                VerticalAlignment = VerticalAlignment.Center });
-            var button = new Button { Content = content, Padding = new Thickness(6, 2, 6, 2),
-                MinHeight = 26, FontSize = 11, Margin = new Thickness(0, 0, 4, 3) };
-            AutomationProperties.SetName(button, $"Источник плотностей · {venue.Label()}");
-            var segments = new Dictionary<MarketSource, MenuItem>();
-            foreach (var source in group)
-            {
-                var item = new MenuItem { Header = source.Segment.ToString(), IsCheckable = true, StaysOpenOnClick = true };
-                AutomationProperties.SetName(item, source.Label);
-                item.Click += (_, _) =>
-                {
-                    options.ToggleSource(source);
-                    RefreshSources();
-                    selectionChanged();
-                };
-                segments.Add(source, item);
-            }
-            Terminal.AttachMenu(button, segments.Values, 128);
-            sources.Add(venue, (button, segments));
-            venues.Children.Add(button);
-        }
-        tools.Children.Add(venues);
+        sources = new("Источник плотностей", options.Scans, options.ToggleVenue, options.ToggleSource, selectionChanged);
+        AutomationProperties.SetName(sources, "Источники стакана");
+        tools.Children.Add(sources);
         top.Child = tools;
         SetDock(top, Dock.Top);
         Children.Add(top);
@@ -123,29 +91,12 @@ internal sealed class DensityPanel : DockPanel
             }
         };
         Children.Add(scroll);
-        RefreshSources();
     }
 
     internal void SetColibriEnabled(bool enabled)
     {
         terminalEnabled = enabled;
         foreach (var card in realized) card.View?.SetColibriEnabled(enabled);
-    }
-
-    private void RefreshSources()
-    {
-        foreach (var (venue, (button, segments)) in sources)
-        {
-            foreach (var (source, item) in segments) item.IsChecked = options.Scans(source);
-            string[] selected = segments.Where(pair => pair.Value.IsChecked).Select(pair => pair.Key.Segment.ToString()).ToArray();
-            bool active = selected.Length != 0;
-            var state = active ? string.Join(" + ", selected) : "Выбрать рынок";
-            button.ToolTip = $"{venue.Label()} · {state}";
-            AutomationProperties.SetItemStatus(button, state);
-            button.BorderBrush = Terminal.Brush(active ? "Accent" : "Outline");
-            button.Background = Terminal.Brush(active ? "AccentSurface" : "Surface");
-            button.Foreground = Terminal.Brush(active ? "Text" : "Muted");
-        }
     }
 
     public void Update(DensityLevel[] levels, DensityVenueStatus[] venues, (MarketSource Source, string? Error)[] pending, bool debug)
@@ -155,7 +106,7 @@ internal sealed class DensityPanel : DockPanel
             displayed = levels;
             UpdateCards(levels);
         }
-        RefreshSources();
+        sources.Refresh();
 
         int failed = venues.Sum(venue => venue.Failed);
         int limited = venues.Sum(venue => venue.Limited);
@@ -164,7 +115,8 @@ internal sealed class DensityPanel : DockPanel
               (pending.Length > 0 ? $" · Каталоги: {pending.Length}" : "") +
               (limited > 0 ? $" · Глубина ограничена: {limited:N0}" : "") +
               (failed > 0 ? $" · Ошибки: {failed:N0}" : "")
-            : pending.Length > 0 ? pending.Any(item => item.Error != null) ? "Часть каталогов недоступна" : "Загрузка каталогов…"
+            : pending.Length > 0 ? pending.Any(item => item.Error != null)
+                ? "Часть каталогов недоступна · список предварительный" : "Загрузка каталогов…"
             : levels.Length > 0 ? ""
             : failed > 0 ? "Стаканы недоступны" : venues.Any(venue => venue.Markets > 0 && venue.Sampled < venue.Markets)
                 ? "Сканирование стаканов…" : "Нет плотностей по этим условиям";

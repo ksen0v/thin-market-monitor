@@ -177,6 +177,133 @@
                 </Setter.Value>
             </Setter>
         </Style>
+        <Style x:Key="TerminalComboItem" TargetType="ComboBoxItem">
+            <Setter Property="Foreground" Value="{StaticResource Text}"/>
+            <Setter Property="Padding" Value="8,4"/>
+            <Setter Property="MinHeight" Value="26"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBoxItem">
+                        <Border x:Name="Option" CornerRadius="3" Background="Transparent" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsHighlighted" Value="True">
+                                <Setter TargetName="Option" Property="Background" Value="{StaticResource Control}"/>
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="Option" Property="Background" Value="{StaticResource AccentSurface}"/>
+                                <Setter Property="Foreground" Value="{StaticResource Accent}"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Foreground" Value="{StaticResource Muted}"/>
+                                <Setter Property="Opacity" Value=".55"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style TargetType="ComboBox">
+            <Setter Property="Background" Value="{StaticResource Surface}"/>
+            <Setter Property="Foreground" Value="{StaticResource Text}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource Outline}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="MinHeight" Value="29"/>
+            <Setter Property="MaxDropDownHeight" Value="310"/>
+            <Setter Property="Padding" Value="8,4"/>
+            <Setter Property="FocusVisualStyle" Value="{StaticResource TerminalFocus}"/>
+            <Setter Property="ItemContainerStyle" Value="{StaticResource TerminalComboItem}"/>
+            <Setter Property="ScrollViewer.CanContentScroll" Value="True"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid>
+                            <ToggleButton x:Name="Toggle" ClickMode="Press" Focusable="False" IsTabStop="False"
+                                          Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                          BorderThickness="{TemplateBinding BorderThickness}"
+                                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                                <ToggleButton.Template>
+                                    <ControlTemplate TargetType="ToggleButton">
+                                        <Border x:Name="Frame" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                                BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="4">
+                                            <Path Data="M 1,1 L 5,5 L 9,1" Stroke="{StaticResource Muted}" StrokeThickness="1.5"
+                                                  HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,9,0"/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Frame" Property="Background" Value="{StaticResource Control}"/>
+                                            </Trigger>
+                                            <Trigger Property="IsChecked" Value="True">
+                                                <Setter TargetName="Frame" Property="BorderBrush" Value="{StaticResource Accent}"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </ToggleButton.Template>
+                            </ToggleButton>
+                            <ContentPresenter Margin="9,1,26,1" VerticalAlignment="Center" IsHitTestVisible="False"
+                                              Content="{TemplateBinding SelectionBoxItem}"
+                                              ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                              ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"
+                                              ContentStringFormat="{TemplateBinding SelectionBoxItemStringFormat}"/>
+                            <Popup x:Name="PART_Popup" Placement="Bottom" PlacementTarget="{Binding ElementName=Toggle}"
+                                   IsOpen="{TemplateBinding IsDropDownOpen}" AllowsTransparency="True" VerticalOffset="3" Focusable="False">
+                                <Border x:Name="DropDownSurface" Background="{StaticResource Surface}" BorderBrush="{StaticResource Outline}"
+                                        TextElement.Foreground="{StaticResource Text}" TextElement.FontFamily="{StaticResource TerminalFont}"
+                                        BorderThickness="1" CornerRadius="5" Padding="3"
+                                        MinWidth="{TemplateBinding ActualWidth}" MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                                    <ScrollViewer x:Name="DropDownScrollViewer" VerticalScrollBarVisibility="Auto"
+                                                  HorizontalScrollBarVisibility="Disabled"
+                                                  CanContentScroll="{TemplateBinding ScrollViewer.CanContentScroll}">
+                                        <ScrollViewer.Resources>
+                                            <Style TargetType="ScrollBar">
+                                                <Setter Property="Width" Value="11"/>
+                                                <Setter Property="Template">
+                                                    <Setter.Value>
+                                                        <ControlTemplate TargetType="ScrollBar">
+                                                            <Border Background="{StaticResource Plot}" Margin="2,0,1,0" CornerRadius="3">
+                                                                <Track x:Name="PART_Track" Orientation="{TemplateBinding Orientation}" IsDirectionReversed="True">
+                                                                    <Track.DecreaseRepeatButton>
+                                                                        <RepeatButton Command="ScrollBar.PageUpCommand" Opacity="0" Focusable="False"/>
+                                                                    </Track.DecreaseRepeatButton>
+                                                                    <Track.Thumb>
+                                                                        <Thumb MinHeight="18">
+                                                                            <Thumb.Template>
+                                                                                <ControlTemplate TargetType="Thumb">
+                                                                                    <Border x:Name="Grip" Background="{StaticResource Outline}" CornerRadius="3"/>
+                                                                                    <ControlTemplate.Triggers>
+                                                                                        <Trigger Property="IsMouseOver" Value="True">
+                                                                                            <Setter TargetName="Grip" Property="Background" Value="{StaticResource Muted}"/>
+                                                                                        </Trigger>
+                                                                                    </ControlTemplate.Triggers>
+                                                                                </ControlTemplate>
+                                                                            </Thumb.Template>
+                                                                        </Thumb>
+                                                                    </Track.Thumb>
+                                                                    <Track.IncreaseRepeatButton>
+                                                                        <RepeatButton Command="ScrollBar.PageDownCommand" Opacity="0" Focusable="False"/>
+                                                                    </Track.IncreaseRepeatButton>
+                                                                </Track>
+                                                            </Border>
+                                                        </ControlTemplate>
+                                                    </Setter.Value>
+                                                </Setter>
+                                            </Style>
+                                        </ScrollViewer.Resources>
+                                        <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                                    </ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value=".48"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
         <Style x:Key="TerminalMenuItem" TargetType="MenuItem">
             <Setter Property="Foreground" Value="{StaticResource Text}"/>
             <Setter Property="MinHeight" Value="26"/>
@@ -269,7 +396,11 @@
                 <Button DockPanel.Dock="Left" Style="{StaticResource OverviewBookmarkButton}"
                         Foreground="{Binding BookmarkBrush}" Tag="{Binding BookmarkFill}" ToolTip="{Binding BookmarkHint}"
                         AutomationProperties.Name="{Binding BookmarkHint}"/>
-                <TextBlock Text="{Binding Ticker}" ToolTip="{Binding Ticker}" TextTrimming="CharacterEllipsis"
+                <Image DockPanel.Dock="Left" Source="{Binding VenueLogo}" Width="13" Height="13" Margin="0,0,5,0"
+                       ToolTip="{Binding SourceLabel}" AutomationProperties.Name="{Binding SourceLabel}"/>
+                <TextBlock DockPanel.Dock="Right" Text="{Binding SegmentLabel}" Foreground="{StaticResource Muted}" FontSize="10"
+                           Margin="6,0,0,0" ToolTip="{Binding SourceLabel}" VerticalAlignment="Center"/>
+                <TextBlock Text="{Binding Ticker}" ToolTip="{Binding Market.Label}" TextTrimming="CharacterEllipsis"
                            FontWeight="SemiBold" VerticalAlignment="Center"/>
             </DockPanel>
         </DataTemplate>

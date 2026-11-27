@@ -10,19 +10,27 @@ internal sealed partial class ExchangeApi
         var output = new Dictionary<string, MarketSnapshot>();
         foreach (var group in markets.GroupBy(m => m.Source).SelectMany(source => source.GroupBy(m => m.Contract?.Product)))
         {
-            if (group.First().Venue.Extended())
+            try
             {
-                await AddExtendedSnapshots(group.ToArray(), output, ct);
-                continue;
+                var first = group.First();
+                if (first.Venue.Extended())
+                {
+                    await AddExtendedSnapshots(group.ToArray(), output, ct);
+                    continue;
+                }
+                string? url = TickerUrl(first);
+                if (url == null) continue;
+                var (root, _) = await TickerBatch(url, ct);
+                var rows = TickerRows(first, root);
+                var lookup = group.ToDictionary(m => m.Symbol, StringComparer.Ordinal);
+                string name = TickerSymbolField(first);
+                foreach (var row in rows.EnumerateArray())
+                    if (lookup.TryGetValue(row.Optional(name), out var m)) output[m.Key] = DecodeSnapshot(m, row);
             }
-            string? url = TickerUrl(group.First());
-            if (url == null) continue;
-            var (root, _) = await TickerBatch(url, ct);
-            var rows = TickerRows(group.First(), root);
-            var lookup = group.ToDictionary(m => m.Symbol, StringComparer.Ordinal);
-            string name = TickerSymbolField(group.First());
-            foreach (var row in rows.EnumerateArray())
-                if (lookup.TryGetValue(row.Optional(name), out var m)) output[m.Key] = DecodeSnapshot(m, row);
+            catch (Exception ex) when (!ct.IsCancellationRequested && ex is not OutOfMemoryException)
+            {
+                // Other enabled exchanges can still fill their columns if this ticker feed is unavailable.
+            }
         }
         return output;
     }

@@ -3,6 +3,8 @@ using System.Reflection;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Threading;
 using ThinMarketMonitor;
 
@@ -51,7 +53,24 @@ internal static class PriceAlertChecks
         Require(book.Drain()!.Value.Hits.Single().Alert.Id == id, "an alert can be rearmed for the opposite crossing");
         book.Remove(id);
         Require(book.Drain()!.Value.Levels.All(alert => alert.Id != id), "deleting a level removes it from persisted state");
-        Console.WriteLine("Price alerts exact market identity, crossings, pause, rearming, removal and persistence passed.");
+        book = new([]);
+        Require(book.Add(Futures, .91, .9, now) && book.Add(Futures, .89, .9, now), "reference levels for moving a price alert");
+        var levels = book.Drain()!.Value.Levels;
+        id = levels[0].Id;
+        Observe(Futures, .902, now + 2);
+        Require(!book.Move(id, .89, null, now + 4) && !book.Move(id, 0, null, now + 4) &&
+            book.Move(id, .88, .85, now + 4), "moving rejects duplicates and keeps the same active ID");
+        book.Remove(levels[1].Id);
+        Observe(Futures, .87, now + 3);
+        Observe(Futures, .9, now + 5);
+        var moved = book.Drain()!.Value;
+        Require(moved.Hits.Length == 0 && moved.Levels.Single(alert => alert.Id == id) is
+            { Price: .88, ArmedAt: now + 4, ReferencePrice: .902, Active: true },
+            "moving resets the arm time and uses the latest observed trade as its baseline");
+        Observe(Futures, .88, now + 6);
+        Require(book.Drain()!.Value.Hits.Any(hit => hit.Alert.Id == id) && !book.Move(id, .87, null, now + 7),
+            "the moved level only triggers at its new price and a consumed level cannot be moved");
+        Console.WriteLine("Price alerts exact market identity, crossings, movement, rearming, removal and persistence passed.");
 
         void Observe(Market market, double price, long time) =>
             book.Observe(market, new(market.Symbol, time, price, Id: time.ToString()), now + 20);
@@ -66,8 +85,16 @@ internal static class PriceAlertChecks
         await Place(signal, Spot, .27);
         Navigate("OverviewButton");
         var reached = await Place(overview, futures, .38);
+        reached = MoveLevel(overview.Plot, reached);
         Invoke(window, "EnterFullscreen", overview, false);
-        await Place(overview, futures, .59);
+        var delete = await Place(overview, futures, .59);
+        SelectLine(overview.Plot, delete);
+        Invoke(overview.Plot, "ReleasePriceAlert");
+        var key = new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(overview.Plot)!, Environment.TickCount, Key.Delete)
+            { RoutedEvent = Keyboard.PreviewKeyDownEvent };
+        overview.Plot.RaiseEvent(key);
+        Require(key.Handled && settings.PriceAlerts.All(level => level.Id != delete.Id) &&
+            settings.PriceAlerts.Any(level => level.Id == reached.Id), "Delete removes only the selected price alert");
         Invoke(window, "ExitFullscreen");
         overview.Clear();
         Navigate("DensityButton");
@@ -91,7 +118,7 @@ internal static class PriceAlertChecks
         Require(settings.PriceAlerts.All(alert => alert.Id != spot.Id), "settings can remove a saved alert");
         Invoke(window, "CloseDialog");
         await Channels(futures, reached with { Enabled = false, TriggeredAt = now, ReachedPrice = reached.Price });
-        Console.WriteLine("Price alert buttons across Overview, Signals and fullscreen, background crossing and independent channels passed.");
+        Console.WriteLine("Price alert buttons, price badges, drag, Delete, background crossing and independent channels passed.");
         return open;
 
         void Navigate(string button) => Click((Button)window.FindName(button));
@@ -120,28 +147,71 @@ internal static class PriceAlertChecks
             var target = Field<(Rect Bounds, double Price)?>(surface, "alertTarget");
             Require(add.IsVisible && target is { } selected && selected.Bounds.Right < plot.Right &&
                 selected.Bounds.Right >= plot.Right - 2, "the real plus button is reachable on the chart's right edge");
+            var bounds = target!.Value.Bounds;
+            var pointer = new Point(bounds.Left + bounds.Width / 2, bounds.Bottom - 2);
+            Invoke(surface, "TrackAlertPointer", pointer);
+            var tracked = Field<(Rect Bounds, double Price)?>(surface, "alertTarget");
+            Require(Field<Point?>(cell.Plot, "crosshairPosition") == pointer && tracked is { } moved &&
+                moved.Price != target.Value.Price && moved.Bounds.Contains(pointer) && add.IsVisible,
+                "the crosshair and level keep tracking while the pointer is over the plus button");
             var existing = settings.PriceAlerts.Select(alert => alert.Id).ToHashSet();
             Click(add);
             var level = settings.PriceAlerts.Single(alert => !existing.Contains(alert.Id));
-            Require(level.MarketKey == market.Key && level.Source == market.Source && level.Price == target!.Value.Price,
+            Require(level.MarketKey == market.Key && level.Source == market.Source && level.Price == tracked!.Value.Price,
                 "clicking plus installs the displayed price for the exact market");
             Invoke(cell.Plot, "SetCrosshairPosition", (object?)null);
             Require(!add.IsVisible, "the plus button hides with the crosshair");
             return level;
         }
+
+        PriceAlert MoveLevel(CandlePlot plot, PriceAlert initial)
+        {
+            var (_, bounds) = SelectLine(plot, initial);
+            var view = Invoke(plot, "CurrentView")!;
+            Invoke(plot, "MovePriceAlert", view, bounds.Height * .13);
+            var preview = Field<double?>(plot, "priceAlertPreview");
+            plot.InvalidateVisual();
+            window.UpdateLayout();
+            var marks = Descendants(VisualTreeHelper.GetDrawing(plot)).OfType<GlyphRunDrawing>()
+                .Where(item => item.GlyphRun.BaselineOrigin.X > bounds.Right)
+                .Select(item => new string(item.GlyphRun.Characters.ToArray()));
+            Require(preview is { } price && marks.Contains(PriceAlert.Format(price)) &&
+                settings.PriceAlerts.Single(alert => alert.Id == initial.Id).Price == initial.Price,
+                "dragging previews the updated badge while the live level is saved only on release");
+            Invoke(plot, "ReleasePriceAlert");
+            var saved = settings.PriceAlerts.Single(alert => alert.Id == initial.Id);
+            Require(saved.Price == preview && saved.Price != initial.Price && saved.Source == initial.Source && saved.Active,
+                "the alert is moved in place on the same exact market");
+            return saved;
+        }
+
+        static (Point Point, Rect Bounds) SelectLine(CandlePlot plot, PriceAlert alert)
+        {
+            var view = Invoke(plot, "CurrentView")!;
+            var bounds = (Rect)view.GetType().GetProperty("Plot")!.GetValue(view)!;
+            double y = (double)view.GetType().GetMethod("Y")!.Invoke(view, [alert.Price])!;
+            var point = new Point(bounds.Left + bounds.Width * .4, y);
+            Require(Invoke(plot, "SelectPriceAlert", point, view, false) is true, "the dashed line is selectable");
+            return (point, bounds);
+        }
+
+        static IEnumerable<Drawing> Descendants(Drawing drawing) => drawing is DrawingGroup group
+            ? group.Children.SelectMany(Descendants) : [drawing];
     }
 
     private static async Task Channels(Market market, PriceAlert alert)
     {
-        var settings = new Settings { PriceAlertPopup = false, PriceAlertSound = true, PriceAlertTone = SignalTone.Double };
+        var settings = new Settings { PriceAlertPopup = false, PriceAlertSound = true, PriceAlertTone = SignalTone.Double,
+            Audio = new() { Master = 80, PriceAlert = 45 } };
         var shown = new List<SignalNotice>();
-        var tones = new ConcurrentQueue<SignalTone>();
+        var tones = new ConcurrentQueue<(SignalTone Tone, int Volume)>();
         using var notices = new SignalNotifications(settings, Dispatcher.CurrentDispatcher,
-            notice => { if (notice != null) shown.Add(notice); }, tones.Enqueue);
+            notice => { if (notice != null) shown.Add(notice); }, (tone, volume, _) => tones.Enqueue((tone, volume)));
         var hit = new PriceAlertHit(alert, market);
         notices.PublishPriceAlert(hit);
         for (int i = 0; tones.IsEmpty && i < 80; i++) await Task.Delay(25);
-        Require(tones.SequenceEqual([SignalTone.Double]) && shown.Count == 0, "separate price alert sound works with its popup off");
+        Require(tones.SequenceEqual([(SignalTone.Double, 36)]) && shown.Count == 0,
+            "the independent price alert sound uses its mixer level with its popup off");
         settings.PriceAlertSound = false;
         settings.PriceAlertPopup = true;
         notices.SettingsChanged();

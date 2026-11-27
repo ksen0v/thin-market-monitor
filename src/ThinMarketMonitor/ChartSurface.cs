@@ -52,11 +52,18 @@ internal sealed class ChartSurface : Panel
         {
             if (alertTarget is { } target) placeAlert(target.Price);
         };
+        addAlert.MouseEnter += (_, e) => TrackAlertPointer(e.GetPosition(plot));
+        addAlert.MouseMove += (_, e) => TrackAlertPointer(e.GetPosition(plot));
         Children.Add(addAlert);
         plot.AlertTargetChanged += SetAlertTarget;
         plot.KeepCrosshairOnAlert = () => alertTarget is { } target && target.Bounds.Contains(Mouse.GetPosition(plot));
         MouseLeave += (_, _) => plot.HideCrosshair();
         plot.InterestPanesChanged += UpdatePanes;
+    }
+
+    private void TrackAlertPointer(Point point)
+    {
+        if (!addAlert.IsPressed) plot.TrackCrosshair(point);
     }
 
     private void SetAlertTarget((Rect Bounds, double Price)? target)

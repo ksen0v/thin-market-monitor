@@ -40,6 +40,18 @@ public partial class MainWindow
         DrainPriceAlerts();
     }
 
+    private void BindPriceAlerts(ChartCell cell)
+    {
+        cell.PriceAlertRequested += PlacePriceAlert;
+        cell.TradeObserved += priceAlerts.Observe;
+        cell.ReadPriceAlertLevels = AlertLevels;
+        cell.Plot.PriceAlertMoved += (id, price) =>
+        {
+            if (priceAlerts.Move(id, price, cell.Plot.LastTradedPrice, api.CandleNow)) DrainPriceAlerts();
+        };
+        cell.Plot.PriceAlertRemoved += RemovePriceAlert;
+    }
+
     private void SetPriceAlertEnabled(Guid id, bool enabled)
     {
         priceAlerts.SetEnabled(id, enabled, api.CandleNow);
@@ -117,10 +129,10 @@ public partial class MainWindow
             cell.Plot.SetPriceAlertLevels(cell.Instrument is { } market ? AlertLevels(market) : []);
     }
 
-    private double[] AlertLevels(Market market)
+    private PriceAlert[] AlertLevels(Market market)
     {
         string key = market.Key;
-        return settings.PriceAlerts.Where(alert => alert.Active && alert.MarketKey == key).Select(alert => alert.Price).ToArray();
+        return settings.PriceAlerts.Where(alert => alert.Active && alert.MarketKey == key).ToArray();
     }
 
     private async Task PollPriceAlertTrades()

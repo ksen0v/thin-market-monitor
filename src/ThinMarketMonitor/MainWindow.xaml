@@ -51,17 +51,15 @@
                         <Button x:Name="DrawerSwitch" Style="{StaticResource IconButton}" Width="28" Height="30"
                                 VerticalAlignment="Top" Margin="1,7" Click="ChangeDrawer"/>
                     </Border>
+                    <ContentControl x:Name="OverviewSourcesHost" DockPanel.Dock="Top" Margin="0,0,0,3"
+                                    HorizontalContentAlignment="Stretch" AutomationProperties.Name="Биржи обзора"/>
                     <Grid x:Name="OverviewBody" SizeChanged="OverviewBodySizeChanged">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*" MinWidth="285"/>
                             <ColumnDefinition x:Name="OverviewDividerColumn" Width="10"/>
                             <ColumnDefinition x:Name="OverviewDrawerColumn" Width="0.55*"/>
                         </Grid.ColumnDefinitions>
-                        <DockPanel>
-                            <WrapPanel x:Name="OverviewQuickSources" DockPanel.Dock="Top" Margin="0,0,0,3"
-                                       AutomationProperties.Name="Быстрый выбор биржи"/>
-                            <ContentControl x:Name="OverviewChartHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
-                        </DockPanel>
+                        <ContentControl x:Name="OverviewChartHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
                         <GridSplitter x:Name="OverviewDivider" Grid.Column="1" Width="10" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
                                       ResizeDirection="Columns" ResizeBehavior="PreviousAndNext" DragCompleted="OverviewDividerCompleted"
                                       ShowsPreview="True" KeyboardIncrement="16" DragIncrement="1" Cursor="SizeWE"

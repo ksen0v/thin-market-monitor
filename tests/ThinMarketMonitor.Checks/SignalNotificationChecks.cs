@@ -4,8 +4,11 @@ using System.Net.Http;
 using System.Reflection;
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Threading;
 using ThinMarketMonitor;
 
@@ -21,8 +24,12 @@ internal static class SignalNotificationChecks
         Check(settings.PriceSignalTone == SignalTone.System && settings.VolumeSignalTone == SignalTone.System, "existing settings retain their system sound");
         settings.PriceSignalTone = SignalTone.Bell;
         settings.VolumeSignalTone = SignalTone.Double;
+        settings.DensityTone = SignalTone.Soft;
+        settings.Audio = new() { Master = 80, Price = 50, Volume = 80, Density = 90, Voice = 25 };
         var restored = Settings.Deserialize(JsonSerializer.Serialize(settings));
         Check(restored.PriceSignalTone == SignalTone.Bell && restored.VolumeSignalTone == SignalTone.Double &&
+            restored.DensityTone == SignalTone.Soft && restored.Audio is { Master: 80, Voice: 25, Density: 90 } &&
+            Settings.Deserialize("""{"Audio":{"Master":200,"Voice":-5}}""").Audio is { Master: 100, Voice: 0 } &&
             Settings.Deserialize("""{"PriceSignalTone":99}""").PriceSignalTone == SignalTone.System, "per-event sounds persist and invalid values fall back");
         CheckWaveforms();
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -42,32 +49,45 @@ internal static class SignalNotificationChecks
             !volumeNotice.Speech.Contains('·'), "speech names the market and summarizes the event without interface labels");
         CheckSpeechTemplates(price, volume);
         CheckSpeechEditor();
+        await CheckMixerPage();
         await CheckSignalCooldown();
 
         var sounds = new ConcurrentQueue<SignalTone>();
+        var effectLevels = new ConcurrentQueue<int>();
+        var voiceLevels = new ConcurrentQueue<int>();
         var spoken = new ConcurrentQueue<string>();
         var shown = new List<SignalNotice>();
         int active = 0, maxActive = 0;
         using var notifications = new SignalNotifications(settings, Dispatcher.CurrentDispatcher,
             notice => { if (notice != null) shown.Add(notice); },
-            tone => { sounds.Enqueue(tone); throw new InvalidOperationException("Test output failure"); },
-            (text, ct) =>
+            (tone, gain, _) =>
+            {
+                effectLevels.Enqueue(gain);
+                sounds.Enqueue(tone);
+                throw new InvalidOperationException("Test output failure");
+            },
+            (text, gain, ct) =>
             {
                 maxActive = Math.Max(maxActive, Interlocked.Increment(ref active));
+                voiceLevels.Enqueue(gain);
                 spoken.Enqueue(text);
                 ct.WaitHandle.WaitOne(70);
                 Interlocked.Decrement(ref active);
             });
         notifications.Publish(price);
         Check(shown.Count == 0 && sounds.IsEmpty && spoken.IsEmpty, "disabled channels produce nothing");
-        notifications.PreviewSound(SignalTone.Soft);
+        notifications.PreviewSound(SignalTone.Soft, 75);
         await Until(() => sounds.Count == 1);
-        Check(sounds.SequenceEqual(new[] { SignalTone.Soft }) && shown.Count == 0 && spoken.IsEmpty, "preview plays only the selected tone with notification channels disabled");
+        Check(sounds.SequenceEqual(new[] { SignalTone.Soft }) && effectLevels.Single() == 60 && shown.Count == 0 && spoken.IsEmpty,
+            "preview applies the master and channel levels even with notification channels disabled");
         notifications.PreviewVoice("Пример несохранённого текста.");
         await Until(() => spoken.Count == 1);
-        Check(spoken.Single() == "Пример несохранённого текста." && shown.Count == 0, "speech preview plays the draft with notification channels disabled");
+        Check(spoken.Single() == "Пример несохранённого текста." && voiceLevels.Single() == 20 && shown.Count == 0,
+            "speech preview uses its own level with notification channels disabled");
         spoken.Clear();
         sounds.Clear();
+        effectLevels.Clear();
+        voiceLevels.Clear();
         settings.SignalSound = true;
         settings.SignalVoice = true;
         settings.PriceSpeech = new("Изменение {процент}.", 1);
@@ -93,6 +113,18 @@ internal static class SignalNotificationChecks
         await Until(() => sounds.Count == 2);
         Check(spoken.Count == 3 && shown.Count == 0 && sounds.SequenceEqual(new[] { SignalTone.Bell, SignalTone.Double }),
             "the volume event uses its own preset independently of speech and popup");
+        Check(effectLevels.SequenceEqual([40, 64]) && voiceLevels.SequenceEqual([20, 20, 20]),
+            "the master and individual gains are composed for each event without affecting the voice gain");
+        settings.Densities.Sound = true;
+        notifications.PublishDensity(new(Market, new(BookSide.Ask, 123), 50_000, 1, now, now, true, "#EFB863"));
+        await Until(() => sounds.Count == 3);
+        Check(sounds.Last() == SignalTone.Soft && effectLevels.Last() == 72, "book density has its own melody and channel");
+        settings.Audio.Master = 0;
+        notifications.PreviewSound(SignalTone.Double);
+        notifications.PreviewVoice("Тихо.");
+        await Task.Delay(250);
+        Check(sounds.Count == 3 && voiceLevels.Count == 3, "the master slider at zero silences all previews");
+        settings.Audio.Master = 80;
 
         settings.SignalSound = false;
         settings.SignalPopup = true;
@@ -141,7 +173,7 @@ internal static class SignalNotificationChecks
                 "a second notification of another kind reopens at the same position without taking focus");
             window.Close();
         }
-        Console.WriteLine("Signal templates, rounding, repeat cooldown, notification channels, freshness and pinned/Overview routing passed.");
+        Console.WriteLine("Sound mixer, dark settings dropdowns, speech, notifications and pinned/Overview routing passed.");
     }
 
     private static async Task CheckSignalCooldown()
@@ -156,7 +188,7 @@ internal static class SignalNotificationChecks
         var clock = new ManualSignalClock();
         var sounds = new ConcurrentQueue<SignalTone>();
         using var http = new HttpClient(new NoMarketData());
-        using var notifications = new SignalNotifications(settings, Dispatcher.CurrentDispatcher, _ => { }, sounds.Enqueue);
+        using var notifications = new SignalNotifications(settings, Dispatcher.CurrentDispatcher, _ => { }, (tone, _, _) => sounds.Enqueue(tone));
         using var window = new MainWindow(false, settings, testHttp: http, testNotifications: notifications, signalClock: clock);
         var cells = (ChartCell[])typeof(MainWindow).GetField("cells", Instance)!.GetValue(window)!;
         var place = typeof(MainWindow).GetMethod("Place", Instance)!;
@@ -296,6 +328,80 @@ internal static class SignalNotificationChecks
             return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(wave.ToArray()));
         }).ToArray();
         Check(samples.Length >= 3 && samples.Distinct().Count() == samples.Length, "each custom sound is a distinct loadable wave");
+        using var original = SignalSound.CreateWave(SignalTone.Bell);
+        using var scaled = SignalSound.VolumeAdjustedWave(original, 25);
+        var before = original.ToArray();
+        var after = scaled!.ToArray();
+        Check(before.AsSpan(0, 44).SequenceEqual(after.AsSpan(0, 44)) &&
+            Enumerable.Range(0, (before.Length - 44) / 2).All(index =>
+                BitConverter.ToInt16(after, 44 + index * 2) == BitConverter.ToInt16(before, 44 + index * 2) / 4),
+            "the voice and system-wave volume path scales 16-bit PCM samples while preserving the wave header");
+    }
+
+    private static async Task CheckMixerPage()
+    {
+        var settings = new Settings();
+        using var client = new HttpClient(new NoMarketData());
+        using var colibri = new ColibriBridge(settings);
+        var previewed = new List<(SignalTone Tone, int Level)>();
+        int saved = 0;
+        using var panel = new SettingsPanel(settings, new(client), colibri, _ => { }, () => { }, () => { },
+            saveNotifications: () => saved++, previewSound: (tone, gain) => previewed.Add((tone, gain)));
+        var window = new Window
+        {
+            Width = 745, Height = 650, Left = -3000, Top = -2000, Content = panel, ShowInTaskbar = false,
+            ShowActivated = false, WindowStartupLocation = WindowStartupLocation.Manual
+        };
+        try
+        {
+            window.Show();
+            window.UpdateLayout();
+            var sections = Visuals(panel).OfType<StackPanel>().Where(item => AutomationProperties.GetName(item) == "Общие").Single();
+            var general = Visuals(sections).OfType<Button>().ToDictionary(AutomationProperties.GetName);
+            Check(general.ContainsKey("Уведомления") && general.ContainsKey("Уровни цены") && general.ContainsKey("Звуки"),
+                "notifications and sound controls are under the shared settings group");
+            general["Звуки"].RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            window.UpdateLayout();
+            var sliders = Visuals(panel).OfType<Slider>().Where(item => item.IsVisible).ToDictionary(AutomationProperties.GetName);
+            Check(sliders.Count == 6, "the mixer presents a master level, four event levels, and independent voice level");
+            sliders["Общая громкость"].Value = 70;
+            sliders["Громкость · Голос"].Value = 25;
+            sliders["Громкость · Импульс цены"].Value = 84;
+            var list = Visuals(panel).OfType<ComboBox>().Single(item => item.IsVisible &&
+                AutomationProperties.GetName(item) == "Мелодия · Импульс цены");
+            list.SelectedValue = SignalTone.Double;
+            var play = Visuals(panel).OfType<Button>().Single(item => item.IsVisible &&
+                AutomationProperties.GetName(item) == "Прослушать · Импульс цены");
+            play.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Check(previewed.SequenceEqual([(SignalTone.Double, 84)]) && settings.Audio is { Master: 70, Voice: 25, Price: 84 } &&
+                settings.PriceSignalTone == SignalTone.Double && saved > 0, "mixer controls update and preview the selected settings");
+            CheckDarkMenu(list);
+            general["Уведомления"].RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            window.UpdateLayout();
+            foreach (var control in Visuals(panel).OfType<ComboBox>().Where(control => control.IsVisible))
+                CheckDarkMenu(control);
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        }
+        finally { window.Close(); }
+
+        static void CheckDarkMenu(ComboBox list)
+        {
+            list.ApplyTemplate();
+            Check(list.Template.FindName("PART_Popup", list) is Popup { Child: Border border } &&
+                border.Background == Terminal.Brush("Surface") &&
+                list.ItemContainerStyle == (Style)Application.Current.FindResource("TerminalComboItem"),
+                "the dropdown surface and its selectable rows use the shared terminal style");
+        }
+
+        static IEnumerable<DependencyObject> Visuals(DependencyObject node)
+        {
+            for (int i = 0; i < VisualTreeHelper.GetChildrenCount(node); i++)
+            {
+                var child = VisualTreeHelper.GetChild(node, i);
+                yield return child;
+                foreach (var item in Visuals(child)) yield return item;
+            }
+        }
     }
 
     private static string Numbers(string text) => text.Replace("\u00a0", "").Replace("\u202f", "").Replace(" ", "").Replace("USD", " USD");

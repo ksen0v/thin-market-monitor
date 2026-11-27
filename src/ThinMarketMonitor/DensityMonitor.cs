@@ -12,6 +12,7 @@ internal sealed record DensityVenueStatus(Venue Venue, int Markets, int Sampled,
 internal sealed class DensityMonitor(ExchangeApi api) : IDisposable
 {
     private readonly Dictionary<Venue, Scan> scans = [];
+    private readonly Dictionary<MarketSource, Catalog> lastCatalogs = [];
     private readonly Channel<DensityLevel> notices = Channel.CreateBounded<DensityLevel>(new BoundedChannelOptions(128)
     {
         FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true
@@ -22,13 +23,17 @@ internal sealed class DensityMonitor(ExchangeApi api) : IDisposable
     public void Configure(DensityOptions options, IReadOnlyDictionary<MarketSource, Catalog> catalogs)
     {
         if (disposed) return;
-        var sources = MarketSource.All.Where(options.Scans).ToArray();
-        var eligible = ListingFilter.ApplySources(catalogs, options.Rule, sources);
+        var sources = options.EnabledSources();
+        var activeVenues = sources.Select(source => source.Venue).ToHashSet();
+        var excluded = MarketSource.All.Where(source => !activeVenues.Contains(source.Venue)).ToArray();
+        foreach (var (source, catalog) in catalogs)
+            if (catalog.Error == null) lastCatalogs[source] = catalog;
+        var eligible = ListingFilter.CollectSources(catalogs, sources, excluded, lastCatalogs);
         PendingCatalogs = eligible.Missing;
         var blocked = options.Blacklist.ToHashSet(StringComparer.Ordinal);
-        var marketsByVenue = eligible.Markets.Where(m => !blocked.Contains(m.ListingAsset) && ExchangeApi.SupportsDensity(m))
+        var marketsByVenue = eligible.Markets.Where(m => !blocked.Contains(m.ListingAsset) && options.ShowsMarket(m) && ExchangeApi.SupportsDensity(m))
             .ToLookup(m => m.Venue);
-        var filters = new ScanFilters(options.IgnoreFlicker, options.IgnoreMirrored, options.Popup || options.Sound);
+        var filters = new ScanFilters(options.IgnoreFlicker, options.IgnoreMirrored, options.IgnoreLadders, options.Popup || options.Sound);
         foreach (var venue in Enum.GetValues<Venue>())
         {
             var rule = options.Venues.GetValueOrDefault(venue);
@@ -91,7 +96,7 @@ internal sealed class DensityMonitor(ExchangeApi api) : IDisposable
         notices.Writer.TryComplete();
     }
 
-    private sealed record ScanFilters(bool IgnoreFlicker, bool IgnoreMirrored, bool Notify);
+    private sealed record ScanFilters(bool IgnoreFlicker, bool IgnoreMirrored, bool IgnoreLadders, bool Notify);
     private sealed record ScanTarget(Market Market, DensityRule Rule);
 
     private sealed class Scan : IDisposable
@@ -111,7 +116,7 @@ internal sealed class DensityMonitor(ExchangeApi api) : IDisposable
             public bool Failed;
         }
 
-        private sealed record Active(ScanTarget Target, DensityLevel[] Levels, long Expires);
+        private sealed record Active(ScanTarget Target, DensityLevel[] Levels, long Expires, bool LaddersScreened);
         private sealed class TargetSet(ScanTarget[] targets)
         {
             public ScanTarget[] Targets { get; } = targets;
@@ -149,17 +154,19 @@ internal sealed class DensityMonitor(ExchangeApi api) : IDisposable
         }
 
         public DensityLevel[] Levels(string key, long now) =>
-            active.TryGetValue(key, out var entry) && IsCurrent(entry, targetSet, now) ? entry.Levels : [];
+            active.TryGetValue(key, out var entry) && IsCurrent(entry, targetSet, now, Filters.IgnoreLadders) ? entry.Levels : [];
 
         public IEnumerable<DensityLevel> Visible(long now, IReadOnlySet<string>? assets)
         {
             var targets = targetSet;
+            bool requireScreen = Filters.IgnoreLadders;
             return active.Values.Where(entry => (assets == null || assets.Contains(entry.Target.Market.ListingAsset)) &&
-                IsCurrent(entry, targets, now)).SelectMany(entry => entry.Levels);
+                IsCurrent(entry, targets, now, requireScreen)).SelectMany(entry => entry.Levels);
         }
 
-        private static bool IsCurrent(Active entry, TargetSet targets, long now) =>
-            entry.Expires >= now && targets.ByKey.GetValueOrDefault(entry.Target.Market.Key) == entry.Target;
+        private static bool IsCurrent(Active entry, TargetSet targets, long now, bool requireScreen) =>
+            (!requireScreen || entry.LaddersScreened) && entry.Expires >= now &&
+            targets.ByKey.GetValueOrDefault(entry.Target.Market.Key) == entry.Target;
 
         private async Task Run(CancellationToken ct)
         {
@@ -250,7 +257,10 @@ internal sealed class DensityMonitor(ExchangeApi api) : IDisposable
             state.Attempt = started;
             try
             {
-                var book = await api.ReadDensityBook(state.Market, state.Depths[state.DepthIndex], state.Target.Rule.MaxDistance, ct)
+                var filters = Filters;
+                double maxDistance = state.Target.Rule.MaxDistance;
+                double scanDistance = filters.IgnoreLadders ? DensityLadders.EvidenceDistance(maxDistance) : maxDistance;
+                var book = await api.ReadDensityBook(state.Market, state.Depths[state.DepthIndex], scanDistance, ct)
                     .ConfigureAwait(false);
                 ct.ThrowIfCancellationRequested();
                 state.Limited = book.Limited;
@@ -270,18 +280,19 @@ internal sealed class DensityMonitor(ExchangeApi api) : IDisposable
                     }
                 }
                 else state.ShallowerSamples = 0;
+                state.Sampled = true;
+                state.Failed = false;
+                // When another depth is available, wait for enough of the book to screen new alerts.
+                if (filters.IgnoreLadders && state.NeedsDepth) return (null, TimeSpan.Zero);
                 long now = Now;
-                var filters = Filters;
                 List<DensityLevel>? appeared = filters.Notify ? [] : null;
                 var levels = state.Tracker.Apply(book, now, maxGap, filters.IgnoreFlicker, filters.IgnoreMirrored,
-                    level => appeared?.Add(level));
+                    level => appeared?.Add(level), filters.IgnoreLadders);
                 if (levels.Length == 0) active.TryRemove(state.Market.Key, out _);
-                else active[state.Market.Key] = new(state.Target, levels, now + maxGap);
+                else active[state.Market.Key] = new(state.Target, levels, now + maxGap, filters.IgnoreLadders);
                 if (appeared != null)
                     foreach (var level in appeared)
                         if (!disposed) notices.TryWrite(level);
-                state.Sampled = true;
-                state.Failed = false;
                 return (null, TimeSpan.Zero);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested && ex is

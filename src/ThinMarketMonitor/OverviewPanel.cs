@@ -69,15 +69,7 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
 {
     private readonly ExchangeApi api;
     private readonly Settings settings;
-    private readonly Action changed;
     private readonly Action<Market> select;
-    private readonly Button source = new() { MinHeight = 32, Margin = new Thickness(8, 7, 8, 7),
-        HorizontalContentAlignment = HorizontalAlignment.Stretch };
-    private readonly Popup sourceMenu = new() { Placement = PlacementMode.Bottom, StaysOpen = false, AllowsTransparency = true };
-    private readonly Dictionary<MarketSource, (Button Row, TextBlock Mark)> sourceOptions = new();
-    private readonly Button sourceMode = new() { MinHeight = 25, Margin = new Thickness(0, 4, 5, 4) };
-    private readonly TextBlock sourceLegend = Terminal.Copy("");
-    private bool choosingSource;
     private readonly DataGrid table = new()
     {
         IsReadOnly = true, AutoGenerateColumns = false, HeadersVisibility = DataGridHeadersVisibility.Column,
@@ -98,10 +90,10 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
     private readonly TimeSpan spreadInterval;
     private readonly TimeSpan spreadTimeout;
     private Market[] markets = [];
-    private MarketSource boundSource;
     private string? catalogDetails;
     private string? catalogPending;
     private bool catalogUnavailable;
+    private bool noSources;
     private string? spreadDetails;
     private bool loadingSelection;
     private bool shown;
@@ -117,17 +109,12 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
     {
         this.api = api;
         this.settings = settings;
-        this.changed = changed;
         this.select = select;
         this.savePresentation = savePresentation ?? changed;
         this.spreadInterval = spreadInterval ?? TimeSpan.FromMinutes(1);
         this.spreadTimeout = spreadTimeout ?? TimeSpan.FromSeconds(12);
         Background = Terminal.Brush("Surface");
         Margin = new Thickness(1, 0, 0, 0);
-        UpdateSourceButton();
-        BuildSourceMenu();
-        SetDock(source, Dock.Top);
-        Children.Add(source);
         colibriSync.IsChecked = settings.ColibriOverviewSync;
         colibriSync.Click += (_, _) =>
         {
@@ -196,142 +183,6 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
     {
         colibriSync.Visibility = settings.ColibriEnabled ? Visibility.Visible : Visibility.Collapsed;
         colibriSync.IsChecked = settings.ColibriOverviewSync;
-    }
-
-    private void BuildSourceMenu()
-    {
-        var choices = new StackPanel { Margin = new Thickness(4) };
-        foreach (var market in MarketSource.All)
-        {
-            var label = new DockPanel();
-            var mark = new TextBlock
-            {
-                MinWidth = 16, Margin = new Thickness(7, 0, 3, 0), TextAlignment = TextAlignment.Right,
-                VerticalAlignment = VerticalAlignment.Center, FontFamily = new FontFamily("Segoe UI Symbol")
-            };
-            SetDock(mark, Dock.Right);
-            label.Children.Add(mark);
-            label.Children.Add(SourceLabel(market));
-            var row = new Button
-            {
-                Style = Terminal.Style("IconButton"), Content = label, MinHeight = 26,
-                Padding = new Thickness(6, 0, 4, 0), HorizontalContentAlignment = HorizontalAlignment.Stretch
-            };
-            row.Click += (_, _) =>
-            {
-                if (choosingSource) { SelectSource(market); return; }
-                if (settings.OverviewSource == market) return;
-                settings.CycleListingRule(market, overview: true);
-                UpdateSourceOptions();
-                changed();
-            };
-            choices.Children.Add(row);
-            sourceOptions.Add(market, (row, mark));
-        }
-        var layout = new DockPanel();
-        var header = Terminal.Rule(new Thickness(0, 0, 0, 1));
-        var tools = new DockPanel();
-        sourceLegend.Margin = new Thickness(9, 4, 6, 4);
-        sourceLegend.FontSize = 11;
-        sourceLegend.VerticalAlignment = VerticalAlignment.Center;
-        sourceMode.Click += (_, _) =>
-        {
-            choosingSource = !choosingSource;
-            UpdateSourceOptions();
-        };
-        SetDock(sourceMode, Dock.Right);
-        tools.Children.Add(sourceMode);
-        tools.Children.Add(sourceLegend);
-        header.Child = tools;
-        SetDock(header, Dock.Top);
-        layout.Children.Add(header);
-        layout.Children.Add(new ScrollViewer { Content = choices, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled });
-        var surface = new Border
-        {
-            Child = layout, Background = Terminal.Brush("Surface"), BorderBrush = Terminal.Brush("Outline"),
-            BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(5), MaxHeight = 455
-        };
-        System.Windows.Documents.TextElement.SetForeground(surface, Terminal.Brush("Text"));
-        System.Windows.Documents.TextElement.SetFontFamily(surface, (FontFamily)Application.Current.FindResource("TerminalFont"));
-        System.Windows.Documents.TextElement.SetFontSize(surface, 12);
-        KeyboardNavigation.SetTabNavigation(surface, KeyboardNavigationMode.Cycle);
-        surface.PreviewKeyDown += (_, e) =>
-        {
-            if (e.Key != Key.Escape) return;
-            sourceMenu.IsOpen = false;
-            source.Focus();
-            e.Handled = true;
-        };
-        sourceMenu.Child = surface;
-        sourceMenu.PlacementTarget = source;
-        sourceMenu.VerticalOffset = 3;
-        sourceMenu.Opened += (_, _) => sourceOptions[settings.OverviewSource].Row.Focus();
-        source.Click += (_, _) =>
-        {
-            choosingSource = false;
-            UpdateSourceOptions();
-            surface.Width = Math.Max(265, source.ActualWidth);
-            sourceMenu.IsOpen = true;
-        };
-        IsVisibleChanged += (_, _) => { if (!IsVisible) sourceMenu.IsOpen = false; };
-    }
-
-    internal void SelectSource(MarketSource market)
-    {
-        choosingSource = false;
-        if (!settings.SelectOverviewSource(market)) { UpdateSourceOptions(); return; }
-        loadedCatalog = false;
-        UpdateSourceButton();
-        UpdateSourceOptions();
-        changed();
-    }
-
-    private void UpdateSourceOptions()
-    {
-        sourceMode.Content = choosingSource ? "К условиям" : "Сменить источник";
-        sourceLegend.Text = choosingSource ? "Выберите биржу для таблицы" : "✓ Есть   × Нет   — Любой";
-        foreach (var (market, (row, mark)) in sourceOptions)
-        {
-            bool active = market == settings.OverviewSource;
-            var (text, caption, foreground, background) = active ? ("•", "Источник списка", "Accent", "AccentSurface") : choosingSource
-                ? ("", "Выбрать источник списка", "Text", "Surface") :
-                settings.OverviewRule(market) switch
-                {
-                    ListingRule.Require => ("✓", "Требовать листинг", "Accent", "AccentSurface"),
-                    ListingRule.Exclude => ("×", "Исключать при листинге", "Excluded", "ExcludedSurface"),
-                    _ => ("—", "Без условия", "Muted", "Surface")
-                };
-            mark.Text = text;
-            mark.Foreground = row.Foreground = Terminal.Brush(foreground);
-            row.Background = Terminal.Brush(background);
-            row.ToolTip = active || choosingSource ? caption : $"{caption} · нажмите для смены";
-            AutomationProperties.SetName(row, market.Label);
-            AutomationProperties.SetItemStatus(row, caption);
-        }
-    }
-
-    private static StackPanel SourceLabel(MarketSource market)
-    {
-        var label = new StackPanel { Orientation = Orientation.Horizontal };
-        label.Children.Add(Terminal.VenueLogo(market.Venue, 18));
-        label.Children.Add(new TextBlock { Text = market.Venue.Label(), Margin = new Thickness(7, 0, 0, 0),
-            VerticalAlignment = VerticalAlignment.Center });
-        if (market.Venue != Venue.Alpha)
-            label.Children.Add(new TextBlock { Text = market.Segment.ToString(), Foreground = Terminal.Brush("Muted"),
-                FontSize = 11, Margin = new Thickness(8, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center });
-        return label;
-    }
-
-    private void UpdateSourceButton()
-    {
-        var content = new DockPanel();
-        var arrow = Terminal.Icon("chevron");
-        SetDock(arrow, Dock.Right);
-        content.Children.Add(arrow);
-        content.Children.Add(SourceLabel(settings.OverviewSource));
-        source.Content = content;
-        AutomationProperties.SetName(source, $"Биржа и сегмент · {settings.OverviewSource.Label}");
     }
 
     public void UpdateColumns()
@@ -409,38 +260,37 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
     }
 
     public void SetSource(IReadOnlyList<Market> next, bool visible, string? pending = null, string? details = null,
-        bool catalogUnavailable = false)
+        bool catalogUnavailable = false, bool noSources = false)
     {
         shown = visible;
         catalogDetails = details;
         catalogPending = pending;
         this.catalogUnavailable = catalogUnavailable;
-        bool sameSource = loadedCatalog && boundSource == settings.OverviewSource;
+        this.noSources = noSources;
         var matching = settings.OverviewQuotes == null && !settings.HideOverviewLeveragedTokens
             ? next : next.Where(settings.ShowsOverviewMarket).ToArray();
-        if (!sameSource) catalogRows.Clear();
-        else if (catalogRows.Count != 0)
+        var keys = next.Select(market => market.Key).ToHashSet(StringComparer.Ordinal);
+        bool preserveViewport = loadedCatalog && rows.Any(row => keys.Contains(row.Market.Key));
+        if (catalogRows.Count != 0)
         {
-            var keys = next.Select(m => m.Key).ToHashSet(StringComparer.Ordinal);
             foreach (var key in catalogRows.Keys.Where(key => !keys.Contains(key)).ToArray()) catalogRows.Remove(key);
         }
-        if (!sameSource || markets.Length != matching.Count || !markets.ToHashSet().SetEquals(matching))
+        if (!loadedCatalog || markets.Length != matching.Count || !markets.ToHashSet().SetEquals(matching))
         {
             var previouslyVisible = rows.ToHashSet();
             markets = matching.ToArray();
             var replacement = markets.OrderBy(m => m.Symbol, StringComparer.Ordinal).ThenBy(m => m.Contract?.Product)
                 .Select(market => GetCatalogRow(market, previouslyVisible)).ToArray();
             var nextRows = replacement.ToDictionary(row => row.Market.Key, StringComparer.Ordinal);
-            Viewport viewport = sameSource ? CaptureViewport(nextRows) : new(null, 0);
+            Viewport viewport = preserveViewport ? CaptureViewport(nextRows) : new(null, 0);
             CancelViewportUpdate();
-            var current = sameSource ? table.CurrentCell : default;
+            var current = preserveViewport ? table.CurrentCell : default;
             string? selectedKey = settings.OverviewChoice?.Key ??
-                (sameSource ? (table.SelectedItem as Row)?.Market.Key : null);
+                (preserveViewport ? (table.SelectedItem as Row)?.Market.Key : null);
             loadedCatalog = true;
-            boundSource = settings.OverviewSource;
             rows = replacement;
             tickerFit = 0;
-            if (!sameSource) Array.Clear(metricFits);
+            if (!preserveViewport) Array.Clear(metricFits);
             QueueColumnFit();
             bookmarkMenu?.SetCurrentValue(ContextMenu.IsOpenProperty, false);
             loadingSelection = true;
@@ -455,7 +305,7 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
                 else if (table.SelectedItem == null) table.CurrentCell = default;
             }
             finally { loadingSelection = false; }
-            if (sameSource) QueueViewportUpdate(viewport);
+            if (preserveViewport) QueueViewportUpdate(viewport);
             ApplyViewport(viewport);
             Restart();
         }
@@ -615,7 +465,7 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
     {
         status.Visibility = settings.DebugMode || rows.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
         if (rows.Length == 0)
-            status.Text = catalogPending == null ? "Нет инструментов по этим условиям" : settings.DebugMode ? catalogPending
+            status.Text = noSources ? "Включите биржу над графиком." : catalogPending == null ? "Нет инструментов по этим условиям" : settings.DebugMode ? catalogPending
                 : catalogUnavailable ? "Каталог недоступен" : "Загрузка инструментов…";
         UpdateStatusTip();
     }
@@ -628,9 +478,9 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
         while (true)
         {
             var snapshots = new Dictionary<string, MarketSnapshot>();
-            if (entries[0].Market.Venue != Venue.Alpha && metrics.Any(m => m.Minutes == 1440 && m.Kind is MetricKind.Turnover or MetricKind.Change))
+            if (metrics.Any(m => m.Minutes == 1440 && m.Kind is MetricKind.Turnover or MetricKind.Change))
             {
-                try { snapshots = await api.Snapshots(entries.Select(r => r.Market).ToArray(), ct); }
+                try { snapshots = await api.Snapshots(entries.Select(r => r.Market).Where(market => market.Venue != Venue.Alpha).ToArray(), ct); }
                 catch (Exception) when (!ct.IsCancellationRequested) { }
                 foreach (var row in entries)
                 {
@@ -770,7 +620,6 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
         fitTimer.Stop();
         if (bookmarkMenu != null) bookmarkMenu.IsOpen = false;
         CancelViewportUpdate();
-        sourceMenu.IsOpen = false;
         Cancel();
     }
 
@@ -781,6 +630,9 @@ internal sealed partial class OverviewPanel : DockPanel, IDisposable
         private long spreadTime;
         public Market Market { get; } = market;
         public string Ticker => Market.Ticker;
+        public string SourceLabel => Market.Source.Label;
+        public string SegmentLabel => Market.Source.Segment.ToString();
+        public ImageSource VenueLogo => Terminal.VenueLogoSource(Market.Venue);
         public BookmarkColor? Bookmark { get; private set; } = bookmark;
         public Brush? BookmarkFill => Bookmark is { } color ? ColorBrush(color) : null;
         public Brush BookmarkBrush => BookmarkFill ?? Terminal.Brush("Muted");

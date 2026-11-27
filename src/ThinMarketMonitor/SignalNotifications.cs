@@ -59,8 +59,8 @@ internal sealed class SignalNotifications : IDisposable
     private readonly TimeProvider clock;
     private readonly DispatcherTimer popupTimer;
     private readonly Action<SignalNotice?> showPopup;
-    private readonly Action<SignalTone> playSound;
-    private readonly Action<string, CancellationToken> speak;
+    private readonly Action<SignalTone, int, CancellationToken> playSound;
+    private readonly Action<string, int, CancellationToken> speak;
     private readonly SignalPopupWindow? popup;
     private readonly CancellationTokenSource stop = new();
     private readonly Queue<SignalNotice> visual = new(), audio = new();
@@ -68,13 +68,14 @@ internal sealed class SignalNotifications : IDisposable
     private long pruneAt;
     private Task? audioWorker;
     private CancellationTokenSource? activeVoice;
-    private SignalTone? preview;
+    private (SignalTone Tone, int Volume)? preview;
     private SignalNotice? shown;
     private string? voicePreview;
     private bool disposed;
 
     public SignalNotifications(Settings settings, Dispatcher dispatcher, Action<SignalNotice?>? showPopup = null,
-        Action<SignalTone>? playSound = null, Action<string, CancellationToken>? speak = null, TimeProvider? clock = null,
+        Action<SignalTone, int, CancellationToken>? playSound = null, Action<string, int, CancellationToken>? speak = null,
+        TimeProvider? clock = null,
         Action<Market>? openAlert = null)
     {
         this.settings = settings;
@@ -130,10 +131,10 @@ internal sealed class SignalNotifications : IDisposable
         }
     }
 
-    public void PreviewSound(SignalTone tone)
+    public void PreviewSound(SignalTone tone, int channelVolume = 100)
     {
         if (disposed) return;
-        preview = tone;
+        preview = (tone, settings.Audio.Apply(channelVolume));
         StartAudio();
     }
 
@@ -199,7 +200,8 @@ internal sealed class SignalNotifications : IDisposable
                 var token = stop.Token;
                 await Task.Run(() =>
                 {
-                    if (!token.IsCancellationRequested) TryPlay(() => playSound(audition));
+                    if (audition.Volume > 0 && !token.IsCancellationRequested)
+                        TryPlay(() => playSound(audition.Tone, audition.Volume, token));
                 });
                 continue;
             }
@@ -207,35 +209,38 @@ internal sealed class SignalNotifications : IDisposable
             {
                 voicePreview = null;
                 var token = stop.Token;
+                int volume = settings.Audio.Apply(settings.Audio.Voice);
                 await Task.Run(() =>
                 {
-                    if (!token.IsCancellationRequested) TryPlay(() => speak(phrase, token));
+                    if (volume > 0 && !token.IsCancellationRequested) TryPlay(() => speak(phrase, volume, token));
                 });
                 continue;
             }
             if (!audio.TryDequeue(out var notice)) return;
-            bool sound = SoundEnabled(notice), voice = VoiceEnabled(notice);
-            if ((!sound && !voice) || !Fresh(notice.Time, Now)) continue;
-            SignalTone tone = notice.AlertMarket != null ? settings.PriceAlertTone : notice.Module switch
+            var mix = settings.Audio;
+            var (tone, channelVolume) = notice.AlertMarket != null ? (settings.PriceAlertTone, mix.PriceAlert) : notice.Module switch
             {
-                SignalModule.Volume => settings.VolumeSignalTone,
-                SignalModule.Price => settings.PriceSignalTone,
-                _ => SignalTone.System
+                SignalModule.Volume => (settings.VolumeSignalTone, mix.Volume),
+                SignalModule.Price => (settings.PriceSignalTone, mix.Price),
+                _ => (settings.DensityTone, mix.Density)
             };
+            int soundVolume = SoundEnabled(notice) ? mix.Apply(channelVolume) : 0;
+            int voiceVolume = VoiceEnabled(notice) ? mix.Apply(mix.Voice) : 0;
+            if (soundVolume == 0 && voiceVolume == 0 || !Fresh(notice.Time, Now)) continue;
             var ct = stop.Token;
-            using var voiceStop = voice ? CancellationTokenSource.CreateLinkedTokenSource(ct) : null;
+            using var voiceStop = voiceVolume > 0 ? CancellationTokenSource.CreateLinkedTokenSource(ct) : null;
             activeVoice = voiceStop;
             await Task.Run(async () =>
             {
                 if (ct.IsCancellationRequested) return;
-                if (sound)
+                if (soundVolume > 0)
                 {
-                    TryPlay(() => playSound(tone));
-                    try { await Task.Delay(450, ct); }
+                    TryPlay(() => playSound(tone, soundVolume, ct));
+                    try { await Task.Delay(150, ct); }
                     catch (OperationCanceledException) { return; }
                 }
                 if (voiceStop is { IsCancellationRequested: false } && Fresh(notice.Time, Now))
-                    TryPlay(() => speak(notice.Speech, voiceStop.Token));
+                    TryPlay(() => speak(notice.Speech, voiceVolume, voiceStop.Token));
             });
             activeVoice = null;
         }
@@ -269,13 +274,16 @@ internal static class WindowsSignalVoice
 {
     public static bool RussianVoiceAvailable()
     {
-        try { return UseRussianVoice(null, CancellationToken.None); }
+        try { return UseRussianVoice(null, 100, CancellationToken.None); }
         catch (Exception ex) when (ex is not OutOfMemoryException) { return false; }
     }
 
-    public static void Speak(string message, CancellationToken stop) => UseRussianVoice(message, stop);
+    public static void Speak(string message, int volume, CancellationToken stop)
+    {
+        if (volume > 0) UseRussianVoice(message, volume, stop);
+    }
 
-    private static bool UseRussianVoice(string? message, CancellationToken stop)
+    private static bool UseRussianVoice(string? message, int volume, CancellationToken stop)
     {
         object? voice = null, voices = null, token = null;
         try
@@ -290,6 +298,7 @@ internal static class WindowsSignalVoice
             dynamic speech = voice;
             speech.Voice = token;
             speech.Rate = 2;
+            speech.Volume = volume;
             const int asynchronous = 1, purge = 2, plainText = 16;
             speech.Speak(message, asynchronous | plainText);
             while (!speech.WaitUntilDone(100))

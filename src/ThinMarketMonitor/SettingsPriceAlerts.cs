@@ -17,9 +17,6 @@ internal sealed partial class SettingsPanel
         openPriceAlert = open;
         var panel = new StackPanel();
         panel.Children.Add(Terminal.Heading("Ценовые оповещения"));
-        panel.Children.Add(NotificationOption("Всплывающее окно", settings.PriceAlertPopup, value => settings.PriceAlertPopup = value));
-        panel.Children.Add(NotificationOption("Звук оповещения", settings.PriceAlertSound, value => settings.PriceAlertSound = value));
-        panel.Children.Add(SoundOption("Мелодия оповещения", settings.PriceAlertTone, value => settings.PriceAlertTone = value));
         var separator = Terminal.Rule(new Thickness(0, 1, 0, 0));
         separator.Margin = new Thickness(0, 14, 0, 10);
         panel.Children.Add(separator);

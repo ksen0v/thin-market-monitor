@@ -31,6 +31,7 @@ internal sealed partial class ExchangeApi
         };
         var lists = await Task.WhenAll(feeds.Select(async feed =>
         {
+            var stocks = venue == Venue.Bitget ? BitgetStockSymbols(feed.Product, ct) : null;
             string cursor = "";
             var seen = new HashSet<string>();
             var markets = new List<Market>();
@@ -53,7 +54,9 @@ internal sealed partial class ExchangeApi
                 if (cursor.Length > 0 && (!seen.Add(cursor) || seen.Count > 30))
                     throw new JsonException("Неполная пагинация фьючерсов Bybit");
             } while (cursor.Length > 0);
-            return markets;
+            if (stocks == null) return markets;
+            var identified = await stocks;
+            return markets.Select(market => identified.Contains(market.Symbol) ? MarkStockFund(market) : market);
         }));
         return Validate(lists.SelectMany(x => x));
     }
@@ -138,9 +141,10 @@ internal sealed partial class ExchangeApi
             Venue.Gate => stream,
             _ => false
         };
+        bool stockFund = ContractIsStockFund(venue, row, baseCoin);
         return new(venue, symbol, Underlying(venue, baseCoin), quote, new(product,
             double.IsFinite(multiplier) && multiplier > 0 ? multiplier : 0, unit, stream, perpetual, baseCoin),
-            listingAsset == null ? null : new(ListingAsset: listingAsset));
+            listingAsset == null && !stockFund ? null : new(ListingAsset: listingAsset, StockOrFund: stockFund));
     }
 
     private static string? UsStockListingAsset(string ticker) =>

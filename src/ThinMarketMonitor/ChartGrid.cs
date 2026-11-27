@@ -22,7 +22,8 @@ internal sealed partial class CandlePlot
             FitAxisLabel(label, ActualWidth - plot.Right - 7);
             double labelY = Math.Clamp(y - label.Height / 2, plot.Top, Math.Max(plot.Top, plot.Bottom - label.Height));
             double labelBottom = labelY + label.Height;
-            if (labelY < lastBottom + 2) continue;
+            if (labelY < lastBottom + 2 || priceLevelBadges?.Any(badge =>
+                labelY < badge.Bounds.Bottom + 1 && labelBottom > badge.Bounds.Top - 1) == true) continue;
             dc.DrawText(label, new Point(plot.Right + 5, labelY));
             lastBottom = labelBottom;
         }

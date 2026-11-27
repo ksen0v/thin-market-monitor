@@ -14,10 +14,12 @@ internal sealed partial class SettingsPanel
         panel.Children.Add(Terminal.Heading("Плотности стакана"));
         AddOption("Луч на графиках обзора", options.OverviewOverlay, value => options.OverviewOverlay = value);
         AddOption("Луч на графиках сигналов", options.SignalsOverlay, value => options.SignalsOverlay = value);
-        AddOption("Всплывающие уведомления", options.Popup, value => options.Popup = value);
-        AddOption("Звук при появлении плотности", options.Sound, value => options.Sound = value);
         AddOption("Скрывать мигающие уровни", options.IgnoreFlicker, value => options.IgnoreFlicker = value);
         AddOption("Скрывать зеркальные уровни", options.IgnoreMirrored, value => options.IgnoreMirrored = value);
+        AddOption("Скрывать двусторонние серии заявок", options.IgnoreLadders, value => options.IgnoreLadders = value,
+            "Похожие по размеру заявки с регулярным шагом по обе стороны рыночной цены.");
+        AddOption("Исключать токены с плечом (3L, 3S, 5L, 5S)", options.HideLeveragedTokens, value => options.HideLeveragedTokens = value);
+        AddOption("Исключать акции и фонды (ETF)", options.HideStocksAndFunds, value => options.HideStocksAndFunds = value);
         AddDiagnostic(panel, "Мигание определяется по повторному исчезновению уровня. Зеркальные уровни — три и более пары близких по сумме уровней по обе стороны спреда.");
 
         var venues = Enum.GetValues<Venue>();
@@ -44,9 +46,9 @@ internal sealed partial class SettingsPanel
             if (exchange.SelectedIndex < 0) return;
             var venue = venues[exchange.SelectedIndex];
             var rule = options.Venues.GetValueOrDefault(venue) ?? new();
-            spot.IsChecked = rule.Spot;
+            spot.IsChecked = options.Scans(new(venue));
             futures.IsEnabled = venue != Venue.Alpha;
-            futures.IsChecked = futures.IsEnabled && rule.Futures;
+            futures.IsChecked = futures.IsEnabled && options.Scans(new(venue, Segment.Futures));
             editor.Load(rule);
             message.Text = "";
         };
@@ -54,19 +56,23 @@ internal sealed partial class SettingsPanel
         {
             if (!editor.TryRead(out var rule)) { DensityRuleEditor.Invalid(message); return; }
             var venue = venues[exchange.SelectedIndex];
-            options.Venues[venue] = new(spot.IsChecked == true, futures.IsEnabled && futures.IsChecked == true,
+            bool useSpot = spot.IsChecked == true, useFutures = futures.IsEnabled && futures.IsChecked == true;
+            if (useSpot || useFutures) options.DisabledVenues.Remove(venue);
+            else if (options.DisabledVenues.Contains(venue) && options.Venues.GetValueOrDefault(venue) is { } preferences)
+                (useSpot, useFutures) = (preferences.Spot, preferences.Futures);
+            options.Venues[venue] = new(useSpot, useFutures,
                 rule.SmallUsd, rule.LargeUsd, rule.MinDistance, rule.MaxDistance, rule.MinSeconds, rule.SmallColor, rule.LargeColor);
             save();
             message.Foreground = Terminal.Brush("Rising");
             message.Text = $"Сохранено · {venue.Label()}";
         };
         exchange.SelectedIndex = Math.Max(0, Array.FindIndex(venues, venue =>
-            options.Venues.TryGetValue(venue, out var rule) && (rule.Spot || rule.Futures)));
+            options.Scans(new(venue)) || options.Scans(new(venue, Segment.Futures))));
         return panel;
 
-        void AddOption(string label, bool enabled, Action<bool> change)
+        void AddOption(string label, bool enabled, Action<bool> change, string? description = null)
         {
-            var toggle = new CheckBox { Content = label, IsChecked = enabled, Margin = new Thickness(0, 4, 0, 1) };
+            var toggle = new CheckBox { Content = label, IsChecked = enabled, ToolTip = description, Margin = new Thickness(0, 4, 0, 1) };
             toggle.Click += (_, _) =>
             {
                 change(toggle.IsChecked == true);

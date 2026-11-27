@@ -45,7 +45,7 @@ internal sealed partial class ChartCell : Border
     public event Action<Market>? BlacklistRequested;
     public event Action<Market, double, double?>? PriceAlertRequested;
     internal event Action<Market, Trade, long>? TradeObserved;
-    internal Func<Market, double[]>? ReadPriceAlertLevels { get; set; }
+    internal Func<Market, PriceAlert[]>? ReadPriceAlertLevels { get; set; }
 
     public CellChoice? Choice
     {
@@ -566,7 +566,7 @@ internal sealed partial class CandlePlot : FrameworkElement
     private (double Low, double High)? fixedPrice;
     private Drag? drag;
     private Point rulerEnd;
-    private enum Operation { Pan, InterestPan, Time, Price, InterestPrice, Ruler }
+    private enum Operation { Pan, InterestPan, Time, Price, InterestPrice, Ruler, PriceAlert }
     private sealed record Drag(Operation Mode, Point Start, View View, double Visible, MouseButton? Button, InterestAxis? Interest);
     private readonly record struct View(Rect Plot, double Start, double End, double Low, double High, double[]? PaneHeights = null)
     {
@@ -658,6 +658,7 @@ internal sealed partial class CandlePlot : FrameworkElement
         var currentView = CurrentView();
         if (currentView is not { } view)
         {
+            priceLevelBadges = null;
             UpdateCrosshairAxes(null, 0, Rect.Empty, []);
             SummarizeIndicators(null);
             return;
@@ -678,12 +679,12 @@ internal sealed partial class CandlePlot : FrameworkElement
             priceBadge = new Rect(plot.Right - width - 1, Math.Clamp(priceY - height / 2, plot.Top, plot.Bottom - height),
                 width, height);
         }
+        LayoutPriceLevelBadges(view);
         DrawPriceGrid(dc, view, priceStep);
         DrawTimeGrid(dc, view, plot, timeTicks);
         DrawTimeScale(dc, view, timeTicks);
 
         dc.PushClip(new RectangleGeometry(plot));
-        DrawPriceAlerts(dc, view);
         DrawDensityRays(dc, view);
         candlePixels.Reset(step, VisualTreeHelper.GetDpi(this).DpiScaleX);
         Market? volumeMarket = indicators is { Options.Volume: true } indicator ? indicator.Market : null;
@@ -696,6 +697,7 @@ internal sealed partial class CandlePlot : FrameworkElement
         DrawCandleSeries(dc, view);
         var (volume, liquidations) = DrawProfiles(dc, view);
         DrawAnnotations(dc, view);
+        DrawPriceAlerts(dc, view);
         if (volumeBars.Known > 0 && indicators is { } data && plot.Width > 95 && plot.Height > 31)
             DrawText(dc, $"V · {ChartVolume.Unit(data.Market)}", plot.Left + 4, plot.Bottom - 14);
         dc.Pop();
@@ -714,6 +716,7 @@ internal sealed partial class CandlePlot : FrameworkElement
             dc.Pop();
         }
         DrawDensityLabels(dc, view, priceBadge);
+        DrawPriceLevelBadges(dc, view);
         if (drag is { Mode: Operation.Ruler } measure) DrawRuler(dc, measure);
         UpdateCrosshairAxes(view, priceStep, priceBadge, interestScales);
     }
@@ -781,7 +784,7 @@ internal sealed partial class CandlePlot : FrameworkElement
         if (drag != null || CurrentView() is not { } view) return;
         Point at = e.GetPosition(this);
         bool inPlot = view.Plot.Contains(at);
-        if (inPlot && e.ChangedButton == MouseButton.Left && DrawingClick(at, view))
+        if (e.ChangedButton == MouseButton.Left && (inPlot ? DrawingClick(at, view) : SelectPriceAlert(at, view, axis: true)))
         {
             if (IsMouseCaptured) SetCrosshairPosition(null);
             Focus();
@@ -872,6 +875,9 @@ internal sealed partial class CandlePlot : FrameworkElement
         double dy = (point.Y - move.Start.Y) / view.Plot.Height;
         switch (move.Mode)
         {
+            case Operation.PriceAlert:
+                MovePriceAlert(view, point.Y - move.Start.Y);
+                break;
             case Operation.Ruler:
                 rulerEnd = view.Bound(point);
                 break;
@@ -908,7 +914,12 @@ internal sealed partial class CandlePlot : FrameworkElement
 
     protected override void OnMouseUp(MouseButtonEventArgs e)
     {
-        if (e.ChangedButton != MouseButton.Left || !ReleaseDrawing())
+        if (e.ChangedButton == MouseButton.Left && drag is { Mode: Operation.PriceAlert } alertMove)
+        {
+            MovePriceAlert(alertMove.View, e.GetPosition(this).Y - alertMove.Start.Y);
+            ReleasePriceAlert();
+        }
+        else if (e.ChangedButton != MouseButton.Left || !ReleaseDrawing())
         {
             if (drag?.Button != e.ChangedButton) return;
             CancelGesture();
@@ -921,6 +932,7 @@ internal sealed partial class CandlePlot : FrameworkElement
     {
         drag = null;
         movingAnchor = null;
+        priceAlertPreview = null;
         if (IsMouseCaptured) ReleaseMouseCapture();
         SetCrosshairPosition(null);
         InvalidateVisual();
@@ -930,6 +942,7 @@ internal sealed partial class CandlePlot : FrameworkElement
     {
         drag = null;
         movingAnchor = null;
+        priceAlertPreview = null;
         SetCrosshairPosition(null);
         InvalidateVisual();
     }

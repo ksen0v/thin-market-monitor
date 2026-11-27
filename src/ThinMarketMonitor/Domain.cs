@@ -30,7 +30,7 @@ internal static class Venues
 
 internal sealed record MarketIdentifiers(string? Rest = null, string? Stream = null, string? ListingAsset = null,
     string? Collateral = null, string? Display = null, bool TrustedUsdQuote = true, bool LeveragedToken = false,
-    string? ColibriSymbol = null);
+    string? ColibriSymbol = null, bool StockOrFund = false);
 
 internal record Market(Venue Venue, string Symbol, string Base, string Quote, Contract? Contract = null, MarketIdentifiers? Identifiers = null)
 {
@@ -41,6 +41,7 @@ internal record Market(Venue Venue, string Symbol, string Base, string Quote, Co
     public string RestSymbol => Identifiers?.Rest ?? Symbol;
     public string StreamSymbol => Identifiers?.Stream ?? Symbol;
     public bool IsLeveragedToken => Contract == null && Identifiers?.LeveragedToken == true;
+    public bool IsStockOrFund => Identifiers?.StockOrFund == true || ListingAsset.StartsWith("equity:", StringComparison.Ordinal);
     public string Label => $"{Ticker} · {Source.Label}" + (Venue == Venue.Alpha ? $" · {Symbol}" : "");
     public bool Streaming => Contract?.Streaming != false;
     public double Turnover(double quantity, double price) => Contract?.Unit == QuantityUnit.Quote
@@ -84,8 +85,6 @@ internal enum BookmarkColor { Gold, Green, Blue, Pink, Violet }
 
 internal sealed class Settings
 {
-    // Top supported venues by combined spot and derivatives volume in CoinMarketCap's September 2026 report.
-    private static readonly Venue[] DefaultOverviewSources = [Venue.Binance, Venue.Okx, Venue.Bybit, Venue.Gate, Venue.Mexc];
     private const int EditableSignalPeriodsVersion = 1;
     private const int DefaultChartVolumeVersion = 2;
     internal const int MaxModuleSeconds = 3600;
@@ -109,7 +108,8 @@ internal sealed class Settings
     public bool OverviewDrawer { get; set; } = true;
     public double OverviewDrawerWidth { get; set; } = 390;
     public MarketSource OverviewSource { get; set; } = new(Venue.KuCoin);
-    public Dictionary<Venue, int> OverviewSourceVisits { get; set; } = [];
+    public MarketSource[]? OverviewSources { get; set; }
+    public HashSet<Venue> OverviewDisabledVenues { get; set; } = [];
     public Dictionary<Venue, ListingRule> OverviewSpotRules { get; set; } = [];
     public Dictionary<Venue, ListingRule> OverviewFuturesRules { get; set; } = [];
     public ListingRule OverviewRule(MarketSource source) => ListingRules(source.Segment, overview: true).GetValueOrDefault(source.Venue);
@@ -121,23 +121,33 @@ internal sealed class Settings
     public bool ShowsOverviewMarket(Market market) => ShowsOverviewQuote(market.Quote) &&
         (!HideOverviewLeveragedTokens || !market.IsLeveragedToken);
     public CellChoice? OverviewChoice { get; set; }
-    internal IEnumerable<Venue> QuickOverviewVenues() => DefaultOverviewSources.Concat(OverviewSourceVisits.Keys).Distinct()
-        .OrderByDescending(venue => OverviewSourceVisits.GetValueOrDefault(venue)).Take(DefaultOverviewSources.Length);
+    private MarketSource[] ConfiguredOverviewSources() => OverviewSources ??
+        MarketSource.All.Where(source => source == OverviewSource || OverviewRule(source) == ListingRule.Require).ToArray();
 
-    internal bool SelectOverviewSource(MarketSource source)
+    internal bool ScansOverview(MarketSource source) => !OverviewDisabledVenues.Contains(source.Venue) &&
+        (OverviewSources?.Contains(source) ?? (source == OverviewSource || OverviewRule(source) == ListingRule.Require));
+
+    internal MarketSource[] EnabledOverviewSources() => ConfiguredOverviewSources()
+        .Where(source => !OverviewDisabledVenues.Contains(source.Venue)).ToArray();
+
+    internal void ToggleOverviewVenue(Venue venue)
     {
-        if (source == OverviewSource || !MarketSource.All.Contains(source)) return false;
-        OverviewSource = source;
-        OverviewChoice = null;
-        int visits = OverviewSourceVisits.GetValueOrDefault(source.Venue);
-        if (visits < int.MaxValue) OverviewSourceVisits[source.Venue] = visits + 1;
-        return true;
+        var configured = ConfiguredOverviewSources();
+        if (!configured.Any(source => source.Venue == venue))
+        {
+            var preferred = new MarketSource(venue, OverviewSource.Segment);
+            OverviewSources = [.. configured, MarketSource.All.Contains(preferred) ? preferred : new(venue)];
+            OverviewDisabledVenues.Remove(venue);
+        }
+        else if (!OverviewDisabledVenues.Remove(venue)) OverviewDisabledVenues.Add(venue);
     }
 
-    internal MarketSource QuickOverviewSource(Venue venue)
+    internal void ToggleOverviewSegment(MarketSource source)
     {
-        var source = new MarketSource(venue, OverviewSource.Segment);
-        return MarketSource.All.Contains(source) ? source : new(venue);
+        var configured = ConfiguredOverviewSources();
+        if (OverviewDisabledVenues.Remove(source.Venue))
+            configured = configured.Where(item => item.Venue != source.Venue).ToArray();
+        OverviewSources = configured.Contains(source) ? configured.Where(item => item != source).ToArray() : [.. configured, source];
     }
     public int OverviewFrame { get; set; } = 60;
     public OverviewColumn[] OverviewColumns { get; set; } = [new(MetricKind.Turnover, 1440), new(MetricKind.Change, 1440)];
@@ -174,6 +184,8 @@ internal sealed class Settings
     public bool SignalVoice { get; set; }
     public SignalTone PriceSignalTone { get; set; }
     public SignalTone VolumeSignalTone { get; set; }
+    public SignalTone DensityTone { get; set; }
+    public SoundMix Audio { get; set; } = new();
     public PriceAlert[] PriceAlerts { get; set; } = [];
     public bool PriceAlertPopup { get; set; } = true;
     public bool PriceAlertSound { get; set; }
@@ -230,6 +242,9 @@ internal sealed class Settings
         settings.OverviewFuturesRules ??= [];
         if (!Enum.IsDefined(settings.PriceSignalTone)) settings.PriceSignalTone = SignalTone.System;
         if (!Enum.IsDefined(settings.VolumeSignalTone)) settings.VolumeSignalTone = SignalTone.System;
+        if (!Enum.IsDefined(settings.DensityTone)) settings.DensityTone = SignalTone.System;
+        settings.Audio ??= new();
+        settings.Audio.Normalize();
         if (!Enum.IsDefined(settings.PriceAlertTone)) settings.PriceAlertTone = SignalTone.System;
         settings.PriceAlerts = (settings.PriceAlerts ?? []).OfType<PriceAlert>().Where(alert => alert.Valid)
             .DistinctBy(alert => alert.Id).ToArray();
@@ -244,8 +259,8 @@ internal sealed class Settings
             .Select(CoinKey).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
         settings.FrameButtons = (settings.FrameButtons ?? [15, 60, 300]).Where(Frames.All.Contains).Distinct().Order().ToArray();
         if (!MarketSource.All.Contains(settings.OverviewSource)) settings.OverviewSource = new(Venue.KuCoin);
-        settings.OverviewSourceVisits = (settings.OverviewSourceVisits ?? []).Where(entry => Enum.IsDefined(entry.Key) && entry.Value > 0)
-            .ToDictionary(entry => entry.Key, entry => entry.Value);
+        settings.OverviewSources = settings.OverviewSources?.Where(MarketSource.All.Contains).Distinct().ToArray();
+        settings.OverviewDisabledVenues = (settings.OverviewDisabledVenues ?? []).Where(Enum.IsDefined).ToHashSet();
         if (!Frames.All.Contains(settings.OverviewFrame)) settings.OverviewFrame = 60;
         if (settings.OverviewDrawerWidth is < 230 or > 1600) settings.OverviewDrawerWidth = 390;
         settings.OverviewColumnWidths = (settings.OverviewColumnWidths ?? [])
@@ -391,16 +406,18 @@ internal static class ListingFilter
             .ThenBy(m => QuoteRank(m.Quote)).ThenBy(m => m.Symbol, StringComparer.Ordinal).ToArray(), []);
     }
 
-    internal static FilterResult ApplySources(IReadOnlyDictionary<MarketSource, Catalog> catalogs, Func<MarketSource, ListingRule> rule,
-        IReadOnlyList<MarketSource> sources)
+    internal static FilterResult CollectSources(IReadOnlyDictionary<MarketSource, Catalog> catalogs,
+        IReadOnlyList<MarketSource> enabled, IReadOnlyList<MarketSource>? excluded = null,
+        IReadOnlyDictionary<MarketSource, Catalog>? lastCatalogs = null)
     {
-        if (sources.Count == 0) return new([], []);
-        var required = MarketSource.All.Where(source => rule(source) == ListingRule.Require).ToArray();
-        var excluded = MarketSource.All.Where(source => rule(source) == ListingRule.Exclude).ToArray();
-        var missingRules = required.Concat(excluded).Where(source => !Available(catalogs, source)).ToArray();
-        var missingSources = sources.Where(source => !Available(catalogs, source)).ToArray();
-        if (missingRules.Length != 0) return new([], missingRules.Concat(missingSources).Distinct().ToArray());
-        return new(Matching(catalogs, sources, required, excluded).ToArray(), missingSources);
+        if (enabled.Count == 0) return new([], []);
+        var missing = enabled.Concat(excluded ?? []).Where(source => !Available(catalogs, source)).ToArray();
+        var excludedAssets = excluded?.SelectMany(source => Available(catalogs, source) ? catalogs[source].Markets :
+                lastCatalogs?.GetValueOrDefault(source)?.Markets ?? [])
+            .Select(market => market.ListingAsset).ToHashSet(StringComparer.Ordinal);
+        return new(enabled.Where(source => Available(catalogs, source)).SelectMany(source => catalogs[source].Markets)
+            .Where(market => excludedAssets?.Contains(market.ListingAsset) != true)
+            .DistinctBy(market => market.Key, StringComparer.Ordinal).ToArray(), missing);
     }
 
     private static bool Available(IReadOnlyDictionary<MarketSource, Catalog> catalogs, MarketSource source) =>

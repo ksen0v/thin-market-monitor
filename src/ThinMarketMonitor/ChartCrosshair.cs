@@ -20,27 +20,13 @@ internal sealed partial class CandlePlot
     private Rect crosshairPricePane = Rect.Empty;
     private double[]? crosshairPaneHeights;
     private Point? crosshairPosition;
-    private readonly Pen alertLine = new(Terminal.Brush("Accent"), 1) { DashStyle = new DashStyle([5d, 3d], 0) };
-    private double[] priceAlerts = [];
     internal event Action<(Rect Bounds, double Price)?>? AlertTargetChanged;
     internal Func<bool>? KeepCrosshairOnAlert { get; set; }
     internal void HideCrosshair() => SetCrosshairPosition(null);
 
-    internal void SetPriceAlertLevels(double[] levels)
+    internal void TrackCrosshair(Point point)
     {
-        if (priceAlerts.AsSpan().SequenceEqual(levels)) return;
-        priceAlerts = levels;
-        InvalidateVisual();
-    }
-
-    private void DrawPriceAlerts(DrawingContext dc, View view)
-    {
-        foreach (double price in priceAlerts)
-        {
-            double y = view.Y(price);
-            if (y < view.Plot.Top || y > view.Plot.Bottom) continue;
-            dc.DrawLine(alertLine, new Point(view.Plot.Left, y), new Point(view.Plot.Right, y));
-        }
+        if (drag == null && !IsMouseCaptured) SetCrosshairPosition(point);
     }
 
     protected override int VisualChildrenCount => 1;
@@ -51,7 +37,7 @@ internal sealed partial class CandlePlot
     protected override void OnMouseEnter(MouseEventArgs e)
     {
         base.OnMouseEnter(e);
-        if (drag == null && !IsMouseCaptured) SetCrosshairPosition(e.GetPosition(this));
+        TrackCrosshair(e.GetPosition(this));
     }
 
     protected override void OnMouseLeave(MouseEventArgs e)
@@ -149,8 +135,7 @@ internal sealed partial class CandlePlot
         string? value = null;
         if (active == 0)
         {
-            double resolution = Math.Min(crosshairPriceStep / 10, view.Span / pane.Height);
-            value = ChartAxis.PriceLabel(view.Price(at.Y), resolution);
+            value = CursorPrice(view, at.Y, crosshairPriceStep);
         }
         else if (active <= crosshairInterestScales.Count && crosshairInterestScales[active - 1] is { } scale)
         {

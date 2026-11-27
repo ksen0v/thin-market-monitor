@@ -103,6 +103,7 @@ internal sealed partial class ChartCell
         foreach (var (kind, icon, label) in new[]
         {
             (DrawingKind.HorizontalRay, "horizontal-ray", "Горизонтальный луч"),
+            (DrawingKind.HorizontalLine, "horizontal-line", "Горизонтальная линия в обе стороны"),
             (DrawingKind.Ray, "trend-ray", "Наклонный луч"),
             (DrawingKind.Segment, "segment", "Отрезок")
         })

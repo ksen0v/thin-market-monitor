@@ -36,8 +36,12 @@ internal sealed partial class ExchangeApi
         {
             var (spot, _) = await CachedTicker("hyperliquid:spot-contexts", token => HyperInfo("spotMetaAndAssetCtxs", token), ct);
             if (source.Segment == Segment.Spot) return Validate(DecodeHyperSpot(spot));
-            var perps = await HyperInfo("allPerpMetas", ct);
-            return Validate(DecodeHyperPerps(perps, spot[0]));
+            var perpTask = HyperInfo("allPerpMetas", ct);
+            var stockTask = HyperStockSymbols(ct);
+            var perps = await perpTask;
+            var stocks = await stockTask;
+            return Validate(DecodeHyperPerps(perps, spot[0]).Select(market =>
+                stocks.Contains(market.Symbol) ? MarkStockFund(market) : market));
         }
         if (source.Venue == Venue.Lighter)
         {
@@ -64,8 +68,7 @@ internal sealed partial class ExchangeApi
                 foreach (var row in HtxField(root, "data").EnumerateArray())
                     if (row.Optional("state") == "online")
                         yield return new(Venue.Htx, row.Str("symbol"), Asset(row.Str("base-currency")), Asset(row.Str("quote-currency")),
-                            Identifiers: row.Optional("tags").Split(',').Contains("etp", StringComparer.OrdinalIgnoreCase)
-                                ? new(LeveragedToken: true) : null);
+                            Identifiers: SpotKinds(Venue.Htx, row));
                 break;
             case Venue.Weex:
                 foreach (var row in root.GetProperty("symbols").EnumerateArray())
@@ -80,7 +83,8 @@ internal sealed partial class ExchangeApi
                         : DenominatedListingAsset(Venue.Weex, asset);
                     // The public trade q and candle volume are already base units, independent of order lot size.
                     yield return new(Venue.Weex, row.Str("symbol"), asset, quote, spot ? null : new("linear", Perpetual: true),
-                        spot ? null : new(ListingAsset: listingAsset, Collateral: row.Optional("marginAsset")));
+                        spot ? null : new(ListingAsset: listingAsset, Collateral: row.Optional("marginAsset"),
+                            StockOrFund: ContractIsStockFund(Venue.Weex, row, asset)));
                 }
                 break;
             case Venue.Kraken when spot:
@@ -92,7 +96,8 @@ internal sealed partial class ExchangeApi
                     if (parts.Length != 2 || parts.Any(string.IsNullOrWhiteSpace)) continue;
                     string asset = KrakenAsset(parts[0]), quote = KrakenAsset(parts[1]);
                     yield return new(Venue.Kraken, entry.Name, asset, quote,
-                        Identifiers: new(Rest: row.Str("altname"), Stream: asset + "/" + quote));
+                        Identifiers: new(Rest: row.Str("altname"), Stream: asset + "/" + quote,
+                            StockOrFund: row.Optional("aclass_base") == "tokenized_asset"));
                 }
                 break;
             case Venue.Kraken:
@@ -109,7 +114,8 @@ internal sealed partial class ExchangeApi
                     if (!double.IsFinite(size) || size <= 0) continue;
                     yield return new(Venue.Kraken, symbol, KrakenAsset(row.Str("base")), KrakenAsset(row.Str("quote")),
                         new("derivatives", size, inverse ? QuantityUnit.Quote : QuantityUnit.Base,
-                            Perpetual: symbol.StartsWith("PF_") || symbol.StartsWith("PI_")));
+                            Perpetual: symbol.StartsWith("PF_") || symbol.StartsWith("PI_")),
+                        ContractIsStockFund(Venue.Kraken, row, row.Str("base")) ? new(StockOrFund: true) : null);
                 }
                 break;
         }
@@ -128,7 +134,7 @@ internal sealed partial class ExchangeApi
                 new(product, size, product == "linear" ? QuantityUnit.Base : QuantityUnit.Quote,
                     Perpetual: product == "inverse" || product == "linear" && (row.Optional("contract_type") == "swap" ||
                         row.Optional("contract_type").Length == 0 && symbol.Count(character => character == '-') == 1)),
-                new(Collateral: product == "linear" ? quote : asset));
+                new(Collateral: product == "linear" ? quote : asset, StockOrFund: ContractIsStockFund(Venue.Htx, row, asset)));
         }
     }
 
@@ -160,9 +166,10 @@ internal sealed partial class ExchangeApi
             bool unitSize = spot || row.Number("multiplier") == 1;
             string? colibri = !duplicateNames.Contains(nativeName) && (!spot ||
                 nativeName.Equals($"{asset}/{quote}", StringComparison.OrdinalIgnoreCase)) ? nativeName : null;
+            bool stockFund = deployer == "lighter" && (spot ? asset is "RHSPY" or "RHQQQ" : LighterStockFunds.Contains(asset));
             yield return new(Venue.Lighter, id, asset, quote, spot ? null : new("perp", unitSize ? 1 : 0, Perpetual: true),
                 new(ListingAsset: listingAsset, Collateral: spot ? null : tokens.GetValueOrDefault("3"),
-                    Display: spot ? $"{asset}/{quote}" : $"{asset}/USD · {id}", ColibriSymbol: colibri));
+                    Display: spot ? $"{asset}/{quote}" : $"{asset}/USD · {id}", ColibriSymbol: colibri, StockOrFund: stockFund));
         }
     }
 

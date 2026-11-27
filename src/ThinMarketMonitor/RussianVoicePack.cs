@@ -2,7 +2,6 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
-using System.Media;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
@@ -110,17 +109,18 @@ internal sealed class RussianVoicePack(HttpClient http, CancellationToken shutdo
             throw new IOException("Контрольная сумма файла нейроголоса не совпадает.");
     }
 
-    public void Speak(string text, CancellationToken ct)
+    public void Speak(string text, int volume, CancellationToken ct)
     {
+        if (volume == 0 || ct.IsCancellationRequested) return;
         try
         {
             if (IsReady)
             {
                 using var audio = Render(text, ct).GetAwaiter().GetResult();
                 if (ct.IsCancellationRequested) return;
-                using var player = new SoundPlayer(audio);
-                using var cancelled = ct.Register(player.Stop);
-                if (!ct.IsCancellationRequested) player.PlaySync();
+                using var adjusted = volume == 100 ? null : SignalSound.VolumeAdjustedWave(audio, volume)
+                    ?? throw new IOException("Нейроголос вернул неподдерживаемый формат звука.");
+                SignalSound.PlayWave(adjusted ?? audio, ct);
                 return;
             }
         }
@@ -130,7 +130,7 @@ internal sealed class RussianVoicePack(HttpClient http, CancellationToken shutdo
             Trace.TraceWarning("Neural signal voice unavailable: {0}", ex.Message);
         }
 
-        if (!ct.IsCancellationRequested && !shutdown.IsCancellationRequested) WindowsSignalVoice.Speak(text, ct);
+        if (!ct.IsCancellationRequested && !shutdown.IsCancellationRequested) WindowsSignalVoice.Speak(text, volume, ct);
     }
 
     internal async Task<MemoryStream> Render(string text, CancellationToken ct)

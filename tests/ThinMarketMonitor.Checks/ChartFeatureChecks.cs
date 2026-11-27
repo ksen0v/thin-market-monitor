@@ -309,19 +309,38 @@ internal static class ChartFeatureChecks
             Click(button);
             window.UpdateLayout();
             var tools = Field<Dictionary<DrawingKind, Button>>(cell, "drawingActions");
-            Check(rail.IsVisible && tools.Count == 3 && tools.Values.All(b => b.Content is Viewbox) &&
+            Check(rail.IsVisible && tools.Count == 4 && tools.Values.All(b => b.Content is Viewbox) &&
                 rail.TranslatePoint(new Point(rail.ActualWidth, 0), cell).X <= plot.TranslatePoint(new Point(), cell).X &&
                 rail.CornerRadius.TopLeft > 0 && rail.VerticalAlignment == VerticalAlignment.Center,
                 "drawing tools open on the left in a rounded, vertically centered panel");
             Click(tools[DrawingKind.HorizontalRay]);
             view = typeof(CandlePlot).GetMethod("CurrentView", Private)!.Invoke(plot, null)!;
             bounds = (Rect)view.GetType().GetProperty("Plot")!.GetValue(view)!;
-            typeof(CandlePlot).GetMethod("DrawingClick", Private)!.Invoke(plot, [new Point(bounds.Left + 10, bounds.Bottom - 3), view]);
+            double rayY = (double)view.GetType().GetMethod("Y")!.Invoke(view, [-16d])!;
+            typeof(CandlePlot).GetMethod("DrawingClick", Private)!.Invoke(plot, [new Point(bounds.Left + 10, rayY), view]);
             Check(settings.ChartDrawings[Bitcoin.Key] is [{ Start.Price: < 0 }], "the drawing action stores time/price anchors for this market");
-            var original = settings.ChartDrawings[Bitcoin.Key][0];
+            Click(tools[DrawingKind.HorizontalLine]);
+            typeof(CandlePlot).GetMethod("DrawingClick", Private)!.Invoke(plot, [new Point(bounds.Left + 35, bounds.Top + bounds.Height * .34), view]);
+            window.UpdateLayout();
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            var original = settings.ChartDrawings[Bitcoin.Key];
+            Check(original is [{ Kind: DrawingKind.HorizontalRay }, { Kind: DrawingKind.HorizontalLine }],
+                "the two-way horizontal tool is independent from the regular ray");
+            var clipped = ((Point Start, Point End)?)typeof(CandlePlot).GetMethod("VisibleLine", BindingFlags.Static | BindingFlags.NonPublic)!
+                .Invoke(null, [original[1], view]);
+            var glyphs = Drawings(VisualTreeHelper.GetDrawing(plot)).OfType<GlyphRunDrawing>()
+                .Where(run => run.GlyphRun.BaselineOrigin.X > bounds.Right)
+                .GroupBy(run => Math.Round(run.GlyphRun.BaselineOrigin.Y, 2))
+                .Select(parts => string.Concat(parts.OrderBy(run => run.GlyphRun.BaselineOrigin.X)
+                    .Select(run => new string(run.GlyphRun.Characters.ToArray())))).ToArray();
+            Check(clipped is { } line && line.Start.X == bounds.Left && line.End.X == bounds.Right &&
+                original.All(item => glyphs.Contains(PriceAlert.Format(item.Start.Price))),
+                $"both horizontal drawings have price-scale labels and the two-way line spans the plot ({bounds}, {clipped}; " +
+                $"expected {string.Join(" / ", original.Select(item => PriceAlert.Format(item.Start.Price)))}; " +
+                $"rendered {string.Join(" / ", glyphs)})");
             cell.SetFrame(300);
-            Check(Field<ChartDrawing[]>(plot, "drawings").Single() == original &&
-                Settings.Deserialize(JsonSerializer.Serialize(settings)).ChartDrawings[Bitcoin.Key].Single() == original,
+            Check(Field<ChartDrawing[]>(plot, "drawings").SequenceEqual(original) &&
+                Settings.Deserialize(JsonSerializer.Serialize(settings)).ChartDrawings[Bitcoin.Key].SequenceEqual(original),
                 "drawing anchors survive timeframe and settings reload");
             var featureMenu = Field<Button>(cell, "indicatorTools");
             Click(featureMenu);
@@ -405,7 +424,7 @@ internal static class ChartFeatureChecks
                 !HeaderButtons(overviewChart).Any(button => Equals(button.Content, "Выбрать")) &&
                 !HeaderButtons(overviewChart).Contains(Field<Button>(overviewChart, "pin")),
                 "choose and pin are present in Signals only");
-            CheckQuickSources(window, settings);
+            CheckOverviewSources(window, settings);
             var overviewEth = new Market(Venue.Gate, "ETH_USDT", "ETH", "USDT", new("futures/usdt", Streaming: false, Perpetual: true));
             overviewChart.Assign(overviewEth, false);
             overviewChart.Plot.Set(bars);
@@ -540,26 +559,51 @@ internal static class ChartFeatureChecks
         static string GroupOf(Button button) => AutomationProperties.GetName(((FrameworkElement)button.Parent).Parent);
     }
 
-    private static void CheckQuickSources(MainWindow window, Settings settings)
+    private static void CheckOverviewSources(MainWindow window, Settings settings)
     {
-        var bar = (WrapPanel)window.FindName("OverviewQuickSources");
-        Check(bar.Children.OfType<Button>().Select(item => (Venue)item.Tag)
-            .SequenceEqual([Venue.Binance, Venue.Okx, Venue.Bybit, Venue.Gate, Venue.Mexc]), "the quick row initially has five major exchanges");
-        var overview = Field<OverviewPanel>(window, "overviewPanel");
-        overview.SelectSource(new(Venue.KuCoin, Segment.Futures));
-        var button = bar.Children.OfType<Button>().Single(item => Equals(item.Tag, Venue.Bybit));
-        settings.OverviewFuturesRules[Venue.Gate] = ListingRule.Exclude;
-        settings.OverviewSpotRules[Venue.Htx] = ListingRule.Require;
-        button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-        Check(settings.OverviewSource == new MarketSource(Venue.Bybit, Segment.Futures)
-            && AutomationProperties.GetItemStatus(button) == "Текущий источник"
-            && settings.OverviewFuturesRules[Venue.Gate] == ListingRule.Exclude && settings.OverviewSpotRules[Venue.Htx] == ListingRule.Require,
-            "a quick button changes source in the current segment and preserves both sets of listing rules");
-        overview.SelectSource(new(Venue.Kraken, Segment.Futures));
-        overview.SelectSource(new(Venue.Bybit, Segment.Futures));
+        var bar = (VenueSourceStrip)((ContentControl)window.FindName("OverviewSourcesHost")).Content;
+        var buttons = bar.Children.OfType<StackPanel>().SelectMany(group => group.Children.OfType<Button>())
+            .Where(item => item.Tag is Venue).ToDictionary(item => (Venue)item.Tag);
+        Check(buttons.Keys.SequenceEqual(Enum.GetValues<Venue>()), "every exchange is visible in the overview source strip");
+        var binance = new MarketSource(Venue.Binance);
+        var ku = new MarketSource(Venue.KuCoin);
+        var bybitFuture = new MarketSource(Venue.Bybit, Segment.Futures);
+        var btc = Bitcoin with { Contract = null };
+        var kuBtc = btc with { Venue = Venue.KuCoin, Symbol = "BTC-USDT" };
+        var kuOnly = kuBtc with { Symbol = "AKE-USDT", Base = "AKE" };
+        var binanceOnly = btc with { Symbol = "SOLUSDT", Base = "SOL" };
+        var bybit = Bitcoin with { Venue = Venue.Bybit, Contract = new("linear") };
+        var catalogs = Field<Dictionary<MarketSource, Catalog>>(window, "catalogs");
+        var old = catalogs.ToArray();
+        settings.OverviewSources = [ku];
+        catalogs[ku] = new([kuBtc, kuOnly]);
+        catalogs[binance] = new([btc, binanceOnly]);
+        catalogs[bybitFuture] = new([bybit]);
+        var panel = Field<OverviewPanel>(window, "overviewPanel");
+        var table = Field<DataGrid>(panel, "table");
+        typeof(MainWindow).GetMethod("RefreshOverview", Private)!.Invoke(window, null);
+        table.SelectedItem = table.Items.OfType<OverviewPanel.Row>().Single(item => item.Market == kuBtc);
+        buttons[Venue.Binance].RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Check(table.Items.OfType<OverviewPanel.Row>().Select(row => row.Market)
+            .ToHashSet().SetEquals([btc, kuBtc, kuOnly, binanceOnly]) &&
+            table.SelectedItem is OverviewPanel.Row { Market: var chosen } && chosen == kuBtc,
+            "turning on Binance adds all its exact markets to KuCoin and preserves the chosen chart");
+        var segments = ((StackPanel)buttons[Venue.Bybit].Parent).Children.OfType<Button>().Single(item => item.ContextMenu != null);
+        segments.ContextMenu.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "Futures"))
+            .RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+        Check(table.Items.OfType<OverviewPanel.Row>().Any(row => row.Market == bybit) &&
+            AutomationProperties.GetItemStatus(buttons[Venue.Bybit]) == "Futures", "per-venue futures can join the spot union");
+        buttons[Venue.Bybit].RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Check(!settings.ScansOverview(bybitFuture) &&
+            AutomationProperties.GetItemStatus(buttons[Venue.Bybit]) == "Выключена", "clicking the active venue directly switches it off");
         var reopened = Settings.Deserialize(JsonSerializer.Serialize(settings));
-        Check(reopened.QuickOverviewVenues().First() == Venue.Bybit && reopened.QuickOverviewVenues().Contains(Venue.Kraken),
-            "source selection in either menu affects the persisted top five");
+        reopened.ToggleOverviewVenue(Venue.Bybit);
+        Check(reopened.EnabledOverviewSources().ToHashSet().SetEquals([ku, binance, bybitFuture]),
+            "re-enabling a disabled venue restores its previous market type after a restart");
+        catalogs.Clear();
+        foreach (var entry in old) catalogs.Add(entry.Key, entry.Value);
+        settings.OverviewChoice = null;
+        typeof(MainWindow).GetMethod("RefreshOverview", Private)!.Invoke(window, null);
     }
 
     private static void CheckPriceLabelsOnMove(CandlePlot plot, Candle[] bars)

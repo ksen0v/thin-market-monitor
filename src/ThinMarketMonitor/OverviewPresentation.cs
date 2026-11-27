@@ -196,7 +196,7 @@ internal sealed partial class OverviewPanel
             double max = 0;
             foreach (string name in rows.Select(row => row.Ticker).Distinct(StringComparer.Ordinal))
                 max = Math.Max(max, Measure(name, ticker, table.FontSize));
-            tickerFit = Math.Ceiling(max + 53);
+            tickerFit = Math.Ceiling(max + 76 + Measure("Futures", text, 10));
         }
         double digit = Measure("0000000000", text, table.FontSize) / 10;
         for (int index = 0; index < columns.Length; index++)

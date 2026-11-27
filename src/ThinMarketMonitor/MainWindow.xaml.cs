@@ -78,7 +78,7 @@ public partial class MainWindow : Window, IDisposable
         colibri.StatusChanged += ShowIntegrationStatus;
         notifications = testNotifications ?? new(settings, Dispatcher, speak: neuralVoice.Speak, openAlert: market => colibri.Open(market));
         densityMonitor = new(api);
-        densityPanel = new(settings.Densities, () => ShowSettings(), OpenDensityListings, market => ShowSettings(market),
+        densityPanel = new(settings.Densities, () => ShowSettings(), market => ShowSettings(market),
             BlockDensityCoin, market => colibri.Open(market), DensitySettingsChanged);
         DensityHost.Content = densityPanel;
         var chartFeatures = new ChartFeatures(settings, api, source => catalogs.GetValueOrDefault(source), Save);
@@ -107,9 +107,7 @@ public partial class MainWindow : Window, IDisposable
             cell.FrameChanged += _ => Save();
             cell.OpenInColibri += market => colibri.Open(market);
             cell.BlacklistRequested += BlacklistSignalCoin;
-            cell.PriceAlertRequested += PlacePriceAlert;
-            cell.TradeObserved += priceAlerts.Observe;
-            cell.ReadPriceAlertLevels = AlertLevels;
+            BindPriceAlerts(cell);
         }
         overviewChart = new ChartCell(api, 0, null, Save, () => ++order, () => settings.Ruler, () => settings.FrameButtons, chartFeatures)
         {
@@ -117,9 +115,7 @@ public partial class MainWindow : Window, IDisposable
             PlotHeight = double.NaN
         };
         overviewChart.SetFrame(settings.OverviewFrame);
-        overviewChart.PriceAlertRequested += PlacePriceAlert;
-        overviewChart.TradeObserved += priceAlerts.Observe;
-        overviewChart.ReadPriceAlertLevels = AlertLevels;
+        BindPriceAlerts(overviewChart);
         overviewChart.FrameChanged += value => { settings.OverviewFrame = value; Save(); };
         overviewChart.PreviewMouseDown += (_, _) => activeCell = overviewChart;
         overviewChart.GotKeyboardFocus += (_, _) => activeCell = overviewChart;
@@ -138,6 +134,15 @@ public partial class MainWindow : Window, IDisposable
         overviewPanel.UserSelected += market => colibri.Open(market, automatic: true);
         OverviewDrawerHost.Content = overviewPanel;
         OverviewChartHost.Content = overviewChart;
+        OverviewSourcesHost.Content = new VenueSourceStrip("Источник обзора",
+            settings.ScansOverview, settings.ToggleOverviewVenue, settings.ToggleOverviewSegment,
+            () =>
+            {
+                colibri.CancelPending();
+                RefreshOverview();
+                Save();
+                if (CatalogsToRetry().Length > 0) nextRetry = DateTimeOffset.MinValue;
+            });
         OverviewDivider.AddHandler(KeyDownEvent, new KeyEventHandler(OverviewDividerKeyDown), handledEventsToo: true);
         order = cells.Max(cell => cell.Order);
 
@@ -188,13 +193,14 @@ public partial class MainWindow : Window, IDisposable
         var underMouse = overviewChart.IsVisible && overviewChart.IsMouseOver ? overviewChart
             : cells.FirstOrDefault(c => c.IsMouseOver && c.IsVisible);
         var drawing = fullscreenCell ?? underMouse ?? (activeCell?.IsVisible == true ? activeCell : null);
-        if (e.Key == Key.Escape && (drawing?.Plot.CancelDrawing() == true ||
-            overviewChart.Plot.CancelDrawing() || cells.Any(cell => cell.Plot.CancelDrawing())))
+        if (e.Key == Key.Escape && (drawing != null && CancelAnnotation(drawing.Plot) ||
+            CancelAnnotation(overviewChart.Plot) || cells.Any(cell => CancelAnnotation(cell.Plot))))
         { e.Handled = true; return; }
         if (e.Key == Key.Escape && fullscreenCell != null) { ExitFullscreen(); e.Handled = true; return; }
         if (Keyboard.FocusedElement is TextBoxBase || Keyboard.Modifiers != ModifierKeys.None) return;
         if (e.Key is Key.Up or Key.Down && ChartSurface.IsPaneDivider(Keyboard.FocusedElement)) return;
-        if (e.Key == Key.Delete && drawing?.Plot.DeleteDrawing() == true) { e.Handled = true; return; }
+        var focusedChart = activeCell is { IsVisible: true } focused && focused.Plot.IsKeyboardFocused ? focused : drawing;
+        if (e.Key == Key.Delete && focusedChart?.Plot.DeleteChartAnnotation() == true) { e.Handled = true; return; }
         if (e.Key == settings.Fullscreen)
         {
             if (!e.IsRepeat)
@@ -226,6 +232,8 @@ public partial class MainWindow : Window, IDisposable
             }
         }
     }
+
+    private static bool CancelAnnotation(CandlePlot plot) => plot.CancelPriceAlertMove() || plot.CancelDrawing();
 
     private void CancelChartGestures()
     {
@@ -362,7 +370,7 @@ public partial class MainWindow : Window, IDisposable
         GridSwitch.Visibility = SignalListingsButton.Visibility = GridSpace.Visibility;
         RefreshPriceAlertButtons();
         UpdateNavigation();
-        if (overview) UpdateOverviewQuickSources();
+        if (overview && OverviewSourcesHost.Content is VenueSourceStrip sources) sources.Refresh();
         DrawerSwitch.Content = Terminal.Icon(settings.OverviewDrawer ? "drawer-open" : "drawer-closed");
         DrawerSwitch.Foreground = Terminal.Brush(settings.OverviewDrawer ? "Accent" : "Muted");
         string drawerLabel = settings.OverviewDrawer ? "Скрыть инструменты" : "Показать инструменты";
@@ -370,10 +378,11 @@ public partial class MainWindow : Window, IDisposable
         System.Windows.Automation.AutomationProperties.SetName(DrawerSwitch, drawerLabel);
         OverviewDrawerHost.Visibility = settings.OverviewDrawer ? Visibility.Visible : Visibility.Collapsed;
         UpdateOverviewDrawerWidth();
-        var result = ListingFilter.Apply(catalogs, settings.OverviewRule, settings.OverviewSource);
+        var enabled = settings.EnabledOverviewSources();
+        var result = ListingFilter.CollectSources(catalogs, enabled);
         int unavailable = result.Missing.Count(source => catalogs.GetValueOrDefault(source)?.Error != null);
         string? pending = result.Missing.Count == 0 ? null : unavailable > 0
-            ? $"Недоступно каталогов: {unavailable} · фильтр ожидает данные"
+            ? $"Недоступно каталогов: {unavailable}"
             : $"Загрузка каталогов: {result.Missing.Count}";
         string? details = result.Missing.Count == 0 ? null : string.Join("\n", result.Missing.Select(source =>
             $"{source.Label} · {catalogs.GetValueOrDefault(source)?.Error ?? "загрузка"}"));
@@ -381,52 +390,9 @@ public partial class MainWindow : Window, IDisposable
         overviewChart.Resolve(result.Markets.FirstOrDefault(m => m.Key == settings.OverviewChoice?.Key && settings.ShowsOverviewMarket(m)));
         overviewChart.Activate(overview);
         overviewPanel.SetSource(result.Markets, overview && settings.OverviewDrawer, pending, details,
-            catalogUnavailable: unavailable > 0);
+            catalogUnavailable: unavailable > 0, noSources: enabled.Length == 0);
         settingsPanel?.UpdateQuoteChoices(OverviewSourceQuotes());
         RefreshDensities();
-    }
-
-    private void UpdateOverviewQuickSources()
-    {
-        var venues = settings.QuickOverviewVenues().ToArray();
-        var buttons = OverviewQuickSources.Children.OfType<Button>();
-        if (!buttons.Select(button => (Venue)button.Tag).SequenceEqual(venues))
-        {
-            var existing = buttons.ToDictionary(button => (Venue)button.Tag);
-            var focused = buttons.FirstOrDefault(button => button.IsKeyboardFocused);
-            OverviewQuickSources.Children.Clear();
-            foreach (var venue in venues)
-                OverviewQuickSources.Children.Add(existing.TryGetValue(venue, out var button) ? button : QuickButton(venue));
-            if (focused?.Parent == OverviewQuickSources) focused.Focus();
-        }
-        foreach (var button in buttons)
-        {
-            var market = settings.QuickOverviewSource((Venue)button.Tag);
-            bool active = market == settings.OverviewSource;
-            button.ToolTip = market.Label;
-            button.BorderBrush = Terminal.Brush(active ? "Accent" : "Outline");
-            button.Background = Terminal.Brush(active ? "AccentSurface" : "Surface");
-            button.Foreground = Terminal.Brush(active ? "Accent" : "Text");
-            System.Windows.Automation.AutomationProperties.SetName(button, market.Label);
-            System.Windows.Automation.AutomationProperties.SetItemStatus(button, active ? "Текущий источник" : "");
-        }
-
-        Button QuickButton(Venue venue)
-        {
-            var content = new StackPanel { Orientation = Orientation.Horizontal };
-            content.Children.Add(Terminal.VenueLogo(venue, 15));
-            content.Children.Add(new TextBlock
-            {
-                Text = venue.Label(), Margin = new Thickness(5, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center
-            });
-            var button = new Button
-            {
-                Tag = venue, Content = content, MinHeight = 25, Padding = new Thickness(7, 1, 7, 1),
-                Margin = new Thickness(0, 0, 4, 3)
-            };
-            button.Click += (_, _) => overviewPanel.SelectSource(settings.QuickOverviewSource(venue));
-            return button;
-        }
     }
 
     private void OverviewBodySizeChanged(object sender, SizeChangedEventArgs e)
@@ -584,7 +550,7 @@ public partial class MainWindow : Window, IDisposable
         return catalogs.Where(entry => entry.Value.ConnectionFailed).Select(entry => entry.Key).Where(source =>
             settings.Densities.NeedsCatalog(source) || settings.PriceAlerts.Any(alert => alert.Active && alert.Source == source) ||
             settings.Rule(source) != ListingRule.Ignore || defaultSpot && source.Segment == Segment.Spot ||
-            settings.Overview && (source == settings.OverviewSource || settings.OverviewRule(source) != ListingRule.Ignore)).ToArray();
+            settings.Overview && settings.ScansOverview(source)).ToArray();
     }
 
     private void NetworkAddressChanged(object? sender, EventArgs e) =>
@@ -818,7 +784,8 @@ public partial class MainWindow : Window, IDisposable
     }
 
     private IEnumerable<string> OverviewSourceQuotes() =>
-        catalogs.GetValueOrDefault(settings.OverviewSource)?.Markets.Select(m => m.Quote) ?? [];
+        settings.EnabledOverviewSources().SelectMany(source =>
+            catalogs.GetValueOrDefault(source)?.Markets.Select(m => m.Quote) ?? []);
 
     private void FitSettingsDialog()
     {
@@ -861,8 +828,7 @@ public partial class MainWindow : Window, IDisposable
         overviewPanel.UpdateColumns();
         Save();
         if (!thresholdsChanged && (catalogs.Count == 0 || catalogs.Any(c => c.Value.Error != null &&
-                (settings.Rule(c.Key) != ListingRule.Ignore || settings.OverviewRule(c.Key) != ListingRule.Ignore ||
-                 c.Key == settings.OverviewSource)))) await ReloadCatalogs();
+                (settings.Rule(c.Key) != ListingRule.Ignore || settings.ScansOverview(c.Key))))) await ReloadCatalogs();
     }
 
     private void ShowDialog(FrameworkElement content)

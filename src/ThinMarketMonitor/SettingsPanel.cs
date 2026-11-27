@@ -13,8 +13,8 @@ internal sealed partial class SettingsPanel : Border, IDisposable
 {
     private const int FiltersPage = 0, ModulesPage = 1, PricePage = 2, VolumePage = 3, ChartsPage = 4,
         OverviewPage = 5, IntegrationsPage = 6, AboutPage = 7, BlacklistPage = 8, NotificationsPage = 9, InterfacePage = 10,
-        DensityPage = 11, DensityBlacklistPage = 12, DensityCoinsPage = 13, PriceAlertsPage = 14;
-    private const int PageCount = 15;
+        DensityPage = 11, DensityBlacklistPage = 12, DensityCoinsPage = 13, PriceAlertsPage = 14, SoundsPage = 15;
+    private const int PageCount = 16;
     private const double StandardHeight = 592;
     private readonly CancellationTokenSource stop = new();
     private readonly Grid layout = new();
@@ -36,7 +36,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
     private readonly Action saveNotifications;
     private readonly Action saveOverview;
     private readonly Action saveDiagnostics;
-    private readonly Action<SignalTone> previewSound;
+    private readonly Action<SignalTone, int> previewSound;
     private readonly RussianVoicePack? neuralVoice;
     private readonly Action<string> previewVoice;
     private readonly Action close;
@@ -50,7 +50,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
 
     public SettingsPanel(Settings settings, Updater updater, ColibriBridge colibri,
         Action<bool> changed, Action close, Action restart, bool overview = false, Action? saveNotifications = null,
-        Action? saveOverview = null, Action<SignalTone>? previewSound = null, RussianVoicePack? neuralVoice = null,
+        Action? saveOverview = null, Action<SignalTone, int>? previewSound = null, RussianVoicePack? neuralVoice = null,
         Action<string>? previewVoice = null, Action? savePreferences = null, Action? saveDiagnostics = null,
         Action? saveDensities = null, bool densities = false, Market? densityCoin = null,
         Func<IEnumerable<Market>>? densityMarkets = null, Action<Guid, bool>? setPriceAlert = null,
@@ -64,7 +64,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         this.saveNotifications = saveNotifications ?? (() => changed(false));
         this.saveOverview = saveOverview ?? (() => changed(false));
         this.saveDiagnostics = saveDiagnostics ?? this.savePreferences;
-        this.previewSound = previewSound ?? (_ => { });
+        this.previewSound = previewSound ?? ((_, _) => { });
         this.neuralVoice = neuralVoice;
         this.previewVoice = previewVoice ?? (_ => { });
         this.close = close;
@@ -101,12 +101,13 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         AddNavigationGroup(nav, "Сигналы",
             (FiltersPage, "Фильтры", "filter"), (BlacklistPage, "Чёрный список", "ban"),
             (ModulesPage, "Модули", "listings"), (PricePage, "Импульс цены", "activity"),
-            (VolumePage, "Импульс объёма", "volume"), (NotificationsPage, "Уведомления", "bell"),
-            (PriceAlertsPage, "Уровни цены", "bell"));
+            (VolumePage, "Импульс объёма", "volume"));
         AddNavigationGroup(nav, "Обзор", (OverviewPage, "Инструменты", "overview-nav"));
         AddNavigationGroup(nav, "Плотности", (DensityPage, "Сканирование", "listings"),
             (DensityCoinsPage, "Настройки монет", "settings"), (DensityBlacklistPage, "Чёрный список", "ban"));
         AddNavigationGroup(nav, "Общие",
+            (NotificationsPage, "Уведомления", "bell"), (PriceAlertsPage, "Уровни цены", "bell"),
+            (SoundsPage, "Звуки", "volume"),
             (InterfacePage, "Интерфейс", "settings"), (ChartsPage, "Графики", "candles"),
             (IntegrationsPage, "Интеграции", "external"), (AboutPage, "О программе", "info"));
         var surface = new Border { Background = Terminal.Brush("Surface"), Padding = new Thickness(18, 16, 18, 16) };
@@ -123,9 +124,10 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         pages[IntegrationsPage] = Integrations();
         pages[AboutPage] = About();
         pages[BlacklistPage] = BlacklistOptions(densities: false, () => changed(false));
-        pages[NotificationsPage] = NotificationOptions();
         pages[InterfacePage] = InterfaceOptions();
         var saveDensityOptions = saveDensities ?? this.savePreferences;
+        pages[NotificationsPage] = NotificationOptions(saveDensityOptions);
+        pages[SoundsPage] = SoundOptions();
         pages[DensityPage] = DensitySettings(saveDensityOptions);
         pages[DensityBlacklistPage] = BlacklistOptions(densities: true, saveDensityOptions);
         pages[DensityCoinsPage] = DensityCoinOptions(saveDensityOptions, densityCoin, densityMarkets);
@@ -215,7 +217,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
             checkedOnOpen = true;
             _ = Check();
         }
-        if (index == NotificationsPage) _ = CheckVoice();
+        if (index is NotificationsPage or SoundsPage) _ = CheckVoice();
         UpdateFilterVisibility();
     }
 
@@ -252,14 +254,19 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         UpdateFilterVisibility();
     }
 
-    private StackPanel NotificationOptions()
+    private StackPanel NotificationOptions(Action saveDensities)
     {
         var panel = new StackPanel();
-        panel.Children.Add(Terminal.Heading("Уведомления о сигналах"));
-        panel.Children.Add(NotificationOption("Всплывающее окно на рабочем столе", settings.SignalPopup, value => settings.SignalPopup = value));
-        panel.Children.Add(NotificationOption("Звук сигнала", settings.SignalSound, value => settings.SignalSound = value));
-        panel.Children.Add(SoundOption("Звук импульса цены", settings.PriceSignalTone, value => settings.PriceSignalTone = value));
-        panel.Children.Add(SoundOption("Звук импульса объёма", settings.VolumeSignalTone, value => settings.VolumeSignalTone = value));
+        AddNotificationHeading("Импульсы цены и объёма");
+        panel.Children.Add(NotificationOption("Всплывающее окно", settings.SignalPopup, value => settings.SignalPopup = value));
+        panel.Children.Add(NotificationOption("Звук", settings.SignalSound, value => settings.SignalSound = value));
+        AddNotificationHeading("Ценовые оповещения");
+        panel.Children.Add(NotificationOption("Всплывающее окно", settings.PriceAlertPopup, value => settings.PriceAlertPopup = value));
+        panel.Children.Add(NotificationOption("Звук", settings.PriceAlertSound, value => settings.PriceAlertSound = value));
+        AddNotificationHeading("Плотности");
+        panel.Children.Add(NotificationOption("Всплывающее окно", settings.Densities.Popup, value => settings.Densities.Popup = value, saveDensities));
+        panel.Children.Add(NotificationOption("Звук", settings.Densities.Sound, value => settings.Densities.Sound = value, saveDensities));
+        AddNotificationHeading("Озвучка сигналов");
         panel.Children.Add(NotificationOption("Озвучка на русском языке", settings.SignalVoice, value => settings.SignalVoice = value));
         voiceStatus.Margin = new Thickness(0, 8, 0, 0);
         panel.Children.Add(voiceStatus);
@@ -310,46 +317,24 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         };
         panel.Children.Add(speechSettings);
         return panel;
+
+        void AddNotificationHeading(string caption)
+        {
+            var heading = Terminal.Heading(caption);
+            if (panel.Children.Count > 0) heading.Margin = new Thickness(0, 14, 0, 0);
+            panel.Children.Add(heading);
+        }
     }
 
-    private CheckBox NotificationOption(string name, bool enabled, Action<bool> set)
+    private CheckBox NotificationOption(string name, bool enabled, Action<bool> set, Action? save = null)
     {
         var check = new CheckBox { Content = name, IsChecked = enabled, Margin = new Thickness(0, 9, 0, 0) };
         check.Click += (_, _) =>
         {
             set(check.IsChecked == true);
-            saveNotifications();
+            (save ?? saveNotifications)();
         };
         return check;
-    }
-
-    private FrameworkElement SoundOption(string name, SignalTone tone, Action<SignalTone> set)
-    {
-        var option = new StackPanel { Margin = new Thickness(20, 6, 0, 0) };
-        option.Children.Add(Terminal.Copy(name));
-        var row = new WrapPanel();
-        option.Children.Add(row);
-        var list = new ComboBox
-        {
-            Width = 145, MinHeight = 26, Margin = new Thickness(0, 0, 6, 0), ItemsSource = SignalSound.Options,
-            DisplayMemberPath = nameof(SignalToneOption.Label), SelectedValuePath = nameof(SignalToneOption.Tone), SelectedValue = tone
-        };
-        AutomationProperties.SetName(list, name);
-        list.SelectionChanged += (_, _) =>
-        {
-            if (list.SelectedValue is not SignalTone selected) return;
-            set(selected);
-            saveNotifications();
-        };
-        row.Children.Add(list);
-        var preview = new Button { Content = "Прослушать", MinHeight = 26 };
-        AutomationProperties.SetName(preview, $"Прослушать · {name.ToLowerInvariant()}");
-        preview.Click += (_, _) =>
-        {
-            if (list.SelectedValue is SignalTone selected) previewSound(selected);
-        };
-        row.Children.Add(preview);
-        return option;
     }
 
     private async Task CheckVoice()
@@ -359,6 +344,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
             voiceStatus.Text = "Нейроголос «Дмитрий» готов.";
             voiceStatus.ToolTip = null;
             if (speechEditor != null) speechEditor.CanPreview = true;
+            if (voiceMixPreview != null) voiceMixPreview.IsEnabled = true;
             return;
         }
         if (downloadingVoice) return;
@@ -366,6 +352,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         bool available = await Task.Run(WindowsSignalVoice.RussianVoiceAvailable);
         if (stop.IsCancellationRequested || downloadingVoice || neuralVoice?.IsReady == true) return;
         if (speechEditor != null) speechEditor.CanPreview = available;
+        if (voiceMixPreview != null) voiceMixPreview.IsEnabled = available;
         voiceStatus.Text = available
             ? "Доступен русский голос Windows."
             : "Загрузите русский нейроголос или добавьте русский голос в параметрах речи Windows.";
@@ -466,6 +453,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
 
     public void Dispose()
     {
+        if (mixSaveTimer.IsEnabled) SaveSoundMix();
         stop.Cancel();
         colibri.StatusChanged -= ShowColibriStatus;
     }

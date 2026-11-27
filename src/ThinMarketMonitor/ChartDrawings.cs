@@ -4,7 +4,7 @@ using System.Windows.Media;
 
 namespace ThinMarketMonitor;
 
-internal enum DrawingKind { HorizontalRay, Ray, Segment }
+internal enum DrawingKind { HorizontalRay, Ray, Segment, HorizontalLine }
 
 internal readonly record struct ChartPoint(double Time, double Price)
 {
@@ -13,8 +13,9 @@ internal readonly record struct ChartPoint(double Time, double Price)
 
 internal sealed record ChartDrawing(Guid Id, DrawingKind Kind, ChartPoint Start, ChartPoint End)
 {
+    internal bool Horizontal => Kind is DrawingKind.HorizontalRay or DrawingKind.HorizontalLine;
     public bool Valid => Id != Guid.Empty && Enum.IsDefined(Kind) && Start.Valid && End.Valid &&
-        (Kind == DrawingKind.HorizontalRay || Start != End);
+        (Horizontal || Start != End);
 }
 
 internal static class ChartGeometry
@@ -63,7 +64,7 @@ internal sealed partial class CandlePlot
     private Guid? selectedDrawing;
     private ChartPoint? drawingStart, drawingPreview;
     private AnchorMove? movingAnchor;
-    private sealed record AnchorMove(ChartDrawing Original, bool IsStart, View View, ChartDrawing Preview);
+    private sealed record AnchorMove(ChartDrawing Original, bool IsStart, View View, ChartDrawing Preview, double? GrabY = null);
     private readonly Pen drawingLine = new(Terminal.Brush("Accent"), 1.4);
     private readonly Pen selectedLine = new(Terminal.Brush("Text"), 1.5);
     internal Func<ModifierKeys> Magnet { get; set; } = () => ModifierKeys.Shift;
@@ -85,6 +86,7 @@ internal sealed partial class CandlePlot
         CancelGesture();
         CancelDrawing();
         selectedDrawing = null;
+        selectedPriceAlert = null;
         drawingTool = kind;
         Cursor = Cursors.Cross;
         DrawingToolChanged?.Invoke();
@@ -116,7 +118,7 @@ internal sealed partial class CandlePlot
         if (drawingTool is { } kind)
         {
             var point = DrawingPoint(at, view);
-            if (kind == DrawingKind.HorizontalRay || drawingStart.HasValue)
+            if (kind is DrawingKind.HorizontalRay or DrawingKind.HorizontalLine || drawingStart.HasValue)
             {
                 var drawing = new ChartDrawing(Guid.NewGuid(), kind, drawingStart ?? point, point);
                 if (!drawing.Valid) return true;
@@ -132,14 +134,18 @@ internal sealed partial class CandlePlot
         if (selected != null)
         {
             bool start = (at - Screen(selected.Start, view)).Length <= 8;
-            bool end = selected.Kind != DrawingKind.HorizontalRay && (at - Screen(selected.End, view)).Length <= 8;
+            bool end = !selected.Horizontal && (at - Screen(selected.End, view)).Length <= 8;
             if ((start || end) && CaptureMouse())
             {
                 movingAnchor = new(selected, start, view, selected);
                 return true;
             }
         }
-        selectedDrawing = drawings.LastOrDefault(drawing => NearLine(drawing, at, view))?.Id;
+        if (SelectPriceAlert(at, view)) return true;
+        var hit = drawings.LastOrDefault(drawing => NearLine(drawing, at, view));
+        selectedDrawing = hit?.Id;
+        if (hit is { Horizontal: true } && CaptureMouse())
+            movingAnchor = new(hit, true, view, hit, at.Y);
         InvalidateVisual();
         return HasSelectedDrawing;
     }
@@ -148,6 +154,16 @@ internal sealed partial class CandlePlot
     {
         if (movingAnchor is { } move)
         {
+            if (move.GrabY is { } start)
+            {
+                double offset = at.Y - start;
+                var anchor = move.Original.Start;
+                if (Math.Abs(offset) >= 3)
+                    anchor = anchor with { Price = DrawingPoint(new(at.X, move.View.Y(anchor.Price) + offset), move.View).Price };
+                movingAnchor = move with { Preview = move.Original with { Start = anchor } };
+                InvalidateVisual();
+                return true;
+            }
             var point = DrawingPoint(at, move.View);
             movingAnchor = move with { Preview = move.IsStart ? move.Original with { Start = point } : move.Original with { End = point } };
         }
@@ -162,7 +178,7 @@ internal sealed partial class CandlePlot
         if (movingAnchor is not { } move) return false;
         movingAnchor = null;
         if (IsMouseCaptured) ReleaseMouseCapture();
-        if (move.Preview.Valid)
+        if (move.Preview != move.Original && move.Preview.Valid)
             CommitDrawings(drawings.Select(drawing => drawing.Id == move.Preview.Id ? move.Preview : drawing).ToArray());
         return true;
     }
@@ -187,6 +203,9 @@ internal sealed partial class CandlePlot
     private static (Point Start, Point End)? VisibleLine(ChartDrawing drawing, View view)
     {
         var start = Screen(drawing.Start, view);
+        if (drawing.Kind == DrawingKind.HorizontalLine)
+            return start.Y >= view.Plot.Top && start.Y <= view.Plot.Bottom
+                ? (new Point(view.Plot.Left, start.Y), new Point(view.Plot.Right, start.Y)) : null;
         var delta = drawing.Kind == DrawingKind.HorizontalRay ? new Vector(1, 0) : Screen(drawing.End, view) - start;
         return ChartGeometry.Clip(view.Plot, start, delta, drawing.Kind != DrawingKind.Segment);
     }
@@ -215,7 +234,7 @@ internal sealed partial class CandlePlot
             if (VisibleLine(drawing, view) is { } line) dc.DrawLine(selected ? selectedLine : drawingLine, line.Start, line.End);
             if (!selected) return;
             Handle(Screen(drawing.Start, view));
-            if (drawing.Kind != DrawingKind.HorizontalRay) Handle(Screen(drawing.End, view));
+            if (!drawing.Horizontal) Handle(Screen(drawing.End, view));
         }
 
         void Handle(Point point)

@@ -25,8 +25,7 @@ internal sealed record DensityVenueRule(bool Spot = false, bool Futures = false,
 internal sealed class DensityOptions
 {
     public Dictionary<Venue, DensityVenueRule> Venues { get; set; } = [];
-    public Dictionary<Venue, ListingRule> SpotRules { get; set; } = [];
-    public Dictionary<Venue, ListingRule> FuturesRules { get; set; } = [];
+    public HashSet<Venue> DisabledVenues { get; set; } = [];
     public string[] Blacklist { get; set; } = [];
     public Dictionary<string, DensityRule> CoinRules { get; set; } = new(StringComparer.Ordinal);
     public bool OverviewOverlay { get; set; }
@@ -35,23 +34,38 @@ internal sealed class DensityOptions
     public bool Sound { get; set; }
     public bool IgnoreFlicker { get; set; }
     public bool IgnoreMirrored { get; set; }
+    public bool IgnoreLadders { get; set; }
+    public bool HideLeveragedTokens { get; set; }
+    public bool HideStocksAndFunds { get; set; }
 
-    internal bool Scans(MarketSource source) => Venues.GetValueOrDefault(source.Venue)?.Enabled(source.Segment) == true;
+    internal bool Scans(MarketSource source) => !DisabledVenues.Contains(source.Venue) &&
+        Venues.GetValueOrDefault(source.Venue)?.Enabled(source.Segment) == true;
+    internal MarketSource[] EnabledSources() => MarketSource.All.Where(Scans).ToArray();
+
+    internal bool ShowsMarket(Market market) => (!HideLeveragedTokens || !market.IsLeveragedToken) &&
+        (!HideStocksAndFunds || !market.IsStockOrFund);
 
     internal bool NeedsCatalog(MarketSource source) =>
-        Scans(source) || (Rule(source) != ListingRule.Ignore && MarketSource.All.Any(Scans));
+        Scans(source) || MarketSource.All.Any(Scans) && !MarketSource.All.Any(other => other.Venue == source.Venue && Scans(other));
+
+    internal void ToggleVenue(Venue venue)
+    {
+        var rule = Venues.GetValueOrDefault(venue) ?? new();
+        if (!rule.Spot && !rule.Futures)
+        {
+            Venues[venue] = rule with { Spot = true };
+            DisabledVenues.Remove(venue);
+        }
+        else if (!DisabledVenues.Remove(venue)) DisabledVenues.Add(venue);
+    }
 
     internal void ToggleSource(MarketSource source)
     {
         var current = Venues.GetValueOrDefault(source.Venue) ?? new();
+        if (DisabledVenues.Remove(source.Venue)) current = current with { Spot = false, Futures = false };
         Venues[source.Venue] = source.Segment == Segment.Spot ? current with { Spot = !current.Spot } :
             current with { Futures = !current.Futures };
     }
-
-    private Dictionary<Venue, ListingRule> ListingRules(Segment segment) => segment == Segment.Spot ? SpotRules : FuturesRules;
-
-    internal ListingRule Rule(MarketSource source) => ListingRules(source.Segment).GetValueOrDefault(source.Venue);
-    internal void CycleListingRule(MarketSource source) => ListingFilter.Cycle(ListingRules(source.Segment), source.Venue);
 
     internal bool Block(Market market)
     {
@@ -65,16 +79,11 @@ internal sealed class DensityOptions
     {
         Venues = (Venues ?? []).Where(pair => Enum.IsDefined(pair.Key) && pair.Value is { Valid: true })
             .ToDictionary();
-        SpotRules = ActiveRules(SpotRules, Segment.Spot);
-        FuturesRules = ActiveRules(FuturesRules, Segment.Futures);
+        DisabledVenues = (DisabledVenues ?? []).Where(Enum.IsDefined).ToHashSet();
         Blacklist = (Blacklist ?? []).Where(asset => !string.IsNullOrWhiteSpace(asset)).Distinct(StringComparer.Ordinal)
             .Order(StringComparer.Ordinal).ToArray();
         CoinRules = (CoinRules ?? []).Where(pair => !string.IsNullOrWhiteSpace(pair.Key) && pair.Value is { Valid: true })
             .ToDictionary(StringComparer.Ordinal);
-
-        static Dictionary<Venue, ListingRule> ActiveRules(Dictionary<Venue, ListingRule>? rules, Segment segment) =>
-            (rules ?? []).Where(pair => MarketSource.All.Contains(new MarketSource(pair.Key, segment)) &&
-                pair.Value is ListingRule.Require or ListingRule.Exclude).ToDictionary();
     }
 }
 
@@ -120,7 +129,7 @@ internal sealed class DensityTracker(Market market, DensityRule rule)
 
     // Age advances only on successful observations of the same price level.
     public DensityLevel[] Apply(DensityBook book, long now, long maxGap, bool ignoreFlicker, bool ignoreMirrored,
-        Action<DensityLevel> appeared)
+        Action<DensityLevel> appeared, bool ignoreLadders = false)
     {
         if (now <= lastSample) return [];
         if (now - lastSample > maxGap) Reset();
@@ -131,9 +140,12 @@ internal sealed class DensityTracker(Market market, DensityRule rule)
             return [];
         }
         double mid = book.Bids[0].Price / 2 + book.Asks[0].Price / 2;
+        double scanDistance = ignoreLadders ? DensityLadders.EvidenceDistance(rule.MaxDistance) : rule.MaxDistance;
         var candidates = new Dictionary<DensityKey, DensityLevel>();
-        Collect(book.Bids, BookSide.Bid);
-        Collect(book.Asks, BookSide.Ask);
+        List<DensityLadders.Level>? bidEvidence = ignoreLadders ? [] : null;
+        List<DensityLadders.Level>? askEvidence = ignoreLadders ? [] : null;
+        Collect(book.Bids, BookSide.Bid, bidEvidence);
+        Collect(book.Asks, BookSide.Ask, askEvidence);
 
         foreach (var (key, observation) in observations)
         {
@@ -154,6 +166,8 @@ internal sealed class DensityTracker(Market market, DensityRule rule)
         }
 
         var mirrored = ignoreMirrored ? MirroredLevels(candidates.Values) : [];
+        var ladders = candidates.Count != 0 && bidEvidence != null && askEvidence != null
+            ? DensityLadders.Find(bidEvidence, askEvidence) : [];
         var visible = new List<DensityLevel>();
         foreach (var (key, level) in candidates)
         {
@@ -170,7 +184,7 @@ internal sealed class DensityTracker(Market market, DensityRule rule)
             observation.Samples++;
             long age = now - observation.FirstSeen;
             bool flickers = ignoreFlicker && observation.Flickers >= 2 && now - observation.LastFlicker <= FlickerWindow;
-            if (observation.Samples < 2 || age < rule.MinSeconds * 1000L || flickers || mirrored.Contains(key) ||
+            if (observation.Samples < 2 || age < rule.MinSeconds * 1000L || flickers || mirrored.Contains(key) || ladders.Contains(key) ||
                 level.Distance < rule.MinDistance || level.Distance > rule.MaxDistance) continue;
             var result = level with { FirstSeen = observation.FirstSeen };
             visible.Add(result);
@@ -183,20 +197,24 @@ internal sealed class DensityTracker(Market market, DensityRule rule)
         foreach (var (key, observation) in observations)
             if (observation.MissingSince > 0 && now - observation.MissingSince > FlickerWindow) observations.Remove(key);
 
-        HasCandidates = candidates.Count > 0 || ignoreFlicker &&
+        HasCandidates = candidates.Keys.Any(key => !ladders.Contains(key)) || ignoreFlicker &&
             observations.Values.Any(o => o.MissingSince > 0 && now - o.LastFlicker <= QuickDisappearance);
         return visible.ToArray();
 
-        void Collect(BookLevel[] side, BookSide bookSide)
+        void Collect(BookLevel[] side, BookSide bookSide, List<DensityLadders.Level>? evidence)
         {
             foreach (var entry in side)
             {
                 double distance = Math.Abs((entry.Price - mid) / mid) * 100;
-                if (distance > rule.MaxDistance) break;
+                if (distance > scanDistance) break;
                 double turnover = market.Venue == Venue.Lighter ? entry.Quantity * entry.Price :
                     market.Turnover(entry.Quantity, entry.Price);
-                if (!double.IsFinite(turnover) || turnover < rule.SmallUsd) continue;
+                if (!double.IsFinite(turnover)) continue;
                 var key = new DensityKey(bookSide, entry.Price);
+                // A smaller rung can confirm the pattern while staying below the display threshold.
+                if (evidence is { Count: < DensityLadders.EvidenceLimit } && turnover >= rule.SmallUsd * .6)
+                    evidence.Add(new(key, turnover));
+                if (distance > rule.MaxDistance || turnover < rule.SmallUsd) continue;
                 bool large = turnover >= rule.LargeUsd;
                 candidates[key] = new(market, key, turnover, distance, now, now, large,
                     large ? rule.LargeColor : rule.SmallColor);

@@ -7,9 +7,6 @@ public partial class MainWindow
     private readonly DensityMonitor densityMonitor;
     private readonly DensityPanel densityPanel;
 
-    private void OpenDensityListings() =>
-        ShowListingRules("Листинги плотностей", settings.Densities.Rule, settings.Densities.CycleListingRule, DensitySettingsChanged);
-
     private void BlockDensityCoin(Market market)
     {
         if (settings.Densities.Block(market)) DensitySettingsChanged();
