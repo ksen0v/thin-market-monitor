@@ -428,7 +428,10 @@ internal static class ChartFeatureChecks
             var overviewEth = new Market(Venue.Gate, "ETH_USDT", "ETH", "USDT", new("futures/usdt", Streaming: false, Perpetual: true));
             overviewChart.Assign(overviewEth, false);
             overviewChart.Plot.Set(bars);
+            double overviewHeight = window.Height;
+            window.Height = window.MinHeight;
             CheckPriceLabelsOnMove(overviewChart.Plot, bars);
+            window.Height = overviewHeight;
             CheckCrosshair(overviewChart.Plot);
             var overviewTools = Field<Button>(overviewChart, "indicatorTools");
             ToggleOverview("Объём свечей");
@@ -635,7 +638,9 @@ internal static class ChartFeatureChecks
 
     private static void CheckPriceLabelsOnMove(CandlePlot plot, Candle[] bars)
     {
-        typeof(CandlePlot).GetMethod("SetPrice", Private)!.Invoke(plot, [8d, 8d]);
+        // 10, 12, and 14 are grid marks even at the minimum of two intervals.
+        const double low = 10, span = 4;
+        typeof(CandlePlot).GetMethod("SetPrice", Private)!.Invoke(plot, [low, span]);
         (Point Origin, string Text)[]? baseline = null;
         foreach (double price in new[] { 12.4, 12.01, 12, 11.99, 11.6, 12.04 })
         {
@@ -649,8 +654,10 @@ internal static class ChartFeatureChecks
                 .Select(run => (run.GlyphRun.BaselineOrigin, string.Join(",", run.GlyphRun.GlyphIndices))).ToArray();
             var badge = current.OfType<GeometryDrawing>().Select(item => item.Geometry).OfType<RectangleGeometry>()
                 .Single(rect => Math.Abs(rect.Rect.Right - graph.Right + 1) < .001).Rect;
-            Check(grid.Length >= 3 && badge.Right < graph.Right && (baseline == null || grid.SequenceEqual(baseline)),
-                "grid labels and the market-price badge remain visible when consecutive live ticks cross a grid value");
+            double priceY = graph.Bottom - (price - low) / span * graph.Height;
+            Check(grid.Length >= 3 && badge.Top <= priceY && priceY <= badge.Bottom &&
+                (baseline == null || grid.SequenceEqual(baseline)),
+                $"grid labels and the market-price badge remain visible when live ticks cross a grid value ({price}, {grid.Length} labels, {graph.Height} DIP)");
             baseline ??= grid;
         }
         plot.Set(bars, reset: true);
