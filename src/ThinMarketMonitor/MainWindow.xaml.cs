@@ -66,14 +66,17 @@ public partial class MainWindow : Window, IDisposable
         }) { Timeout = TimeSpan.FromSeconds(16) };
         settings = testSettings ?? Settings.Load();
         persistSettings = testSettings == null;
+        monitorPriceAlerts = startMonitoring;
+        priceAlerts = new(settings.PriceAlerts);
         InitializeComponent();
+        InitializePriceAlertButtons();
         Overlay.SizeChanged += (_, _) => FitSettingsDialog();
         neuralVoice = new(http, stop.Token);
-        notifications = testNotifications ?? new(settings, Dispatcher, speak: neuralVoice.Speak);
         signalCooldown = new(signalClock ?? TimeProvider.System);
         api = new(http);
         colibri = new(settings, colibriClient);
         colibri.StatusChanged += ShowIntegrationStatus;
+        notifications = testNotifications ?? new(settings, Dispatcher, speak: neuralVoice.Speak, openAlert: market => colibri.Open(market));
         densityMonitor = new(api);
         densityPanel = new(settings.Densities, () => ShowSettings(), OpenDensityListings, market => ShowSettings(market),
             BlockDensityCoin, market => colibri.Open(market), DensitySettingsChanged);
@@ -104,6 +107,9 @@ public partial class MainWindow : Window, IDisposable
             cell.FrameChanged += _ => Save();
             cell.OpenInColibri += market => colibri.Open(market);
             cell.BlacklistRequested += BlacklistSignalCoin;
+            cell.PriceAlertRequested += PlacePriceAlert;
+            cell.TradeObserved += priceAlerts.Observe;
+            cell.ReadPriceAlertLevels = AlertLevels;
         }
         overviewChart = new ChartCell(api, 0, null, Save, () => ++order, () => settings.Ruler, () => settings.FrameButtons, chartFeatures)
         {
@@ -111,6 +117,9 @@ public partial class MainWindow : Window, IDisposable
             PlotHeight = double.NaN
         };
         overviewChart.SetFrame(settings.OverviewFrame);
+        overviewChart.PriceAlertRequested += PlacePriceAlert;
+        overviewChart.TradeObserved += priceAlerts.Observe;
+        overviewChart.ReadPriceAlertLevels = AlertLevels;
         overviewChart.FrameChanged += value => { settings.OverviewFrame = value; Save(); };
         overviewChart.PreviewMouseDown += (_, _) => activeCell = overviewChart;
         overviewChart.GotKeyboardFocus += (_, _) => activeCell = overviewChart;
@@ -351,6 +360,7 @@ public partial class MainWindow : Window, IDisposable
         OverviewSpace.Visibility = overview ? Visibility.Visible : Visibility.Collapsed;
         DensityHost.Visibility = density ? Visibility.Visible : Visibility.Collapsed;
         GridSwitch.Visibility = SignalListingsButton.Visibility = GridSpace.Visibility;
+        RefreshPriceAlertButtons();
         UpdateNavigation();
         if (overview) UpdateOverviewQuickSources();
         DrawerSwitch.Content = Terminal.Icon(settings.OverviewDrawer ? "drawer-open" : "drawer-closed");
@@ -546,6 +556,7 @@ public partial class MainWindow : Window, IDisposable
                 if (!stop.IsCancellationRequested)
                 {
                     catalogs[v] = catalog;
+                    if (settings.PriceAlerts.Any(alert => alert.Source == v)) RefreshPriceAlertMarkets();
                     if (settings.Densities.NeedsCatalog(v)) densityMonitor.Configure(settings.Densities, catalogs);
                     listingRulesPanel?.RefreshCatalogStatus();
                     RefreshOverview();
@@ -571,7 +582,8 @@ public partial class MainWindow : Window, IDisposable
     {
         bool defaultSpot = !MarketSource.All.Any(source => settings.Rule(source) == ListingRule.Require);
         return catalogs.Where(entry => entry.Value.ConnectionFailed).Select(entry => entry.Key).Where(source =>
-            settings.Densities.NeedsCatalog(source) || settings.Rule(source) != ListingRule.Ignore || defaultSpot && source.Segment == Segment.Spot ||
+            settings.Densities.NeedsCatalog(source) || settings.PriceAlerts.Any(alert => alert.Active && alert.Source == source) ||
+            settings.Rule(source) != ListingRule.Ignore || defaultSpot && source.Segment == Segment.Spot ||
             settings.Overview && (source == settings.OverviewSource || settings.OverviewRule(source) != ListingRule.Ignore)).ToArray();
     }
 
@@ -625,9 +637,10 @@ public partial class MainWindow : Window, IDisposable
                 previous?.Dispose();
                 streams = candidates.Count > 0 && (price.Length > 0 || volume.Length > 0)
                     ? new MarketStreams(api, candidates, price, volume, markets, thresholdsChanged ? null : previous,
-                        settings.VolumeReferenceSeconds) : null;
+                        settings.VolumeReferenceSeconds, tradeObserved: priceAlerts.Observe) : null;
             }
         }
+        RefreshPriceAlertMarkets();
         ShowCoverage();
     }
 
@@ -692,6 +705,8 @@ public partial class MainWindow : Window, IDisposable
 
     private async void Tick(object? sender, EventArgs e)
     {
+        DrainPriceAlerts();
+        _ = PollPriceAlertTrades();
         RefreshDensities();
         for (int i = 0; i < 32 && densityMonitor.TryRead(out var level); i++)
             notifications.PublishDensity(level!);
@@ -787,14 +802,15 @@ public partial class MainWindow : Window, IDisposable
 
     private void OpenSettings(object sender, RoutedEventArgs e) => ShowSettings();
 
-    private void ShowSettings(Market? densityCoin = null)
+    private void ShowSettings(Market? densityCoin = null, bool openPriceAlerts = false)
     {
         if (settingsPanel != null) { settingsPanel.Close(); return; }
         if (DialogHost.Content != null) CloseDialog();
         settingsPanel = new SettingsPanel(settings, new Updater(http), colibri, SettingsChanged, CloseDialog, Close, settings.Overview,
             () => { notifications.SettingsChanged(); Save(); }, () => { RefreshOverview(); Save(); }, notifications.PreviewSound,
             neuralVoice, notifications.PreviewVoice, Save, () => { RefreshDiagnostics(); Save(); },
-            DensitySettingsChanged, settings.DensityWorkspace, densityCoin, DensityCoinMarkets);
+            DensitySettingsChanged, settings.DensityWorkspace, densityCoin, DensityCoinMarkets,
+            SetPriceAlertEnabled, RemovePriceAlert, OpenPriceAlertInColibri, openPriceAlerts);
         settingsPanel.UpdateQuoteChoices(OverviewSourceQuotes());
         settingsPanel.UpdateFilter(CatalogStatus.Text);
         ShowDialog(settingsPanel);
@@ -905,6 +921,8 @@ public partial class MainWindow : Window, IDisposable
         foreach (var cell in cells) cell.SetColibriEnabled(settings.ColibriEnabled);
         densityPanel.SetColibriEnabled(settings.ColibriEnabled);
         overviewPanel.UpdateIntegration();
+        RefreshPriceAlertButtons();
+        notifications.SettingsChanged();
         ShowIntegrationStatus();
     }
 
@@ -933,6 +951,12 @@ public partial class MainWindow : Window, IDisposable
         timer.Stop();
         settingsPanel?.Dispose();
         streams?.Dispose();
+        alertStreams?.Dispose();
+        if (priceAlerts.Drain() is { } finalAlerts)
+        {
+            settings.PriceAlerts = finalAlerts.Levels;
+            Save();
+        }
         volumeFilter?.Dispose();
         spreadFilter?.Dispose();
         overviewPanel.Dispose();

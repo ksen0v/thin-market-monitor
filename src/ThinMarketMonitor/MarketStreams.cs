@@ -26,6 +26,7 @@ internal sealed class MarketStreams : IDisposable
     private readonly Threshold[] priceRules, growthRules;
     private readonly int referenceSeconds;
     private readonly bool startFeeds;
+    private readonly Action<Market, Trade, long>? tradeObserved;
     private readonly ConcurrentDictionary<int, Subscription> subscriptions = new();
     private readonly ConcurrentDictionary<int, Task> workers = new();
     private readonly ConcurrentDictionary<string, OwnedVolume> volumeOwners = new(StringComparer.Ordinal);
@@ -50,13 +51,15 @@ internal sealed class MarketStreams : IDisposable
         : this(api, markets, thresholds, [], null, previous) { }
 
     public MarketStreams(ExchangeApi api, IReadOnlyList<Market> markets, Threshold[] thresholds, Threshold[] volumeRules,
-        IEnumerable<Market>? eligibleMarkets, MarketStreams? previous = null, int referenceSeconds = 3600, bool startFeeds = true)
+        IEnumerable<Market>? eligibleMarkets, MarketStreams? previous = null, int referenceSeconds = 3600, bool startFeeds = true,
+        Action<Market, Trade, long>? tradeObserved = null)
     {
         this.api = api;
         priceRules = thresholds;
         growthRules = volumeRules;
         this.referenceSeconds = referenceSeconds;
         this.startFeeds = startFeeds;
+        this.tradeObserved = tradeObserved;
         SetEligible(eligibleMarkets);
         if (previous != null)
             foreach (var market in markets)
@@ -246,6 +249,7 @@ internal sealed class MarketStreams : IDisposable
                                 lastTrades.AddOrUpdate(instrument.Key, trade.Time, (_, old) => Math.Max(old, trade.Time));
                                 if (trade.Size > 0 && double.IsFinite(trade.Size) && !string.IsNullOrEmpty(trade.Id))
                                     sizedTrades.AddOrUpdate(instrument.Key, trade.Time, (_, old) => Math.Max(old, trade.Time));
+                                tradeObserved?.Invoke(instrument, trade, now);
                             }
                             bool canSignal = Volatile.Read(ref eligible)?.Contains(instrument.Key) != false;
                             Signal? signal;

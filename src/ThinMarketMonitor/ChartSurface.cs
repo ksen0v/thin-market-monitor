@@ -3,12 +3,14 @@ using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Media;
 
 namespace ThinMarketMonitor;
 
 internal sealed class ChartSurface : Panel
 {
     private const double ButtonWidth = 22;
+    internal const double AlertButtonSize = 19;
     internal const double ControlsWidth = 5 * ButtonWidth;
     private readonly CandlePlot plot;
     private readonly Action<Venue, int> move;
@@ -21,12 +23,15 @@ internal sealed class ChartSurface : Panel
     private Venue[] order = [];
     private ChartPaneWeights? weights, preview;
     private ResizeGesture? resize;
+    private readonly Button addAlert;
+    private readonly TranslateTransform alertPosition = new();
+    private (Rect Bounds, double Price)? alertTarget;
 
     private sealed record PaneControls(Thumb Divider, StackPanel Buttons, Button Up, Button Down, Button Currency, Button Style);
     private sealed record ResizeGesture(Thumb Divider, int Boundary, double StartY, double[] Heights);
 
     internal ChartSurface(CandlePlot plot, Action<Venue, int> move, Action<Venue> close, Action<ChartPaneWeights?> save,
-        Action<Venue> toggleCurrency, Action<Venue> toggleStyle)
+        Action<Venue> toggleCurrency, Action<Venue> toggleStyle, Action<double> placeAlert)
     {
         this.plot = plot;
         this.move = move;
@@ -35,7 +40,33 @@ internal sealed class ChartSurface : Panel
         this.toggleCurrency = toggleCurrency;
         this.toggleStyle = toggleStyle;
         Children.Add(plot);
+        addAlert = new Button
+        {
+            Content = "+", Style = Terminal.Style("TerminalButton"), Width = AlertButtonSize, Height = AlertButtonSize,
+            MinHeight = 0, Padding = new Thickness(0), Background = Terminal.Brush("AccentSurface"),
+            Foreground = Terminal.Brush("Accent"), Visibility = Visibility.Hidden, RenderTransform = alertPosition,
+            ToolTip = "Поставить ценовое оповещение"
+        };
+        AutomationProperties.SetName(addAlert, "Поставить ценовое оповещение");
+        addAlert.Click += (_, _) =>
+        {
+            if (alertTarget is { } target) placeAlert(target.Price);
+        };
+        Children.Add(addAlert);
+        plot.AlertTargetChanged += SetAlertTarget;
+        plot.KeepCrosshairOnAlert = () => alertTarget is { } target && target.Bounds.Contains(Mouse.GetPosition(plot));
+        MouseLeave += (_, _) => plot.HideCrosshair();
         plot.InterestPanesChanged += UpdatePanes;
+    }
+
+    private void SetAlertTarget((Rect Bounds, double Price)? target)
+    {
+        if (alertTarget == target) return;
+        alertTarget = target;
+        addAlert.Visibility = target == null ? Visibility.Hidden : Visibility.Visible;
+        if (target is not { } current) return;
+        alertPosition.X = current.Bounds.X;
+        alertPosition.Y = current.Bounds.Y;
     }
 
     internal bool IsResizing => resize != null;
@@ -187,6 +218,7 @@ internal sealed class ChartSurface : Panel
     protected override Size MeasureOverride(Size availableSize)
     {
         plot.Measure(availableSize);
+        addAlert.Measure(new(AlertButtonSize, AlertButtonSize));
         foreach (var pane in controls.Values)
         {
             pane.Divider.Measure(new(availableSize.Width, ChartPaneLayout.DividerHeight));
@@ -198,6 +230,7 @@ internal sealed class ChartSurface : Panel
     protected override Size ArrangeOverride(Size finalSize)
     {
         plot.Arrange(new Rect(finalSize));
+        addAlert.Arrange(new Rect(0, 0, AlertButtonSize, AlertButtonSize));
         if (order.Length == 0) return finalSize;
         int index = 0;
         foreach (var bounds in CandlePlot.PaneDividers(finalSize.Width, plot.MeasurePanes(finalSize.Height)))

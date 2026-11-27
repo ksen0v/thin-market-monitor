@@ -68,6 +68,9 @@ internal sealed partial class ExchangeApi
     internal static long CandleStart(long time, long interval, long offset = 0) =>
         time - ((time - offset) % interval + interval) % interval;
 
+    internal static int TailCandleCount(int frame, long before, long lastSuccessfulEnd) =>
+        (int)Math.Clamp((before - lastSuccessfulEnd) / (frame * 1000L) + 4, 4, LiveCandles.MaxBars);
+
     public async Task<Candle[]> CandlePage(Market m, int frame, long before, int count, CancellationToken ct,
         Action<Candle[]>? onBatch = null)
     {
@@ -77,12 +80,21 @@ internal sealed partial class ExchangeApi
         var bars = new List<Candle>();
         for (long end = before; end > low;)
         {
-            int max = m.Venue == Venue.Okx ? 100 : m is { Venue: Venue.Bitget, Contract: not null } ? 190 : 240;
+            int max = m switch
+            {
+                { Venue: Venue.Okx } => 100,
+                { Venue: Venue.Bitget, Contract: not null } => 190,
+                // KuCoin Futures currently returns only the earliest 200 rows of larger ranges.
+                { Venue: Venue.KuCoin, Contract: not null } => 200,
+                _ => 240
+            };
             int limit = (int)Math.Min(max, Math.Ceiling((end - low) / (sourceFrame * 1000d)));
             if (frame < 60 && limit < (end - low) / 1000)
                 limit = Math.Max(frame, limit / frame * frame);
             long start = Math.Max(low, end - sourceFrame * 1000L * limit);
-            bars.AddRange(await RawPage(m, sourceFrame, start, end, limit, ct));
+            var batch = await RawPage(m, sourceFrame, start, end, limit, ct);
+            bars.AddRange(batch);
+            if (onBatch != null && batch.Length > 0) onBatch(AggregateBars(batch, frame));
             end = start;
         }
         return AggregateBars(bars, frame).Where(x => x.Time < before).ToArray();

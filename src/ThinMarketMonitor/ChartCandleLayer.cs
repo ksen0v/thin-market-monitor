@@ -56,6 +56,34 @@ internal sealed class CandlePixels
 internal sealed partial class CandlePlot
 {
     private readonly CandlePixels candlePixels = new();
+    private readonly List<(long From, long Until)> candleCoverage = [];
+
+    internal void ClearCandleCoverage() => candleCoverage.Clear();
+
+    internal void MarkCandleCoverage(long from, long until)
+    {
+        if (from >= until || candleCoverage.Any(range => range.From <= from && range.Until >= until)) return;
+        for (int i = candleCoverage.Count - 1; i >= 0; i--)
+        {
+            var range = candleCoverage[i];
+            if (range.Until < from || range.From > until) continue;
+            from = Math.Min(from, range.From);
+            until = Math.Max(until, range.Until);
+            candleCoverage.RemoveAt(i);
+        }
+        candleCoverage.Add((from, until));
+        if (crosshairPosition != null) InvalidateVisual();
+    }
+
+    internal string? CandleGapLabel(long time)
+    {
+        if (Instrument is not { } market || candles.Length == 0 || Frame < 60 && !ExchangeApi.NativeSeconds(market)) return null;
+        long stamp = ExchangeApi.CandleStart(time, BarTime, ExchangeApi.CandleOffset(market, Frame));
+        int bar = CandleIndex(stamp, after: false);
+        if (bar < candles.Length && candles[bar].Time == stamp) return null;
+        if (candleCoverage.Any(range => stamp >= range.From && stamp < range.Until)) return "нет свечи";
+        return bar > 0 && bar < candles.Length ? "не загружено" : null;
+    }
 
     private ReadOnlySpan<Candle> VisibleCandles(double start, double end, bool includeEnd = false)
     {

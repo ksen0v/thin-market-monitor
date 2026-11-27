@@ -13,8 +13,8 @@ internal sealed partial class SettingsPanel : Border, IDisposable
 {
     private const int FiltersPage = 0, ModulesPage = 1, PricePage = 2, VolumePage = 3, ChartsPage = 4,
         OverviewPage = 5, IntegrationsPage = 6, AboutPage = 7, BlacklistPage = 8, NotificationsPage = 9, InterfacePage = 10,
-        DensityPage = 11, DensityBlacklistPage = 12, DensityCoinsPage = 13;
-    private const int PageCount = 14;
+        DensityPage = 11, DensityBlacklistPage = 12, DensityCoinsPage = 13, PriceAlertsPage = 14;
+    private const int PageCount = 15;
     private const double StandardHeight = 592;
     private readonly CancellationTokenSource stop = new();
     private readonly Grid layout = new();
@@ -53,7 +53,8 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         Action? saveOverview = null, Action<SignalTone>? previewSound = null, RussianVoicePack? neuralVoice = null,
         Action<string>? previewVoice = null, Action? savePreferences = null, Action? saveDiagnostics = null,
         Action? saveDensities = null, bool densities = false, Market? densityCoin = null,
-        Func<IEnumerable<Market>>? densityMarkets = null)
+        Func<IEnumerable<Market>>? densityMarkets = null, Action<Guid, bool>? setPriceAlert = null,
+        Action<Guid>? removePriceAlert = null, Action<PriceAlert>? openPriceAlert = null, bool openPriceAlerts = false)
     {
         this.settings = settings;
         this.updater = updater;
@@ -100,7 +101,8 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         AddNavigationGroup(nav, "Сигналы",
             (FiltersPage, "Фильтры", "filter"), (BlacklistPage, "Чёрный список", "ban"),
             (ModulesPage, "Модули", "listings"), (PricePage, "Импульс цены", "activity"),
-            (VolumePage, "Импульс объёма", "volume"), (NotificationsPage, "Уведомления", "bell"));
+            (VolumePage, "Импульс объёма", "volume"), (NotificationsPage, "Уведомления", "bell"),
+            (PriceAlertsPage, "Уровни цены", "bell"));
         AddNavigationGroup(nav, "Обзор", (OverviewPage, "Инструменты", "overview-nav"));
         AddNavigationGroup(nav, "Плотности", (DensityPage, "Сканирование", "listings"),
             (DensityCoinsPage, "Настройки монет", "settings"), (DensityBlacklistPage, "Чёрный список", "ban"));
@@ -127,6 +129,7 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         pages[DensityPage] = DensitySettings(saveDensityOptions);
         pages[DensityBlacklistPage] = BlacklistOptions(densities: true, saveDensityOptions);
         pages[DensityCoinsPage] = DensityCoinOptions(saveDensityOptions, densityCoin, densityMarkets);
+        pages[PriceAlertsPage] = PriceAlertOptions(setPriceAlert, removePriceAlert, openPriceAlert);
         foreach (var page in pages) pageHost.Children.Add(page);
 
         var footer = Terminal.Rule(new Thickness(0, 1, 0, 0));
@@ -152,7 +155,8 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         Grid.SetRow(footer, 2);
         layout.Children.Add(footer);
         UpdateModuleNavigation();
-        int openingPage = densityCoin != null ? DensityCoinsPage : densities ? DensityPage : overview ? OverviewPage : FiltersPage;
+        int openingPage = openPriceAlerts ? PriceAlertsPage :
+            densityCoin != null ? DensityCoinsPage : densities ? DensityPage : overview ? OverviewPage : FiltersPage;
         SelectPage(openingPage);
         UpdateDiagnostics();
         Loaded += (_, _) =>
@@ -252,11 +256,11 @@ internal sealed partial class SettingsPanel : Border, IDisposable
     {
         var panel = new StackPanel();
         panel.Children.Add(Terminal.Heading("Уведомления о сигналах"));
-        panel.Children.Add(Option("Всплывающее окно на рабочем столе", settings.SignalPopup, value => settings.SignalPopup = value));
-        panel.Children.Add(Option("Звук сигнала", settings.SignalSound, value => settings.SignalSound = value));
+        panel.Children.Add(NotificationOption("Всплывающее окно на рабочем столе", settings.SignalPopup, value => settings.SignalPopup = value));
+        panel.Children.Add(NotificationOption("Звук сигнала", settings.SignalSound, value => settings.SignalSound = value));
         panel.Children.Add(SoundOption("Звук импульса цены", settings.PriceSignalTone, value => settings.PriceSignalTone = value));
         panel.Children.Add(SoundOption("Звук импульса объёма", settings.VolumeSignalTone, value => settings.VolumeSignalTone = value));
-        panel.Children.Add(Option("Озвучка на русском языке", settings.SignalVoice, value => settings.SignalVoice = value));
+        panel.Children.Add(NotificationOption("Озвучка на русском языке", settings.SignalVoice, value => settings.SignalVoice = value));
         voiceStatus.Margin = new Thickness(0, 8, 0, 0);
         panel.Children.Add(voiceStatus);
         if (neuralVoice != null)
@@ -306,44 +310,46 @@ internal sealed partial class SettingsPanel : Border, IDisposable
         };
         panel.Children.Add(speechSettings);
         return panel;
+    }
 
-        CheckBox Option(string name, bool enabled, Action<bool> set)
+    private CheckBox NotificationOption(string name, bool enabled, Action<bool> set)
+    {
+        var check = new CheckBox { Content = name, IsChecked = enabled, Margin = new Thickness(0, 9, 0, 0) };
+        check.Click += (_, _) =>
         {
-            var check = new CheckBox { Content = name, IsChecked = enabled, Margin = new Thickness(0, 9, 0, 0) };
-            check.Click += (_, _) =>
-            {
-                set(check.IsChecked == true);
-                saveNotifications();
-            };
-            return check;
-        }
+            set(check.IsChecked == true);
+            saveNotifications();
+        };
+        return check;
+    }
 
-        FrameworkElement SoundOption(string name, SignalTone tone, Action<SignalTone> set)
+    private FrameworkElement SoundOption(string name, SignalTone tone, Action<SignalTone> set)
+    {
+        var option = new StackPanel { Margin = new Thickness(20, 6, 0, 0) };
+        option.Children.Add(Terminal.Copy(name));
+        var row = new WrapPanel();
+        option.Children.Add(row);
+        var list = new ComboBox
         {
-            var option = new StackPanel { Margin = new Thickness(20, 6, 0, 0) };
-            option.Children.Add(Terminal.Copy(name));
-            var row = new WrapPanel();
-            option.Children.Add(row);
-            var list = new ComboBox { Width = 145, MinHeight = 26, Margin = new Thickness(0, 0, 6, 0),
-                ItemsSource = SignalSound.Options, DisplayMemberPath = nameof(SignalToneOption.Label),
-                SelectedValuePath = nameof(SignalToneOption.Tone), SelectedValue = tone };
-            AutomationProperties.SetName(list, name);
-            list.SelectionChanged += (_, _) =>
-            {
-                if (list.SelectedValue is not SignalTone selected) return;
-                set(selected);
-                saveNotifications();
-            };
-            row.Children.Add(list);
-            var preview = new Button { Content = "Прослушать", MinHeight = 26 };
-            AutomationProperties.SetName(preview, $"Прослушать · {name.ToLowerInvariant()}");
-            preview.Click += (_, _) =>
-            {
-                if (list.SelectedValue is SignalTone selected) previewSound(selected);
-            };
-            row.Children.Add(preview);
-            return option;
-        }
+            Width = 145, MinHeight = 26, Margin = new Thickness(0, 0, 6, 0), ItemsSource = SignalSound.Options,
+            DisplayMemberPath = nameof(SignalToneOption.Label), SelectedValuePath = nameof(SignalToneOption.Tone), SelectedValue = tone
+        };
+        AutomationProperties.SetName(list, name);
+        list.SelectionChanged += (_, _) =>
+        {
+            if (list.SelectedValue is not SignalTone selected) return;
+            set(selected);
+            saveNotifications();
+        };
+        row.Children.Add(list);
+        var preview = new Button { Content = "Прослушать", MinHeight = 26 };
+        AutomationProperties.SetName(preview, $"Прослушать · {name.ToLowerInvariant()}");
+        preview.Click += (_, _) =>
+        {
+            if (list.SelectedValue is SignalTone selected) previewSound(selected);
+        };
+        row.Children.Add(preview);
+        return option;
     }
 
     private async Task CheckVoice()

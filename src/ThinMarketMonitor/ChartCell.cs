@@ -43,6 +43,9 @@ internal sealed partial class ChartCell : Border
     public event Action<int>? FrameChanged;
     public event Action<Market>? OpenInColibri;
     public event Action<Market>? BlacklistRequested;
+    public event Action<Market, double, double?>? PriceAlertRequested;
+    internal event Action<Market, Trade, long>? TradeObserved;
+    internal Func<Market, double[]>? ReadPriceAlertLevels { get; set; }
 
     public CellChoice? Choice
     {
@@ -65,7 +68,8 @@ internal sealed partial class ChartCell : Border
         plot = new CandlePlot(gesture) { Focusable = true };
         chartSurface = new(plot, MoveInterestPane, CloseInterestPane, SavePaneWeights,
             venue => ChangeInterestPresentation(venue, mode => mode with { Usd = !mode.Usd }),
-            venue => ChangeInterestPresentation(venue, mode => mode with { Candles = !mode.Candles }));
+            venue => ChangeInterestPresentation(venue, mode => mode with { Candles = !mode.Candles }),
+            price => { if (market != null) PriceAlertRequested?.Invoke(market, price, plot.LastTradedPrice); });
         KeyboardNavigation.SetIsTabStop(plot, false);
         plot.OlderRequested += () => olderRequested = true;
         Margin = new Thickness(0, 0, 1, 1);
@@ -288,6 +292,8 @@ internal sealed partial class ChartCell : Border
         plot.Frame = frame;
         plot.Instrument = market;
         plot.SetDensityLevels([]);
+        plot.SetPriceAlertLevels(market == null ? [] : ReadPriceAlertLevels?.Invoke(market) ?? []);
+        plot.ClearCandleCoverage();
         plot.Set([], reset: true);
         UpdateHeader();
         ResetChartTools();
@@ -353,6 +359,7 @@ internal sealed partial class ChartCell : Border
         var coverage = (Text: "", Diagnostic: (string?)null);
         long nextPage = Boundary(tf, offset);
         long nextTick = 0;
+        long lastTailEnd = 0;
         bool historyLoaded = false;
         var refreshPlot = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(100) };
         refreshPlot.Tick += (_, _) =>
@@ -413,7 +420,10 @@ internal sealed partial class ChartCell : Border
                     {
                         nextTick = Environment.TickCount64 + (tf < 60 ? 4000 : 12000);
                         bool initial = !historyLoaded;
-                        bool found = await Page(Boundary(tf, offset), initial ? CandlePlot.InitialHistoryBars(tf) : 4, prepend: false);
+                        long before = Boundary(tf, offset);
+                        bool found = await Page(before, initial ? CandlePlot.InitialHistoryBars(tf) :
+                            ExchangeApi.TailCandleCount(tf, before, lastTailEnd), prepend: false);
+                        lastTailEnd = Math.Max(lastTailEnd, before);
                         if (initial && found && tf < 60) olderRequested |= plot.MissingHistoryBars(nextPage) > 0;
                     }
                     if (native && candles.Count >= LiveCandles.MaxBars)
@@ -455,10 +465,17 @@ internal sealed partial class ChartCell : Border
                 throw;
             }
             ct.ThrowIfCancellationRequested();
-            if (prepend || !historyLoaded) nextPage = result.Length > 0 ? result[0].Time : before - tf * count * 1000L;
+            long unit = tf * 1000L;
+            long from = Math.Max(0, before - count * unit);
+            if (prepend || !historyLoaded) nextPage = from;
+            historyLoaded = true;
+            long coveredFrom = instrument is { Venue: Venue.Kraken or Venue.Htx, Contract: null }
+                ? Math.Max(from, ExchangeApi.CandleStart(requestedAt, unit, offset) + unit -
+                    (instrument.Venue == Venue.Kraken ? 720 : 2000) * unit)
+                : from;
+            plot.MarkCandleCoverage(coveredFrom, before);
             if (result.Length > 0)
             {
-                historyLoaded = true;
                 if (prepend || !finished && emptyPages == 0) coverage = ("", null);
                 candles.AddHistory(result, requestedAt);
                 Draw();
@@ -503,8 +520,10 @@ internal sealed partial class ChartCell : Border
                     await MarketStreams.Open(api, [selected], ct, () => { }, t =>
                     {
                         long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                        if (!ct.IsCancellationRequested && t.Symbol.Equals(selected.Symbol, StringComparison.OrdinalIgnoreCase) &&
-                            t.Time >= now - 5000 && t.Time <= now + 3000) publish(t);
+                        if (ct.IsCancellationRequested || !t.Symbol.Equals(selected.Symbol, StringComparison.OrdinalIgnoreCase) ||
+                            t.Time < now - 5000 || t.Time > now + 3000) return;
+                        TradeObserved?.Invoke(selected, t, now);
+                        publish(t);
                     }, chart: true);
                 }
                 catch (Exception) when (!ct.IsCancellationRequested) { }
@@ -525,6 +544,7 @@ internal sealed partial class CandlePlot : FrameworkElement
     internal Market? Instrument { private get; set; }
     private long BarTime => Frame * 1000L;
     public event Action? OlderRequested;
+    internal double? LastTradedPrice => candles.Length == 0 ? null : candles[^1].Close;
     private readonly Brush background = Terminal.Brush("Plot");
     private readonly Brush up = Terminal.Brush("Rising");
     private readonly Brush down = Terminal.Brush("Falling");
@@ -663,6 +683,7 @@ internal sealed partial class CandlePlot : FrameworkElement
         DrawTimeScale(dc, view, timeTicks);
 
         dc.PushClip(new RectangleGeometry(plot));
+        DrawPriceAlerts(dc, view);
         DrawDensityRays(dc, view);
         candlePixels.Reset(step, VisualTreeHelper.GetDpi(this).DpiScaleX);
         Market? volumeMarket = indicators is { Options.Volume: true } indicator ? indicator.Market : null;

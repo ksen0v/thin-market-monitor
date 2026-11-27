@@ -72,7 +72,79 @@ internal static class CandleHistoryChecks
         daily.AddHistory([new(dayStart, 59_900, 60_000, 59_890, 60_000)], dayStart + 1_799_500);
         Check(daily.Snapshot() is [{ Time: var time, Close: 60001 }] && time == dayStart &&
             ExchangeApi.CandleOffset(htx, 14400) == 0, "the HTX daily stream joins the actual UTC+8 candle");
+        await KuCoinTruncation();
         Console.WriteLine("WEEX WXT Spot history, ranges, partial errors, contract routing and HTX daily/live join passed.");
+    }
+
+    private static async Task KuCoinTruncation()
+    {
+        var market = new Market(Venue.KuCoin, "BTWUSDTM", "BTW", "USDT", new("contract"));
+        long before = DateTimeOffset.Parse("2026-11-25T19:56:00+03:00").ToUnixTimeMilliseconds();
+        using var handler = new KuCoinCandles();
+        using var http = new HttpClient(handler);
+        var api = new ExchangeApi(http);
+        var ct = CancellationToken.None;
+        var bars = await api.CandlePage(market, 60, before, 480, ct);
+        CheckContiguous(bars, before - 480 * Minute, 480, "the 40-minute BTW gaps are recovered");
+        Check(handler.Windows.SequenceEqual([200, 200, 80]), "KuCoin Futures never requests more than 200 buckets");
+
+        handler.Windows.Clear();
+        long fiveEnd = ExchangeApi.CandleStart(before, 5 * Minute);
+        handler.Missing = fiveEnd - 5 * Minute;
+        var five = await api.CandlePage(market, 300, fiveEnd, 240, ct);
+        Check(five.Length == 239 && five.All(bar => bar.Time != handler.Missing) && handler.Windows.SequenceEqual([200, 40]),
+            "5m ranges use the caps as well; a real missing interval does not become a synthetic candle");
+
+        handler.Windows.Clear();
+        handler.FailSecond = true;
+        var partial = new List<Candle>();
+        try
+        {
+            await api.CandlePage(market, 60, before, 480, ct, partial.AddRange);
+            throw new InvalidOperationException("failed KuCoin page was reported as success");
+        }
+        catch (HttpRequestException)
+        {
+            Check(partial.Count == 199, "keep valid pages when a subsequent history request fails");
+        }
+        handler.FailSecond = false;
+        handler.Missing = null;
+        Check(ExchangeApi.TailCandleCount(60, before, before - 40 * Minute) == 44 &&
+            ExchangeApi.TailCandleCount(300, before, before - 20 * Minute) == 8 &&
+            ExchangeApi.TailCandleCount(60, before, before) == 4, "right-edge refresh catches up after an interruption");
+        var remainder = await api.CandlePage(market, 60, before, ExchangeApi.TailCandleCount(60, before, before - 40 * Minute), ct);
+        var openChart = new LiveCandles(60);
+        openChart.AddHistory(bars[..^40], before - 40 * Minute);
+        openChart.Add(new(market.Symbol, before - 5000, .92, Id: "live"));
+        openChart.AddHistory(remainder, before - 10_000);
+        var merged = openChart.Snapshot();
+        CheckContiguous(merged, bars[0].Time, 480, "an open chart catches up without duplicate candles");
+        Check(merged[^1].Close == .92 && merged[^1].QuoteVolume == 1234,
+            "page recovery preserves a later live close and a real exchange turnover");
+        Console.WriteLine("KuCoin BTW Futures caps, partial failures, real gaps and live reconnect recovery passed.");
+    }
+
+    private sealed class KuCoinCandles : HttpMessageHandler
+    {
+        public readonly List<int> Windows = [];
+        public long? Missing { get; set; }
+        public bool FailSecond { get; set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            var uri = request.RequestUri!;
+            var query = uri.Query.TrimStart('?').Split('&').Select(kv => kv.Split('=', 2)).ToDictionary(kv => kv[0], kv => kv[1]);
+            Check(uri.Host == "api-futures.kucoin.com" && query["symbol"] == "BTWUSDTM", "BTW exact futures history");
+            long from = long.Parse(query["from"]), to = long.Parse(query["to"]), period = int.Parse(query["granularity"]) * Minute;
+            int count = (int)((to + 1 - from) / period);
+            Windows.Add(count);
+            if (FailSecond && Windows.Count == 2) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+            // The live product returned the earliest 200 entries even when 240 were requested.
+            var bars = Enumerable.Range(0, Math.Min(count, 200)).Select(i => from + i * period).Where(time => time != Missing)
+                .Select(time => new object[] { time, .9, .906, .897, .901, 200, 1234 }).ToArray();
+            string json = JsonSerializer.Serialize(new { code = "200000", data = bars });
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(json) });
+        }
     }
 
     private static void CheckContiguous(Candle[] bars, long first, int count, string detail) =>

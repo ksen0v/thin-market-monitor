@@ -8,7 +8,8 @@ using System.Windows.Threading;
 
 namespace ThinMarketMonitor;
 
-internal sealed record SignalNotice(string Ticker, string Kind, string Details, string Speech, long Time, SignalModule? Module)
+internal sealed record SignalNotice(string Ticker, string Kind, string Details, string Speech, long Time, SignalModule? Module,
+    Market? AlertMarket = null)
 {
     private static readonly CultureInfo Russian = CultureInfo.GetCultureInfo("ru-RU");
     public string Title => $"{Ticker} · {Kind}";
@@ -40,6 +41,14 @@ internal sealed record SignalNotice(string Ticker, string Kind, string Details, 
             $"{level.Distance.ToString("F2", Russian)}% от середины спреда";
         return new(level.Market.Ticker, "Плотность стакана", details, "", level.Seen, null);
     }
+
+    public static SignalNotice From(PriceAlertHit hit)
+    {
+        var alert = hit.Alert;
+        string details = $"{hit.Market.Source.Label}\nЦена {PriceAlert.Format(alert.ReachedPrice!.Value)} {alert.Quote}" +
+            $" · уровень {PriceAlert.Format(alert.Price)}";
+        return new(hit.Market.Ticker, "Ценовое оповещение", details, "", alert.TriggeredAt!.Value, null, hit.Market);
+    }
 }
 
 internal sealed class SignalNotifications : IDisposable
@@ -65,13 +74,14 @@ internal sealed class SignalNotifications : IDisposable
     private bool disposed;
 
     public SignalNotifications(Settings settings, Dispatcher dispatcher, Action<SignalNotice?>? showPopup = null,
-        Action<SignalTone>? playSound = null, Action<string, CancellationToken>? speak = null, TimeProvider? clock = null)
+        Action<SignalTone>? playSound = null, Action<string, CancellationToken>? speak = null, TimeProvider? clock = null,
+        Action<Market>? openAlert = null)
     {
         this.settings = settings;
         this.clock = clock ?? TimeProvider.System;
         this.playSound = playSound ?? SignalSound.Play;
         this.speak = speak ?? WindowsSignalVoice.Speak;
-        popup = showPopup == null ? new SignalPopupWindow() : null;
+        popup = showPopup == null ? new SignalPopupWindow(openAlert, () => settings.ColibriEnabled) : null;
         this.showPopup = showPopup ?? popup!.Show;
         popupTimer = new DispatcherTimer(DispatcherPriority.Background, dispatcher) { Interval = TimeSpan.FromSeconds(5) };
         popupTimer.Tick += (_, _) => ShowNext();
@@ -98,6 +108,12 @@ internal sealed class SignalNotifications : IDisposable
     {
         if (disposed || !Fresh(level.Seen, Now) || !(settings.Densities.Popup || settings.Densities.Sound)) return;
         Publish(SignalNotice.From(level));
+    }
+
+    public void PublishPriceAlert(PriceAlertHit hit)
+    {
+        if (disposed || !Fresh(hit.Alert.TriggeredAt!.Value, Now)) return;
+        Publish(SignalNotice.From(hit));
     }
 
     private void Publish(SignalNotice notice)
@@ -135,20 +151,23 @@ internal sealed class SignalNotifications : IDisposable
 
     public void SettingsChanged()
     {
-        if (!settings.SignalPopup && !settings.Densities.Popup)
+        if (!settings.SignalPopup && !settings.Densities.Popup && !settings.PriceAlertPopup)
             visual.Clear();
         if (shown != null && !PopupEnabled(shown))
         {
             ShowNext();
         }
-        if (!settings.SignalSound && !settings.SignalVoice && !settings.Densities.Sound) audio.Clear();
+        if (!settings.SignalSound && !settings.SignalVoice && !settings.Densities.Sound && !settings.PriceAlertSound) audio.Clear();
         if (!settings.SignalVoice) activeVoice?.Cancel();
+        popup?.UpdateAction();
     }
 
     private long Now => clock.GetUtcNow().ToUnixTimeMilliseconds();
     private static bool Fresh(long time, long now) => time >= now - MaximumAge && time <= now + 3000;
-    private bool PopupEnabled(SignalNotice notice) => notice.Module == null ? settings.Densities.Popup : settings.SignalPopup;
-    private bool SoundEnabled(SignalNotice notice) => notice.Module == null ? settings.Densities.Sound : settings.SignalSound;
+    private bool PopupEnabled(SignalNotice notice) => notice.AlertMarket != null ? settings.PriceAlertPopup :
+        notice.Module == null ? settings.Densities.Popup : settings.SignalPopup;
+    private bool SoundEnabled(SignalNotice notice) => notice.AlertMarket != null ? settings.PriceAlertSound :
+        notice.Module == null ? settings.Densities.Sound : settings.SignalSound;
     private bool VoiceEnabled(SignalNotice notice) => notice.Module != null && settings.SignalVoice;
 
     private static void Enqueue(Queue<SignalNotice> queue, SignalNotice notice)
@@ -197,7 +216,7 @@ internal sealed class SignalNotifications : IDisposable
             if (!audio.TryDequeue(out var notice)) return;
             bool sound = SoundEnabled(notice), voice = VoiceEnabled(notice);
             if ((!sound && !voice) || !Fresh(notice.Time, Now)) continue;
-            SignalTone tone = notice.Module switch
+            SignalTone tone = notice.AlertMarket != null ? settings.PriceAlertTone : notice.Module switch
             {
                 SignalModule.Volume => settings.VolumeSignalTone,
                 SignalModule.Price => settings.PriceSignalTone,
@@ -290,20 +309,35 @@ internal static class WindowsSignalVoice
     }
 }
 
-internal sealed class SignalPopupWindow : IDisposable
+internal sealed class SignalPopupWindow(Action<Market>? openAlert = null, Func<bool>? canOpenAlert = null) : IDisposable
 {
     private const double Inset = 16;
     private Window? window;
     private TextBlock? ticker, kind, details;
     private Border? badge;
+    private Button? openTerminal;
+    private Market? alertMarket;
 
     public void Show(SignalNotice? notice)
     {
         if (notice == null)
         {
+            alertMarket = null;
+            UpdateAction();
             window?.Hide();
             return;
         }
+        UpdateNotice(notice);
+        var workArea = SystemParameters.WorkArea;
+        window!.Width = Math.Clamp(workArea.Width - Inset * 2, 1, 380);
+        window.Left = workArea.Right - window.Width - Inset;
+        window.Top = workArea.Top + Inset;
+        if (!window.IsVisible) window.Show();
+    }
+
+    private void UpdateNotice(SignalNotice notice)
+    {
+        alertMarket = notice.AlertMarket;
         window ??= CreateWindow();
         ticker!.Text = notice.Ticker;
         kind!.Text = notice.Kind;
@@ -311,14 +345,9 @@ internal sealed class SignalPopupWindow : IDisposable
         bool volume = notice.Module == SignalModule.Volume;
         kind.Foreground = Terminal.Brush(volume ? "Rising" : "Accent");
         badge!.Background = Terminal.Brush(volume ? "RequiredSurface" : "AccentSurface");
-        badge.Child = Terminal.Icon(notice.Module == null ? "density-nav" : volume ? "volume" : "activity");
+        badge.Child = Terminal.Icon(alertMarket != null ? "bell" : notice.Module == null ? "density-nav" : volume ? "volume" : "activity");
         System.Windows.Documents.TextElement.SetForeground(badge.Child, kind.Foreground);
-
-        var workArea = SystemParameters.WorkArea;
-        window.Width = Math.Clamp(workArea.Width - Inset * 2, 1, 380);
-        window.Left = workArea.Right - window.Width - Inset;
-        window.Top = workArea.Top + Inset;
-        if (!window.IsVisible) window.Show();
+        UpdateAction();
     }
 
     private Window CreateWindow()
@@ -348,6 +377,22 @@ internal sealed class SignalPopupWindow : IDisposable
         separator.Margin = new Thickness(0, 9, 0, 8);
         content.Children.Add(separator);
         content.Children.Add(details);
+        var terminalLabel = new StackPanel { Orientation = Orientation.Horizontal };
+        terminalLabel.Children.Add(Terminal.AssetLogo("colibri", 15));
+        terminalLabel.Children.Add(new TextBlock { Text = "Открыть в Colibri", Margin = new Thickness(6, 0, 0, 0) });
+        openTerminal = new Button
+        {
+            Content = terminalLabel, MinHeight = 26, Focusable = false, HorizontalAlignment = HorizontalAlignment.Left,
+            Margin = new Thickness(0, 9, 0, 0), Visibility = Visibility.Collapsed
+        };
+        System.Windows.Automation.AutomationProperties.SetName(openTerminal, "Открыть в Colibri");
+        openTerminal.Click += (_, _) =>
+        {
+            if (alertMarket is not { } market || openAlert == null || canOpenAlert?.Invoke() == false) return;
+            openAlert(market);
+            window?.Hide();
+        };
+        content.Children.Add(openTerminal);
         var view = new Window
         {
             Title = "Thin Market Monitor · Сигнал", WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize,
@@ -358,6 +403,13 @@ internal sealed class SignalPopupWindow : IDisposable
         };
         view.SourceInitialized += (_, _) => ((HwndSource)PresentationSource.FromVisual(view)).AddHook(NoActivation);
         return view;
+    }
+
+    internal void UpdateAction()
+    {
+        if (openTerminal == null) return;
+        openTerminal.Visibility = alertMarket != null && openAlert != null && canOpenAlert?.Invoke() != false
+            ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private static IntPtr NoActivation(IntPtr window, int message, IntPtr wParam, IntPtr lParam, ref bool handled)

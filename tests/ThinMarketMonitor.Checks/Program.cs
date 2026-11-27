@@ -193,6 +193,7 @@ Require(ExchangeApi.Underlying(Venue.Binance, "1000SHIB") == "SHIB" &&
 Require(new Market(Venue.Binance, "BTCUSD_PERP", "BTC", "USD", new("coinm", 100, QuantityUnit.Quote))
     .Turnover(2, 65000) == 200, "inverse quote notional");
 await CandleHistoryChecks.Run();
+PriceAlertChecks.Run();
 await HistoricalVolumeFilterChecks.Run();
 var secondsCandles = new LiveCandles(15);
 foreach (var trade in new Trade[] { new("AKE", 120000, 2), new("AKE", 122000, 4), new("AKE", 151000, 3) })

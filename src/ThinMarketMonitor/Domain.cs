@@ -174,6 +174,10 @@ internal sealed class Settings
     public bool SignalVoice { get; set; }
     public SignalTone PriceSignalTone { get; set; }
     public SignalTone VolumeSignalTone { get; set; }
+    public PriceAlert[] PriceAlerts { get; set; } = [];
+    public bool PriceAlertPopup { get; set; } = true;
+    public bool PriceAlertSound { get; set; }
+    public SignalTone PriceAlertTone { get; set; }
     public SignalSpeechOptions PriceSpeech { get; set; } = SignalSpeechOptions.Default;
     public SignalSpeechOptions VolumeSpeech { get; set; } = SignalSpeechOptions.Default;
     internal SignalSpeechOptions SpeechFor(SignalModule module) => module == SignalModule.Volume ? VolumeSpeech : PriceSpeech;
@@ -226,6 +230,9 @@ internal sealed class Settings
         settings.OverviewFuturesRules ??= [];
         if (!Enum.IsDefined(settings.PriceSignalTone)) settings.PriceSignalTone = SignalTone.System;
         if (!Enum.IsDefined(settings.VolumeSignalTone)) settings.VolumeSignalTone = SignalTone.System;
+        if (!Enum.IsDefined(settings.PriceAlertTone)) settings.PriceAlertTone = SignalTone.System;
+        settings.PriceAlerts = (settings.PriceAlerts ?? []).OfType<PriceAlert>().Where(alert => alert.Valid)
+            .DistinctBy(alert => alert.Id).ToArray();
         if (settings.SignalCooldownMinutes is < 0 or > MaxSignalCooldownMinutes) settings.SignalCooldownMinutes = 0;
         settings.PriceSpeech = SpeechOptions(settings.PriceSpeech);
         settings.VolumeSpeech = SpeechOptions(settings.VolumeSpeech);

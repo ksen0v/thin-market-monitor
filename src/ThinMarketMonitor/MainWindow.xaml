@@ -13,6 +13,10 @@
                     BorderBrush="{StaticResource Outline}" BorderThickness="0,0,0,1">
                 <DockPanel>
                     <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button x:Name="PriceAlertsButton" Click="OpenPriceAlerts" MinHeight="26" Margin="0,0,3,0"
+                                AutomationProperties.Name="Ценовые оповещения"/>
+                        <Button x:Name="PriceAlertColibriButton" Click="OpenLatestPriceAlert" Style="{StaticResource IconButton}"
+                                MinHeight="26" Margin="0,0,4,0" Visibility="Collapsed"/>
                         <Button x:Name="SignalListingsButton" Click="OpenSignalListings" MinHeight="26" Margin="0,0,6,0"
                                 AutomationProperties.Name="Листинги сигналов"/>
                         <Border x:Name="GridSwitch" Background="{StaticResource Plot}" BorderBrush="{StaticResource Outline}" BorderThickness="1">

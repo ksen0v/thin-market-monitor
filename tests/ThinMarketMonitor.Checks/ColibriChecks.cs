@@ -284,6 +284,11 @@ internal static class ColibriChecks
             await Until(() => server.CompletedWrites.Count == initial + 5);
             CheckWeexWrite(server, "HYUNDAIUSDT");
 
+            var latestAlert = await PriceAlertChecks.Ui(window, settings, hyundai);
+            latestAlert.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await Until(() => server.CompletedWrites.Count == initial + 6);
+            CheckWeexWrite(server, "HYUNDAIUSDT");
+
             ((Button)window.FindName("SettingsButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             window.UpdateLayout();
             var options = (SettingsPanel)typeof(MainWindow).GetField("settingsPanel", flags)!.GetValue(window)!;
@@ -293,7 +298,7 @@ internal static class ColibriChecks
             settings.ColibriEnabled = false;
             typeof(MainWindow).GetMethod("UpdateIntegration", flags)!.Invoke(window, null);
             Ensure(open.Visibility == Visibility.Collapsed && sync.Visibility == Visibility.Collapsed &&
-                densityOpen.Visibility == Visibility.Collapsed, "disabling integration updates all terminal controls");
+                latestAlert.Visibility == Visibility.Collapsed && !densityOpen.IsVisible, "disabling integration updates all terminal controls");
             window.Close();
             await SpreadChecks.Ui();
             await OverviewSpreadChecks.Run();

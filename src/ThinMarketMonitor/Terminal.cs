@@ -46,6 +46,8 @@ internal static class Terminal
                 "activity" => "M2 12 H6 L9 4 L15 20 L18 12 H22",
                 "volume" => "M4 20 H21 M7 17 V11 M12 17 V5 M17 17 V8",
                 "bell" => "M4 17 H20 L18 14 V9 A6 6 0 0 0 6 9 V14 Z M10 21 H14",
+                "pause" => "M9 5 V19 M15 5 V19",
+                "play" => "M8 5 L19 12 L8 19 Z",
                 "filter" => "M3 4 H21 L14 12 V20 L10 18 V12 Z",
                 "info" => "M12 2 A10 10 0 1 0 12 22 A10 10 0 1 0 12 2 M12 11 V16 M12 8 H12.1",
                 "chevron" => "M7 10 L12 15 L17 10",
