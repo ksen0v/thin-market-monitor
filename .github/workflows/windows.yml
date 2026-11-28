@@ -19,6 +19,9 @@ jobs:
       - uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
         with:
           dotnet-version: '10.0.x'
+      - name: Check release notes and publication order
+        shell: pwsh
+        run: ./.github/scripts/Test-PublishRelease.ps1
       - name: Check filtering, chart placement, signals and updates
         run: dotnet run --project tests/ThinMarketMonitor.Checks -c Release
       - name: Publish standalone Windows x64 EXE
@@ -91,12 +94,19 @@ jobs:
   release:
     if: github.ref_type == 'tag'
     needs: build
+    concurrency:
+      group: thin-market-monitor-publish-release
+      queue: max
     permissions:
       contents: write
       actions: read
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Fetch verified build and publish release
         shell: pwsh
         env:
@@ -104,5 +114,4 @@ jobs:
         run: |
           gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name ThinMarketMonitor-win-x64 --dir release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          gh release create $env:GITHUB_REF_NAME ./release/ThinMarketMonitor-Setup-win-x64.exe ./release/ThinMarketMonitor-win-x64.exe ./release/SHA256SUMS.txt --repo $env:GITHUB_REPOSITORY --verify-tag --title "Thin Market Monitor $env:GITHUB_REF_NAME" --generate-notes
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./.github/scripts/Publish-Release.ps1 -Repository $env:GITHUB_REPOSITORY -Tag $env:GITHUB_REF_NAME -AssetsDirectory release
