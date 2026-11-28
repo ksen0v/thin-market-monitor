@@ -17,7 +17,7 @@ internal sealed partial class CandlePlot
     private double? priceAlertPreview;
     private List<PriceLevelBadge>? priceLevelBadges;
 
-    private readonly record struct PriceLevel(double Price, double Y, bool Selected, Guid? Alert = null);
+    private readonly record struct PriceLevel(double Price, double Y, bool Selected, bool IsAlert = false);
     private readonly record struct PriceLevelBadge(PriceLevel Level, Rect Bounds);
 
     internal event Action<Guid, double>? PriceAlertMoved;
@@ -37,27 +37,16 @@ internal sealed partial class CandlePlot
     private PriceAlert? SelectedAlert() => selectedPriceAlert is { } id
         ? Array.Find(priceAlertLevels, alert => alert.Id == id) : null;
 
-    private bool SelectPriceAlert(Point at, View view, bool axis = false)
+    private bool SelectPriceAlert(Point at, View view)
     {
-        PriceAlert? match;
-        if (axis)
+        PriceAlert? match = null;
+        double nearest = 5;
+        foreach (var alert in priceAlertLevels)
         {
-            if (drawingTool.HasValue || priceLevelBadges == null) return false;
-            var hit = priceLevelBadges.Find(badge => badge.Level.Alert.HasValue && badge.Bounds.Contains(at));
-            if (hit.Level.Alert is not { } id) return false;
-            match = Array.Find(priceAlertLevels, alert => alert.Id == id);
-        }
-        else
-        {
-            match = null;
-            double nearest = 5;
-            foreach (var alert in priceAlertLevels)
-            {
-                double y = view.Y(alert.Price), distance = Math.Abs(at.Y - y);
-                if (y < view.Plot.Top || y > view.Plot.Bottom || distance > nearest) continue;
-                nearest = distance;
-                match = alert;
-            }
+            double y = view.Y(alert.Price), distance = Math.Abs(at.Y - y);
+            if (y < view.Plot.Top || y > view.Plot.Bottom || distance > nearest) continue;
+            nearest = distance;
+            match = alert;
         }
         selectedPriceAlert = match?.Id;
         if (match == null) return false;
@@ -111,7 +100,7 @@ internal sealed partial class CandlePlot
             bool selected = alert.Id == selectedPriceAlert;
             double price = selected ? priceAlertPreview ?? alert.Price : alert.Price;
             double y = view.Y(price);
-            if (y >= view.Plot.Top && y <= view.Plot.Bottom) yield return new(price, y, selected, alert.Id);
+            if (y >= view.Plot.Top && y <= view.Plot.Bottom) yield return new(price, y, selected, IsAlert: true);
         }
     }
 
@@ -131,7 +120,11 @@ internal sealed partial class CandlePlot
         var plot = view.Plot;
         if (plot.Height < height + 2 * gap) return;
 
-        var levels = VisiblePriceAlerts(view).ToList();
+        double axisWidth = ActualWidth - plot.Right;
+        var alerts = VisiblePriceAlerts(view).OrderBy(level => level.Y)
+            .Select(level => new PriceLevelBadge(level, new Rect(plot.Right, level.Y - height / 2, axisWidth - 2, height)))
+            .ToArray();
+        var levels = new List<PriceLevel>();
         foreach (var drawing in drawings)
         {
             if (!drawing.Horizontal) continue;
@@ -139,31 +132,33 @@ internal sealed partial class CandlePlot
             if (VisibleLine(placed, view) is { } line)
                 levels.Add(new(placed.Start.Price, line.End.Y, drawing.Id == selectedDrawing));
         }
-        if (levels.Count == 0) return;
+        if (levels.Count == 0 && alerts.Length == 0) return;
 
-        var occupied = new List<Rect>();
+        var occupied = alerts.Select(badge => badge.Bounds).ToList();
         priceLevelBadges = [];
         foreach (var level in levels.OrderByDescending(level => level.Selected).ThenBy(level => level.Y))
         {
             var top = NearestBadgeTop(level.Y - height / 2, plot, height, gap, occupied);
             if (!top.HasValue) break;
-            var bounds = new Rect(plot.Right + 5, top.Value, ActualWidth - plot.Right - 7, height);
+            var bounds = new Rect(plot.Right + 5, top.Value, axisWidth - 7, height);
             priceLevelBadges.Add(new(level, bounds));
             int index = occupied.FindIndex(other => other.Top > bounds.Top);
             occupied.Insert(index < 0 ? occupied.Count : index, bounds);
         }
+        priceLevelBadges.AddRange(alerts.OrderBy(badge => badge.Level.Selected));
     }
 
     private void DrawPriceLevelBadges(DrawingContext dc, View view)
     {
         if (priceLevelBadges == null) return;
+        var plot = view.Plot;
+        dc.PushClip(new RectangleGeometry(new Rect(plot.Right, plot.Top, ActualWidth - plot.Right, plot.Height)));
         foreach (var (level, bounds) in priceLevelBadges)
         {
-            bool alert = level.Alert.HasValue;
-            var color = level.Selected ? levelText : accent;
             double center = bounds.Top + bounds.Height / 2;
-            dc.DrawLine(new Pen(color, 1), new Point(view.Plot.Right, level.Y), new Point(bounds.Left, center));
-            dc.DrawRoundedRectangle(level.Selected ? accent : alert ? warningBadge : drawingBadge, null, bounds, 3, 3);
+            if (!level.IsAlert) dc.DrawLine(new Pen(level.Selected ? levelText : accent, 1),
+                new Point(plot.Right, level.Y), new Point(bounds.Left, center));
+            dc.DrawRoundedRectangle(level.Selected ? accent : level.IsAlert ? warningBadge : drawingBadge, null, bounds, 3, 3);
             var foreground = level.Selected ? onAccent : levelText;
             var label = Text(PriceAlert.Format(level.Price), foreground);
             double width = bounds.Width - 8;
@@ -177,5 +172,6 @@ internal sealed partial class CandlePlot
             dc.DrawText(label, new Point(bounds.Left + 4, center - label.Height / 2));
             dc.Pop();
         }
+        dc.Pop();
     }
 }

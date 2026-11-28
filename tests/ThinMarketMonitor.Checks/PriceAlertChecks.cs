@@ -85,9 +85,14 @@ internal static class PriceAlertChecks
         await Place(signal, Spot, .27);
         Navigate("OverviewButton");
         var reached = await Place(overview, futures, .38);
+        CheckBadgeLayout(overview.Plot, reached);
+        CheckAxisDrag(overview.Plot, reached);
         reached = MoveLevel(overview.Plot, reached);
         Invoke(window, "EnterFullscreen", overview, false);
         var delete = await Place(overview, futures, .59);
+        CheckBadgeLayout(overview.Plot, delete);
+        CheckAxisDrag(overview.Plot, delete);
+        delete = MoveLevel(overview.Plot, delete);
         SelectLine(overview.Plot, delete);
         Invoke(overview.Plot, "ReleasePriceAlert");
         var key = new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(overview.Plot)!, Environment.TickCount, Key.Delete)
@@ -118,7 +123,7 @@ internal static class PriceAlertChecks
         Require(settings.PriceAlerts.All(alert => alert.Id != spot.Id), "settings can remove a saved alert");
         Invoke(window, "CloseDialog");
         await Channels(futures, reached with { Enabled = false, TriggeredAt = now, ReachedPrice = reached.Price });
-        Console.WriteLine("Price alert buttons, price badges, drag, Delete, background crossing and independent channels passed.");
+        Console.WriteLine("Price alert buttons, aligned badges, scale zoom and level drag in Overview and fullscreen, Delete, background crossing and independent channels passed.");
         return open;
 
         void Navigate(string button) => Click((Button)window.FindName(button));
@@ -166,9 +171,8 @@ internal static class PriceAlertChecks
 
         PriceAlert MoveLevel(CandlePlot plot, PriceAlert initial)
         {
-            var (_, bounds) = SelectLine(plot, initial);
-            var view = Invoke(plot, "CurrentView")!;
-            Invoke(plot, "MovePriceAlert", view, bounds.Height * .13);
+            var (from, bounds) = SelectLine(plot, initial);
+            MovePointer(plot, "PriceAlert", from, bounds.Height * .13);
             var preview = Field<double?>(plot, "priceAlertPreview");
             plot.InvalidateVisual();
             window.UpdateLayout();
@@ -185,14 +189,87 @@ internal static class PriceAlertChecks
             return saved;
         }
 
+        void CheckAxisDrag(CandlePlot plot, PriceAlert alert)
+        {
+            var (_, bounds, y) = LevelPosition(plot, alert.Price);
+            double span = PriceSpan(plot);
+            var selected = Field<Guid?>(plot, "selectedPriceAlert");
+            foreach (double x in new[] { bounds.Right + 10, bounds.Right })
+            {
+                var start = new Point(x, y);
+                Require(Invoke(plot, "BeginMouseGesture", start, MouseButton.Left, 1) is true &&
+                    Field<Guid?>(plot, "selectedPriceAlert") == selected,
+                    "pressing the price scale over a badge or at the plot boundary leaves the selected alert unchanged");
+                MovePointer(plot, "Price", start, bounds.Height * .15);
+                Require(PriceSpan(plot) > span && Field<double?>(plot, "priceAlertPreview") == null &&
+                    Field<Guid?>(plot, "selectedPriceAlert") == selected && settings.PriceAlerts.Contains(alert),
+                    "dragging the price scale zooms and preserves the price alert");
+                plot.CancelGesture();
+                Require(Invoke(plot, "BeginMouseGesture", start, MouseButton.Left, 2) is true && Math.Abs(PriceSpan(plot) - span) < 1e-8,
+                    "double-clicking the scale over a badge resets the zoom");
+            }
+        }
+
+        static void CheckBadgeLayout(CandlePlot plot, PriceAlert alert)
+        {
+            var (view, bounds, y) = LevelPosition(plot, alert.Price);
+            double near = (double)view.GetType().GetMethod("Price")!.Invoke(view, [y + 3])!;
+            var original = Field<PriceAlert[]>(plot, "priceAlertLevels");
+            plot.SetPriceAlertLevels([alert, alert with { Id = Guid.NewGuid(), Price = near }]);
+            plot.UpdateLayout();
+            var drawings = Descendants(VisualTreeHelper.GetDrawing(plot)).OfType<GeometryDrawing>().ToArray();
+            var badges = drawings.Where(item => item.Brush == Terminal.Brush("AccentSurface"))
+                .Select(item => item.Geometry).OfType<RectangleGeometry>().Select(item => item.Rect).ToArray();
+            var strokes = drawings.Where(item => item.Geometry is LineGeometry).ToArray();
+            double[] centers = [y, y + 3];
+            Require(badges.Length == 2 && badges[0].IntersectsWith(badges[1]) && centers.All(center =>
+                badges.Any(badge => badge.Left == bounds.Right && Math.Abs(badge.Top + badge.Height / 2 - center) < 1e-8)),
+                "overlapping price alert badges stay centered at the exact price levels");
+            Require(centers.All(center => strokes.Any(item => item.Pen is { DashStyle.Dashes.Count: > 0 } &&
+                item.Geometry is LineGeometry line && line.StartPoint.X == bounds.Left && line.EndPoint.X == bounds.Right &&
+                Math.Abs(line.StartPoint.Y - center) < 1e-8 && line.StartPoint.Y == line.EndPoint.Y)) &&
+                strokes.All(item => item.Geometry is LineGeometry line &&
+                    (line.StartPoint.X != bounds.Right || line.EndPoint.X <= bounds.Right)),
+                "alert dashes reach their badges horizontally without connector lines");
+            plot.SetPriceAlertLevels(original);
+        }
+
         static (Point Point, Rect Bounds) SelectLine(CandlePlot plot, PriceAlert alert)
+        {
+            var (_, bounds, y) = LevelPosition(plot, alert.Price);
+            var point = new Point(bounds.Left + bounds.Width * .4, y);
+            Require(Invoke(plot, "BeginMouseGesture", point, MouseButton.Left, 1) is true &&
+                Field<Guid?>(plot, "selectedPriceAlert") == alert.Id, "the dashed line inside the plot is selectable");
+            return (point, bounds);
+        }
+
+        static void MovePointer(CandlePlot plot, string operation, Point from, double dy)
+        {
+            var drag = Field<object?>(plot, "drag");
+            if (drag == null)
+            {
+                // Synthetic presses depend on OS focus for capture. Replay movement against the same viewport.
+                var mode = Enum.Parse(typeof(CandlePlot).GetNestedType("Operation", BindingFlags.NonPublic)!, operation);
+                drag = typeof(CandlePlot).GetNestedType("Drag", BindingFlags.NonPublic)!.GetConstructors().Single()
+                    .Invoke([mode, from, Invoke(plot, "CurrentView"), Field<double>(plot, "visible"), MouseButton.Left, null]);
+            }
+            Require(drag.GetType().GetProperty("Mode")!.GetValue(drag)!.ToString() == operation,
+                $"the pointer starts a {operation} gesture");
+            Invoke(plot, "MoveGesture", drag, new Point(from.X, from.Y + dy));
+        }
+
+        static (object View, Rect Bounds, double Y) LevelPosition(CandlePlot plot, double price)
         {
             var view = Invoke(plot, "CurrentView")!;
             var bounds = (Rect)view.GetType().GetProperty("Plot")!.GetValue(view)!;
-            double y = (double)view.GetType().GetMethod("Y")!.Invoke(view, [alert.Price])!;
-            var point = new Point(bounds.Left + bounds.Width * .4, y);
-            Require(Invoke(plot, "SelectPriceAlert", point, view, false) is true, "the dashed line is selectable");
-            return (point, bounds);
+            double y = (double)view.GetType().GetMethod("Y")!.Invoke(view, [price])!;
+            return (view, bounds, y);
+        }
+
+        static double PriceSpan(CandlePlot plot)
+        {
+            var view = Invoke(plot, "CurrentView")!;
+            return (double)view.GetType().GetProperty("Span")!.GetValue(view)!;
         }
 
         static IEnumerable<Drawing> Descendants(Drawing drawing) => drawing is DrawingGroup group

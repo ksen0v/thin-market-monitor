@@ -575,6 +575,7 @@ internal sealed partial class CandlePlot : FrameworkElement
         public double Time(double x) => Start + (x - Plot.Left) / Plot.Width * (End - Start);
         public double X(double time) => Plot.Left + (time - Start) / (End - Start) * Plot.Width;
         public double Y(double price) => Plot.Top + (High - price) / Span * Plot.Height;
+        public bool ContainsPricePlot(Point point) => point.X < Plot.Right && Plot.Contains(point);
         public Point Bound(Point point) => new(Math.Clamp(point.X, Plot.Left, Plot.Right), Math.Clamp(point.Y, Plot.Top, Plot.Bottom));
     }
 
@@ -781,23 +782,22 @@ internal sealed partial class CandlePlot : FrameworkElement
     protected override void OnMouseDown(MouseButtonEventArgs e)
     {
         base.OnMouseDown(e);
-        if (drag != null || CurrentView() is not { } view) return;
-        Point at = e.GetPosition(this);
-        bool inPlot = view.Plot.Contains(at);
-        if (e.ChangedButton == MouseButton.Left && (inPlot ? DrawingClick(at, view) : SelectPriceAlert(at, view, axis: true)))
+        if (BeginMouseGesture(e.GetPosition(this), e.ChangedButton, e.ClickCount)) e.Handled = true;
+    }
+
+    private bool BeginMouseGesture(Point at, MouseButton button, int clickCount)
+    {
+        if (drag != null || CurrentView() is not { } view) return false;
+        bool inPlot = view.ContainsPricePlot(at);
+        if (button == MouseButton.Left && inPlot && DrawingClick(at, view))
         {
             if (IsMouseCaptured) SetCrosshairPosition(null);
             Focus();
-            e.Handled = true;
-            return;
+            return true;
         }
-        if (gesture().Mouse == e.ChangedButton && BeginRulerAt(at, view, e.ChangedButton))
-        {
-            e.Handled = true;
-            return;
-        }
-        if (e.ChangedButton != MouseButton.Left) return;
-        if (StartInterestAxisDrag(at, view, reset: e.ClickCount == 2)) { e.Handled = true; return; }
+        if (gesture().Mouse == button && BeginRulerAt(at, view, button)) return true;
+        if (button != MouseButton.Left) return false;
+        if (StartInterestAxisDrag(at, view, reset: clickCount == 2)) return true;
         if (inPlot) Start(Operation.Pan, at, view, MouseButton.Left);
         else if (InterestPaneAt(at, view, axisOnly: false) is { } pane)
         {
@@ -805,18 +805,18 @@ internal sealed partial class CandlePlot : FrameworkElement
             Start(Operation.InterestPan, at, interest == null ? view with { Plot = pane.Graph } : InterestView(view, pane, interest.Scale),
                 MouseButton.Left, interest);
         }
-        else if (at.Y >= view.Plot.Bottom && at.X <= view.Plot.Right) Start(Operation.Time, at, view, MouseButton.Left);
         else if (at.X >= view.Plot.Right && at.Y >= view.Plot.Top && at.Y <= view.Plot.Bottom)
         {
-            if (e.ClickCount == 2)
+            if (clickCount == 2)
             {
                 fixedPrice = null;
                 InvalidateVisual();
             }
             else Start(Operation.Price, at, view, MouseButton.Left);
         }
-        else return;
-        e.Handled = true;
+        else if (at.Y >= view.Plot.Bottom && at.X <= view.Plot.Right) Start(Operation.Time, at, view, MouseButton.Left);
+        else return false;
+        return true;
     }
 
     public bool BeginKeyboardRuler()
@@ -830,7 +830,7 @@ internal sealed partial class CandlePlot : FrameworkElement
 
     private (View View, InterestAxis? Interest)? RulerViewport(Point at, View view)
     {
-        if (view.Plot.Contains(at)) return (view, null);
+        if (view.ContainsPricePlot(at)) return (view, null);
         if (InterestPaneAt(at, view, axisOnly: false) is not { } pane ||
             GetInterestAxis(pane, view) is not { } interest) return null;
         return (InterestView(view, pane, interest.Scale), interest);
